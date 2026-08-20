@@ -1,6 +1,7 @@
 #!/bin/bash
 jsonFile=${1}
 source /home/ubuntu/bash/variables.sh
+if [ -n "${google_webhook}" ] ; then curl -s -X POST -H 'Content-Type: application/json' --data '{"text":"'$(date "+%Y-%m-%d,%H:%M:%S")', nested-'${basename_sddc}': json_builder.sh started"}' "${google_webhook}" >/dev/null 2>&1; fi
 #
 #
 #
@@ -24,7 +25,6 @@ do
     count=$((count+1))
     if [[ "${count}" -eq 60 ]]; then
       echo "ERROR: Unable to connect to ESXi host at https://${ip_esxi}"
-      if [ -z "${slack_webhook}" ] ; then echo "ignoring slack update" ; else curl -X POST -H 'Content-type: application/json' --data '{"text":"'$(date "+%Y-%m-%d,%H:%M:%S")', nested-${basename_sddc}: nested ESXi '${ip_esxi}' unable to reach"}' ${slack_webhook} >/dev/null 2>&1; fi
       exit
     fi
   done
@@ -100,12 +100,6 @@ sudo chown root /var/www/html/index.html
 sudo chgrp root /var/www/html/index.html
 sudo chown root /var/www/html/socks.html
 sudo chgrp root /var/www/html/socks.html
-sudo mv /home/ubuntu/vcf-automation/blueprint.yaml /var/www/html/blueprint.yaml
-sudo chown root /var/www/html/blueprint.yaml
-sudo chgrp root /var/www/html/blueprint.yaml
-sudo mv /home/ubuntu/vcf-automation/blueprint-cert-manager.yaml /var/www/html/blueprint-cert-manager.yaml
-sudo chown root /var/www/html/blueprint-cert-manager.yaml
-sudo chgrp root /var/www/html/blueprint-cert-manager.yaml
 sudo cat /var/lib/bind/db.${domain} | grep avi | sudo tee /var/www/html/avi_raw.html
 while read -r line; do echo \"\$line<br>\" ; done < /var/www/html/avi_raw.html | sudo tee /var/www/html/avi.html
 sudo cat /var/lib/bind/db.${domain} | grep wld | sudo tee /var/www/html/esxi_raw.html
@@ -113,4 +107,4 @@ while read -r line; do echo \"$line<br>\" ; done < /var/www/html/esxi_raw.html |
 sudo cp /home/ubuntu/json/${basename_sddc}.json /var/www/html/${basename_sddc}.json
 sudo chown root /var/www/html/${basename_sddc}.json
 sudo chgrp root /var/www/html/${basename_sddc}.json
-if [ -z "${slack_webhook}" ] ; then echo "ignoring slack update" ; else curl -X POST -H 'Content-type: application/json' --data '{"text":"'$(date "+%Y-%m-%d,%H:%M:%S")', nested-'${basename_sddc}': Details for cloud deployment available at http://'${ip_gw}'/"}' ${slack_webhook} >/dev/null 2>&1; fi
+if [ -n "${google_webhook}" ] ; then curl -s -X POST -H 'Content-Type: application/json' --data '{"text":"'$(date "+%Y-%m-%d,%H:%M:%S")', nested-'${basename_sddc}': json_builder.sh finished - details for cloud deployment available at http://'${ip_gw}'/"}' "${google_webhook}" >/dev/null 2>&1; fi
