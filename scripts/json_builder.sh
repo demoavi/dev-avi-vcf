@@ -10,14 +10,31 @@ if [ -n "${google_webhook}" ] ; then curl -s -X POST -H 'Content-Type: applicati
 #
 echo '------------------------------------------------------------'
 echo "Cloud Builder JSON file creation"
+
+# VCD session for the power-cycle step below - govc has no session that can
+# power-cycle a VCD-managed VM (GOVC_URL against the ESXi guest itself only
+# reaches its own management API, not the layer that controls its power
+# state), so this talks to VCD's REST API directly instead. Logged in once
+# and reused for all hosts.
+vcd_host=$(jq -r .vcd.host $jsonFile)
+vcd_user=$(jq -r .vcd.user $jsonFile)
+vcd_password=$(jq -r .vcd.password $jsonFile)
+vcd_org=$(jq -r .vcd.org $jsonFile)
+vcd_api_version=$(jq -r .vcd.apiVersion $jsonFile)
+vcd_auth_token=$(curl -sk -X POST "https://${vcd_host}/cloudapi/1.0.0/sessions" \
+  -H "Authorization: Basic $(printf '%s' "${vcd_user}@${vcd_org}:${vcd_password}" | base64 -w0)" \
+  -H "Accept: application/json;version=${vcd_api_version}" \
+  -D - -o /dev/null | tr -d '\r' | awk -F': ' 'tolower($1) == "x-vmware-vcloud-access-token" {print $2}')
+
 hostSpecs="[]"
 for esxi in $(seq 1 $(echo ${ips_esxi} | jq -c -r '. | length'))
 do
-  if [[ $(((${esxi}-1)/4+1)) -eq 1 ]] ; then
-    name_esxi="${basename_sddc}-mgmt-esxi0${esxi}"
-  fi
-  if [[ $(((${esxi}-1)/4+1)) -gt 1 ]] ; then
-    name_esxi="${basename_sddc}-wld$(((${esxi}-1)/4))-esxi0$((${esxi}-(((${esxi}-1)/4))*4))"
+  group=$(( (esxi-1)/4 ))
+  if [[ ${group} -eq 0 ]] ; then
+    name_esxi="${basename_sddc}-mgmt-esx0${esxi}"
+  else
+    pos_in_group=$(( esxi - group*4 ))
+    name_esxi="${basename_sddc}-wld0${group}-esx0${pos_in_group}"
   fi
   ip_esxi="$(echo ${ips_esxi} | jq -r .[$(expr ${esxi} - 1)])"
   count=1
@@ -35,6 +52,51 @@ do
   esxi_sslThumbprint=$(echo | openssl s_client -servername ${ip_esxi} -connect ${ip_esxi}:443 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | awk -F'Fingerprint=' '{print $2}')
   hostSpec='{"hostname":"'${name_esxi}'","credentials":{"username":"root","password":"'$(jq -c -r .generic_password $jsonFile)'"},"sslThumbprint":"'${esxi_sslThumbprint}'"}'
   hostSpecs=$(echo ${hostSpecs} | jq '. += ['${hostSpec}']')
+
+  #
+  # Power-cycle this host via VCD now that we know it's genuinely up
+  # (thumbprint just captured above) - a clean reboot after the kickstart
+  # install, same as the original vCenter-based flow's govc vm.power
+  # cycle, just against VCD instead of govc.
+  #
+  vm_href=$(curl -sk "https://${vcd_host}/api/query?type=vm&format=records&pageSize=128" \
+    -H "Authorization: Bearer ${vcd_auth_token}" \
+    -H "Accept: application/*+json;version=${vcd_api_version}" \
+    | jq -r --arg name "${name_esxi}" '.record[] | select(.name == $name) | .href')
+  curl -sk -X POST "${vm_href}/power/action/powerOff" \
+    -H "Authorization: Bearer ${vcd_auth_token}" \
+    -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
+  sleep 30
+  curl -sk -X POST "${vm_href}/power/action/powerOn" \
+    -H "Authorization: Bearer ${vcd_auth_token}" \
+    -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
+
+  count=1
+  until $(curl --output /dev/null --silent --head -k https://${ip_esxi})
+  do
+    echo "Attempt ${count}: Waiting for ESXi host at https://${ip_esxi} to be reachable after power cycle..."
+    sleep 10
+    count=$((count+1))
+    if [[ "${count}" -eq 60 ]]; then
+      echo "ERROR: Unable to connect to ESXi host at https://${ip_esxi} after power cycle"
+      exit
+    fi
+  done
+  sleep 20
+
+  #
+  # ESXi customization (merged from esxi_customization.sh.template) - govc
+  # here talks directly to the ESXi host's own management API, not VCD.
+  #
+  export GOVC_URL="${ip_esxi}"
+  export GOVC_USERNAME=root
+  export GOVC_PASSWORD=$(jq -c -r .generic_password $jsonFile)
+  export GOVC_INSECURE=true
+  govc host.storage.info -json -rescan | jq -c -r '.storageDeviceInfo.scsiLun[] | select( .deviceType == "disk" ) | .deviceName' | while read -r disk_device
+  do
+    govc host.storage.mark -ssd "${disk_device}" > /dev/null
+  done
+  if [ -n "${google_webhook}" ] ; then curl -s -X POST -H 'Content-Type: application/json' --data '{"text":"'$(date "+%Y-%m-%d,%H:%M:%S")', nested-'${basename_sddc}': nested ESXi '${name_esxi}' disks marked as SSD"}' "${google_webhook}" >/dev/null 2>&1; fi
 done
 #
 #
