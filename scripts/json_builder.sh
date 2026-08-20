@@ -1,5 +1,8 @@
 #!/bin/bash
 jsonFile=${1}
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+templates_dir="${script_dir}/../templates"
+mkdir -p /home/ubuntu/html /home/ubuntu/json
 source /home/ubuntu/bash/variables.sh
 if [ -n "${google_webhook}" ] ; then curl -s -X POST -H 'Content-Type: application/json' --data '{"text":"'$(date "+%Y-%m-%d,%H:%M:%S")', nested-'${basename_sddc}': json_builder.sh started"}' "${google_webhook}" >/dev/null 2>&1; fi
 #
@@ -45,7 +48,7 @@ done
 #
 #
 #
-json_template_file="/home/ubuntu/templates/sddc_vcf_installer_trunk_9.1.json.template"
+json_template_file="${templates_dir}/sddc_vcf_installer_trunk_9.1.json.template"
 sed -e "s/\${basename_sddc}/${basename_sddc}/" \
     -e "s/\${SDDC_MANAGER_PASSWORD}/$(jq -c -r .generic_password $jsonFile)/" \
     -e "s/\${VCFA_PASSWORD}/$(jq -c -r .generic_password $jsonFile)/" \
@@ -88,12 +91,12 @@ sed -e "s/\${basename_sddc}/${basename_sddc}/" \
 #
 #
 #
-template_html_file="/home/ubuntu/templates/index-vcfi.html.template"
+template_html_file="${templates_dir}/index-vcfi.html.template"
 sed -e "s/\${basename_sddc}/${basename_sddc}/" \
     -e "s/\${name_vcf_installer}/${name_vcf_installer}/" \
     -e "s/\${basename_avi_ctrl}/${basename_avi_ctrl}/" \
     -e "s/\${domain}/${domain}/" ${template_html_file} | tee /home/ubuntu/html/index.html > /dev/null
-sed -e "s@\${ip_gw}@${ip_gw}@" "/home/ubuntu/templates/socks.html.template" | tee /home/ubuntu/html/socks.html > /dev/null
+sed -e "s@\${ip_gw}@${ip_gw}@" "${templates_dir}/socks.html.template" | tee /home/ubuntu/html/socks.html > /dev/null
 sudo mv /home/ubuntu/html/index.html /var/www/html/index.html
 sudo mv /home/ubuntu/html/socks.html /var/www/html/socks.html
 sudo chown root /var/www/html/index.html
