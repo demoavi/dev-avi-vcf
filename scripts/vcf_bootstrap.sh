@@ -43,6 +43,34 @@ vcd_auth_token=$(curl -sk -X POST "https://${vcd_host}/cloudapi/1.0.0/sessions" 
   -H "Accept: application/json;version=${vcd_api_version}" \
   -D - -o /dev/null | tr -d '\r' | awk -F': ' 'tolower($1) == "x-vmware-vcloud-access-token" {print $2}')
 
+# This org has far more VMs (other users' labs) than fit in one page - a
+# single unpaginated page silently drops results past its page size and
+# would make an existing VM look "not found" (the exact class of bug
+# vcd_client.py's own query_records() was already hardened against).
+vcd_find_vm_href() {
+  local target_name="$1"
+  local page=1
+  local page_size=128
+  while true; do
+    local resp=$(curl -sk "https://${vcd_host}/api/query?type=vm&format=records&page=${page}&pageSize=${page_size}" \
+      -H "Authorization: Bearer ${vcd_auth_token}" \
+      -H "Accept: application/*+json;version=${vcd_api_version}")
+    local href=$(echo "${resp}" | jq -r --arg name "${target_name}" '[.record[] | select(.name == $name) | .href][0] // empty')
+    if [ -n "${href}" ]; then
+      echo "${href}"
+      return 0
+    fi
+    # resultTotal isn't reliably present in this API's response, so don't
+    # depend on it - a short page (fewer records than requested) is the
+    # actual "last page" signal.
+    local record_count=$(echo "${resp}" | jq -r '.record | length')
+    if [ "${record_count}" -lt "${page_size}" ]; then
+      return 1
+    fi
+    ((page++))
+  done
+}
+
 hostSpecs="[]"
 for esxi in $(seq 1 $(echo ${ips_esxi} | jq -c -r '. | length'))
 do
@@ -76,10 +104,7 @@ do
   # install, same as the original vCenter-based flow's govc vm.power
   # cycle, just against VCD instead of govc.
   #
-  vm_href=$(curl -sk "https://${vcd_host}/api/query?type=vm&format=records&pageSize=128" \
-    -H "Authorization: Bearer ${vcd_auth_token}" \
-    -H "Accept: application/*+json;version=${vcd_api_version}" \
-    | jq -r --arg name "${name_esxi}" '.record[] | select(.name == $name) | .href')
+  vm_href=$(vcd_find_vm_href "${name_esxi}")
   curl -sk -X POST "${vm_href}/power/action/powerOff" \
     -H "Authorization: Bearer ${vcd_auth_token}" \
     -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
@@ -246,34 +271,44 @@ create_api_session "admin@local" "$(jq -c -r .generic_password $jsonFile)" "${ip
 sddc_manager_api 3 2 GET '' "${ip_vcf_installer}" v1/system/settings/depot/machine-details $(jq -c -r .accessToken /tmp/token_vcfi.json)
 vcfi_machineId=$(echo ${response_body} | jq -c -r '.machineId')
 if [ -z "${vcfi_machineId}" ] || [ "${vcfi_machineId}" == "null" ]; then
-  log_notify "VCF-I: vcfi_machineId is undefined or null"
+  log_notify "VCF-I: vcfi_machineId is undefined or null - response: ${response_body}"
   exit 100
 fi
-sleep 3
-vcfi_access_token=$(curl -s --request POST \
-      --url ${vcf_installer_bearer_url} \
-      --header 'content-type: application/x-www-form-urlencoded' \
-      --data client_id=${vcf_installer_client_id} \
-      --data client_secret=${vcf_installer_client_secret} \
-      --data grant_type=client_credentials | jq -c -r '.access_token')
-if [ -z "${vcfi_access_token}" ] || [ "${vcfi_access_token}" == "null" ]; then
-  log_notify "VCF-I: vcfi_access_token is undefined or null"
-  exit 100
-fi
-sleep 3
-vcfi_activation_code=$(curl -s --request POST \
-  --url ${vcf_installer_token_url}/${vcf_installer_tenant_id}/${vcf_installer_token_url_suffix} \
-  --header 'authorization: Bearer '${vcfi_access_token}'' \
-  --header 'content-type: application/json' \
-  --data '{
-  "id": "'${vcfi_machineId}'",
-  "name": "'${basename_sddc}'"
-  }' | jq -c -r '.activation_code')
-if [ -z "${vcfi_activation_code}" ] || [ "${vcfi_activation_code}" == "null" ]; then
-  log_notify "VCF-I: vcfi_activation_code is undefined or null"
-  exit 100
-fi
-sleep 3
+#
+# The license/entitlement service (${vcf_installer_bearer_url} /
+# ${vcf_installer_token_url}) can only be reached from Broadcom's internal
+# network, not from gw - but the operator CAN reach it (and already holds
+# the same VCD credentials gw uses for the ESXi power-cycle step above), so
+# the exchange is relayed through VCD VM metadata on gw's own VM: gw writes
+# vcfi_machineId here, the operator's relay_vcf_installer_activation()
+# timer picks it up, does the exchange, and writes vcfi_activation_code
+# back the same way.
+#
+gw_vm_href=$(vcd_find_vm_href "gw")
+curl -sk -X POST "${gw_vm_href}/metadata" \
+  -H "Authorization: Bearer ${vcd_auth_token}" \
+  -H "Accept: application/*+xml;version=${vcd_api_version}" \
+  -H "Content-Type: application/vnd.vmware.vcloud.metadata+xml" \
+  --data "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Metadata xmlns=\"http://www.vmware.com/vcloud/v1.5\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><MetadataEntry><Key>vcfi_machineId</Key><TypedValue xsi:type=\"MetadataStringValue\"><Value>${vcfi_machineId}</Value></TypedValue></MetadataEntry></Metadata>" > /dev/null
+
+log_notify "VCF-I: posted machineId to VCD metadata, waiting for the operator to relay the activation code"
+retry_activation=60 ; pause_activation=30 ; attempt_activation=1
+while true; do
+  vcfi_activation_code=$(curl -sk "${gw_vm_href}/metadata/vcfi_activation_code" \
+    -H "Authorization: Bearer ${vcd_auth_token}" \
+    -H "Accept: application/*+xml;version=${vcd_api_version}" \
+    | grep -oP '(?<=<Value>).*?(?=</Value>)')
+  if [ -n "${vcfi_activation_code}" ]; then
+    log_notify "VCF-I: received activation code via VCD metadata relay"
+    break
+  fi
+  if [ ${attempt_activation} -eq ${retry_activation} ]; then
+    log_notify "VCF-I: activation code not relayed after ${attempt_activation} attempts of ${pause_activation} seconds"
+    exit 100
+  fi
+  sleep ${pause_activation}
+  ((attempt_activation++))
+done
 sddc_manager_api 3 2 PUT '{"vmwareAccount" : {"downloadActivationCode" : "'${vcfi_activation_code}'"}}' "${ip_vcf_installer}" v1/system/settings/depot $(jq -c -r .accessToken /tmp/token_vcfi.json)
 
 #
@@ -296,6 +331,18 @@ do
   sleep ${pause_bundle}
   ((attempt_bundle++))
 done
+
+# The machineId/activation code relayed through VCD VM metadata have done
+# their job - clear them now rather than leaving an activation secret
+# sitting on the VM indefinitely.
+curl -sk -X DELETE "${gw_vm_href}/metadata/vcfi_machineId" \
+  -H "Authorization: Bearer ${vcd_auth_token}" \
+  -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
+curl -sk -X DELETE "${gw_vm_href}/metadata/vcfi_activation_code" \
+  -H "Authorization: Bearer ${vcd_auth_token}" \
+  -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
+log_only "VCF-I: cleared machineId/activation code from VCD metadata"
+
 sddc_manager_api 3 2 GET '' "${ip_vcf_installer}" v1/bundles $(jq -c -r .accessToken /tmp/token_vcfi.json)
 depots_ids=$(echo ${response_body} | jq --arg arg "${vcf_version}" '[.elements[] | select ((.components[0].imageType == "INSTALL") and (.version | startswith($arg))) | .id]')
 depots_to_download=$(echo ${response_body} | jq --arg arg "${vcf_version}" '[.elements[] | select ((.components[0].imageType == "INSTALL") and (.version | startswith($arg))) | .id ] | length')
