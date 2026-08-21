@@ -377,6 +377,23 @@ VCFI_EXPECT_EOF
 unset VCF_ROOT_PASSWORD VCF_LCM_PATCH_B64 VCF_DM_PATCH_B64 VCF_LCM_SED_FIX_B64
 log_notify "VCF-I: patched and restarted lcm/domainmanager services"
 
+# The reverse proxy in front of lcm/domainmanager comes back up almost
+# immediately, but the Java services themselves take real time to
+# reinitialize - hitting the API too soon gets a 502 Bad Gateway (confirmed
+# empirically). Same reachability-wait pattern as the ESXi hosts above.
+sleep 60
+count=1
+until $(curl --output /dev/null --silent --head -k https://${ip_vcf_installer})
+do
+  echo "Attempt ${count}: Waiting for VCF Installer at https://${ip_vcf_installer} to be reachable after service restart..."
+  sleep 10
+  count=$((count+1))
+  if [[ "${count}" -eq 60 ]]; then
+    log_notify "ERROR: VCF Installer at https://${ip_vcf_installer} not reachable after service restart"
+    exit 100
+  fi
+done
+
 log_notify "Create VCF Installer API session"
 create_api_session "admin@local" "$(jq -c -r .generic_password $jsonFile)" "${ip_vcf_installer}" /tmp/token_vcfi.json
 
