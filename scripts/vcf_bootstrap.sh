@@ -71,6 +71,47 @@ vcd_find_vm_href() {
   done
 }
 
+create_api_session() {
+  # $1 username, $2 password, $3 SDDC Manager/VCF Installer IP or FQDN, $4 output file
+  local retry=3 pause=5 attempt=0
+  while true ; do
+    response=$(curl -k -s --write-out "\n%{http_code}" -X POST -d '{"username" : "'${1}'", "password" : "'${2}'"}' https://${3}/v1/tokens -H "Content-Type: application/json" -H "Accept: application/json")
+    http_code=$(tail -n1 <<< "$response")
+    content=$(sed '$ d' <<< "$response")
+    if [[ ${http_code} == 200 ]] ; then
+      echo ${content} | jq . -c -r | tee ${4} > /dev/null 2>&1
+      break
+    fi
+    if [ ${attempt} -eq ${retry} ]; then
+      log_notify "FAILED to get SDDC Manager API token after ${attempt} attempts of ${pause} seconds, http_response_code: ${http_code}"
+      exit 100
+    fi
+    sleep ${pause}
+    ((attempt++))
+  done
+}
+sddc_manager_api() {
+  # $1 retries, $2 pause between retries, $3 HTTP method, $4 http data,
+  # $5 SDDC Manager IP or FQDN, $6 API endpoint, $7 Bearer token
+  local retry=$1 pause=$2 attempt=0
+  echo "HTTP ${3} API call to https://${5}/${6}"
+  while true ; do
+    response=$(curl -k -s -X ${3} --write-out "\n%{http_code}" -H 'Content-Type: application/json' -H 'Accept: application/json' -H "Authorization: Bearer ${7}" -d "${4}" https://${5}/${6})
+    response_body=$(sed '$ d' <<< "$response")
+    response_code=$(tail -n1 <<< "$response")
+    if [[ ${response_code} == 2[0-9][0-9] ]] ; then
+      break
+    fi
+    if [ ${attempt} -eq ${retry} ]; then
+      log_notify "FAILED HTTP ${3} API call to https://${5}/${6}, response code was: ${response_code}"
+      echo "${response_body}"
+      exit 100
+    fi
+    sleep ${pause}
+    ((attempt++))
+  done
+}
+
 hostSpecs="[]"
 for esxi in $(seq 1 $(echo ${ips_esxi} | jq -c -r '. | length'))
 do
@@ -223,47 +264,105 @@ log_notify "deployment JSON ready, details available at http://${ip_gw}/"
 # for the install bundles to download, then submits/validates/builds the
 # SDDC. Only the VCF 9.1 path is kept - see the earlier json_builder.sh
 # simplification for why the 9.0/Cloud Builder branches were dropped.
+# create_api_session/sddc_manager_api are defined up top with the other
+# helpers.
 #
-create_api_session() {
-  # $1 username, $2 password, $3 SDDC Manager/VCF Installer IP or FQDN, $4 output file
-  local retry=3 pause=5 attempt=0
-  while true ; do
-    response=$(curl -k -s --write-out "\n%{http_code}" -X POST -d '{"username" : "'${1}'", "password" : "'${2}'"}' https://${3}/v1/tokens -H "Content-Type: application/json" -H "Accept: application/json")
-    http_code=$(tail -n1 <<< "$response")
-    content=$(sed '$ d' <<< "$response")
-    if [[ ${http_code} == 200 ]] ; then
-      echo ${content} | jq . -c -r | tee ${4} > /dev/null 2>&1
-      break
-    fi
-    if [ ${attempt} -eq ${retry} ]; then
-      log_notify "FAILED to get SDDC Manager API token after ${attempt} attempts of ${pause} seconds, http_response_code: ${http_code}"
-      exit 100
-    fi
-    sleep ${pause}
-    ((attempt++))
-  done
+count=1
+until $(curl --output /dev/null --silent --head -k https://${ip_vcf_installer})
+do
+  echo "Attempt ${count}: Waiting for VCF Installer at https://${ip_vcf_installer} to be reachable..."
+  sleep 10
+  count=$((count+1))
+  if [[ "${count}" -eq 60 ]]; then
+    log_notify "ERROR: Unable to connect to VCF Installer at https://${ip_vcf_installer}"
+    exit 100
+  fi
+done
+
+#
+# Patch the VCF Installer appliance's lcm/domainmanager config before
+# driving its API - doing this after we've already started using the API
+# would mean the service restarts below interrupt in-flight calls.
+# Confirmed empirically: the "vcf" account's sudo access is restricted to a
+# single support-bundle command (`sudo -l` only allows
+# /opt/vmware/sddc-support/sos) - real root access is via `su -` with the
+# root password (= generic_password, same convention as ROOT_PASSWORD in
+# build_vcf_installer_ovf_properties() in userdata.py), and `su` refuses to
+# run without a real controlling terminal ("must be run from a terminal"),
+# so a plain ssh+heredoc can't drive its password prompt - this needs
+# expect (already in variables.json's apt_packages) instead.
+#
+export VCF_ROOT_PASSWORD="$(jq -c -r .generic_password $jsonFile)"
+export VCF_INSTALLER_IP="${ip_vcf_installer}"
+
+# Points lcm/domainmanager at the staging depot+license-service
+# infrastructure instead of production defaults - built here (real bash
+# variables, no escaping needed) and relayed through the ssh/expect layers
+# as base64, since the domainmanager line is a JSON blob full of double
+# quotes that would otherwise have to survive bash heredoc -> Tcl string ->
+# remote-shell quoting all at once (the same class of problem jq -n --arg
+# already solves for the gchat messages above).
+lcm_patch_b64=$(printf '%s\n%s\n%s\n%s\n' \
+  "lcm.depot.adapter.host=${lcm_depot_host}" \
+  "lcm.depot.adapter.remote.vcfMetadataDir=${lcm_depot_metadata_dir}" \
+  "lcm.depot.adapter.vCenterUpgradeInfoDir=${lcm_depot_vcenter_upgrade_info_dir}" \
+  "lcm.access_token.broadcom.authorization.server.url=${vcf_installer_bearer_url}" \
+  | base64 -w0)
+dm_override_json=$(printf '{"publicDepotHost":"%s","authorizationServer":"%s","publicVvsHost":"%s","publicVvsVcfLcmBundlePath":"%s","publicVvsVcfInteropBundlePath":"%s","publicVvsVlcmInteropVcgBundlePath":"%s","publicVsanHclHost":"%s","publicPackagesHost":"%s"}' \
+  "${lcm_depot_host}" "${vcf_installer_bearer_url}" "${vvs_host}" "${vvs_lcm_bundle_path}" "${vvs_interop_bundle_path}" "${vvs_vlcm_interop_vcg_bundle_path}" "${vsan_hcl_host}" "${packages_host}")
+dm_patch_b64=$(printf 'lcm.depot.service.online.config.override=%s\n' "${dm_override_json}" | base64 -w0)
+export VCF_LCM_PATCH_B64="${lcm_patch_b64}"
+export VCF_DM_PATCH_B64="${dm_patch_b64}"
+
+# The staging depot host/URLs above only take effect once these production
+# defaults are cleared out of the way (Spring's "last value wins" loading
+# doesn't help here - remote.v2.rootDir/port have no staging equivalent at
+# all, so leaving them active conflicts with the appended settings rather
+# than being harmlessly superseded) and cert checking is disabled (the
+# staging depot doesn't present a cert the default enableCertCheck=true
+# would accept). Confirmed by diffing a real patched appliance against its
+# own pre-patch backup. Static/structural, not deployment-specific, so
+# hardcoded here rather than templated through env_vars like the values
+# above.
+lcm_sed_fix_b64=$(base64 -w0 <<'SED_FIX_EOF'
+sed -i '/^lcm\.depot\.adapter\.host=dl\.broadcom\.com$/d;/^lcm\.depot\.adapter\.port=443$/d;/^lcm\.depot\.adapter\.remote\.v2\.rootDir=\/PROD$/d' /opt/vmware/vcf/lcm/lcm-app/conf/application-prod.properties
+sed -i 's/^lcm\.depot\.adapter\.certificateCheckEnabled=true$/lcm.depot.adapter.certificateCheckEnabled=false/' /opt/vmware/vcf/lcm/lcm-app/conf/application-prod.properties
+SED_FIX_EOF
+)
+export VCF_LCM_SED_FIX_B64="${lcm_sed_fix_b64}"
+
+expect <<'VCFI_EXPECT_EOF'
+set timeout 30
+set password $env(VCF_ROOT_PASSWORD)
+spawn ssh -tt -o StrictHostKeyChecking=no vcf@$env(VCF_INSTALLER_IP)
+expect "*assword:" { send "$password\r" }
+expect "*$ " { send "su -\r" }
+expect "*assword:" { send "$password\r" }
+expect "*# " { send "cp /opt/vmware/vcf/lcm/lcm-app/conf/application-prod.properties /opt/vmware/vcf/lcm/lcm-app/conf/application-prod.properties.bck\r" }
+expect "*# " { send "cp /etc/vmware/vcf/domainmanager/application-prod.properties /etc/vmware/vcf/domainmanager/application-prod.properties.bck\r" }
+expect "*# " { send "echo $env(VCF_LCM_SED_FIX_B64) | base64 -d | bash\r" }
+expect "*# " { send "echo $env(VCF_LCM_PATCH_B64) | base64 -d | tee -a /opt/vmware/vcf/lcm/lcm-app/conf/application-prod.properties > /dev/null\r" }
+expect "*# " { send "echo $env(VCF_DM_PATCH_B64) | base64 -d | tee -a /etc/vmware/vcf/domainmanager/application-prod.properties > /dev/null\r" }
+expect "*# " {
+  # Confirmed empirically on a real appliance: these two files can end up
+  # owned by root (breaking the service accounts' own read access,
+  # "syslog.facility_IS_UNDEFINED"/"Permission denied" on restart) even
+  # though nothing here should change ownership of an already-existing
+  # file - restoring the correct owner defensively either way costs
+  # nothing and makes this self-healing regardless of root cause.
+  send "chown vcf_lcm:vcf /opt/vmware/vcf/lcm/lcm-app/conf/application-prod.properties\r"
 }
-sddc_manager_api() {
-  # $1 retries, $2 pause between retries, $3 HTTP method, $4 http data,
-  # $5 SDDC Manager IP or FQDN, $6 API endpoint, $7 Bearer token
-  local retry=$1 pause=$2 attempt=0
-  echo "HTTP ${3} API call to https://${5}/${6}"
-  while true ; do
-    response=$(curl -k -s -X ${3} --write-out "\n%{http_code}" -H 'Content-Type: application/json' -H 'Accept: application/json' -H "Authorization: Bearer ${7}" -d "${4}" https://${5}/${6})
-    response_body=$(sed '$ d' <<< "$response")
-    response_code=$(tail -n1 <<< "$response")
-    if [[ ${response_code} == 2[0-9][0-9] ]] ; then
-      break
-    fi
-    if [ ${attempt} -eq ${retry} ]; then
-      log_notify "FAILED HTTP ${3} API call to https://${5}/${6}, response code was: ${response_code}"
-      echo "${response_body}"
-      exit 100
-    fi
-    sleep ${pause}
-    ((attempt++))
-  done
+expect "*# " { send "chown vcf_domainmanager:vcf /etc/vmware/vcf/domainmanager/application-prod.properties\r" }
+expect "*# " {
+  send "systemctl restart lcm.service\r"
 }
+expect "*# " { send "systemctl restart domainmanager\r" }
+expect "*# " { send "exit\r" }
+expect "*$ " { send "exit\r" }
+expect eof
+VCFI_EXPECT_EOF
+unset VCF_ROOT_PASSWORD VCF_LCM_PATCH_B64 VCF_DM_PATCH_B64 VCF_LCM_SED_FIX_B64
+log_notify "VCF-I: patched and restarted lcm/domainmanager services"
 
 log_notify "Create VCF Installer API session"
 create_api_session "admin@local" "$(jq -c -r .generic_password $jsonFile)" "${ip_vcf_installer}" /tmp/token_vcfi.json
