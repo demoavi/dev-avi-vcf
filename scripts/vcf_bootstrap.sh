@@ -5,34 +5,12 @@ templates_dir="${script_dir}/../templates"
 mkdir -p /home/ubuntu/html /home/ubuntu/json
 source /home/ubuntu/bash/variables.sh
 
-# log_only just echoes (already captured by the caller's stdout redirect
-# into vcf_bootstrap.log); log_notify also posts to gchat for milestones -
-# jq builds the JSON body so message text is never hand-quoted into a
-# curl argument (the same class of bug that broke the kickstart heredoc
-# earlier in this project).
-log_only() {
-  echo "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: $1"
-}
-log_notify() {
-  local message="$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: $1"
-  echo "${message}"
-  if [ -n "${google_webhook}" ]; then
-    curl -s -X POST -H 'Content-Type: application/json' --data "$(jq -n --arg text "${message}" '{text: $text}')" "${google_webhook}" >/dev/null 2>&1
-  fi
-}
-
-log_notify "vcf_bootstrap.sh started"
-#
-#
-#
-echo '------------------------------------------------------------'
-echo "Cloud Builder JSON file creation"
-
-# VCD session for the power-cycle step below - govc has no session that can
+# VCD session, established up front (not just before the ESX power-cycle
+# step) so log_notify below can use it too - govc has no session that can
 # power-cycle a VCD-managed VM (GOVC_URL against the ESXi guest itself only
 # reaches its own management API, not the layer that controls its power
 # state), so this talks to VCD's REST API directly instead. Logged in once
-# and reused for all hosts.
+# and reused throughout the script.
 vcd_host=$(jq -r .vcd.host $jsonFile)
 vcd_user=$(jq -r .vcd.user $jsonFile)
 vcd_password=$(jq -r .vcd.password $jsonFile)
@@ -70,6 +48,41 @@ vcd_find_vm_href() {
     ((page++))
   done
 }
+gw_vm_href=$(vcd_find_vm_href "gw")
+
+# log_only just echoes (already captured by the caller's stdout redirect
+# into vcf_bootstrap.log); log_notify also posts to gchat AND writes the
+# same message into a VCD metadata key (vcf_bootstrap_progress) on gw's own
+# VM, for milestones - lets the operator/anything else with VCD API access
+# poll "what's this script currently doing" directly, without needing
+# someone to relay gchat messages. jq/sed build the JSON/XML bodies so
+# message text is never hand-quoted into a curl argument (the same class
+# of bug that broke the kickstart heredoc earlier in this project).
+log_only() {
+  echo "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: $1"
+}
+log_notify() {
+  local message="$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: $1"
+  echo "${message}"
+  if [ -n "${google_webhook}" ]; then
+    curl -s -X POST -H 'Content-Type: application/json' --data "$(jq -n --arg text "${message}" '{text: $text}')" "${google_webhook}" >/dev/null 2>&1
+  fi
+  if [ -n "${gw_vm_href}" ]; then
+    local escaped=$(echo "${message}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g')
+    curl -sk -X POST "${gw_vm_href}/metadata" \
+      -H "Authorization: Bearer ${vcd_auth_token}" \
+      -H "Accept: application/*+xml;version=${vcd_api_version}" \
+      -H "Content-Type: application/vnd.vmware.vcloud.metadata+xml" \
+      --data "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Metadata xmlns=\"http://www.vmware.com/vcloud/v1.5\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><MetadataEntry><Key>vcf_bootstrap_progress</Key><TypedValue xsi:type=\"MetadataStringValue\"><Value>${escaped}</Value></TypedValue></MetadataEntry></Metadata>" >/dev/null 2>&1
+  fi
+}
+
+log_notify "vcf_bootstrap.sh started"
+#
+#
+#
+echo '------------------------------------------------------------'
+echo "Cloud Builder JSON file creation"
 
 create_api_session() {
   # $1 username, $2 password, $3 SDDC Manager/VCF Installer IP or FQDN, $4 output file
@@ -381,9 +394,9 @@ fi
 # the exchange is relayed through VCD VM metadata on gw's own VM: gw writes
 # vcfi_machineId here, the operator's relay_vcf_installer_activation()
 # timer picks it up, does the exchange, and writes vcfi_activation_code
-# back the same way.
+# back the same way. gw_vm_href was already resolved up top (log_notify
+# needs it too).
 #
-gw_vm_href=$(vcd_find_vm_href "gw")
 curl -sk -X POST "${gw_vm_href}/metadata" \
   -H "Authorization: Bearer ${vcd_auth_token}" \
   -H "Accept: application/*+xml;version=${vcd_api_version}" \
