@@ -449,7 +449,7 @@ do
   sddc_manager_api 3 2 GET '' "${ip_vcf_installer}" v1/bundles $(jq -c -r .accessToken /tmp/token_vcfi.json)
   bundles_count=$(echo ${response_body} | jq -c -r '.elements | length')
   if [[ ${bundles_count} -gt 0 ]] ; then
-    log_only "VCF-I: bundles are populated"
+    log_notify "VCF-I: bundles are populated"
     sleep 30
     break
   fi
