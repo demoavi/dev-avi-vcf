@@ -220,6 +220,7 @@ sed -e "s/\${basename_sddc}/${basename_sddc}/" \
     -e "s/\${hostSpecs}/$(echo ${hostSpecs} | jq -c -r .)/" \
     -e "s/\${VCFO_PASSWORD}/$(jq -c -r .generic_password $jsonFile)/" \
     -e "s/\${ip_gw}/${ip_gw}/" \
+    -e "s/\${ip_gw_direct}/${ip_gw_direct}/" \
     -e "s/\${VCS_PASSWORD}/$(jq -c -r .generic_password $jsonFile)/" \
     -e "s/\${ssoDomain}/$(jq -c -r .sddc.vcenter.ssoDomain ${jsonFile})/" \
     -e "s/\${nsxtManagerSize}/$(jq -c -r .sddc.nsx.size ${jsonFile})/" \

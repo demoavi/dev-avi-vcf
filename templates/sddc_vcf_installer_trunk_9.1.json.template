@@ -163,12 +163,12 @@
     ],
     "dnsSpec": {
         "nameservers": [
-            "${ip_gw}"
+            "${ip_gw_direct}"
         ],
         "subdomain": "${domain}"
     },
     "ntpServers": [
-        "${ip_gw}"
+        "${ip_gw_direct}"
     ],
     "sddcManagerSpec": {
         "hostname": "${basename_sddc}-sddcm.${domain}",
