@@ -255,7 +255,7 @@ sed -e "s/\${basename_sddc}/${basename_sddc}/" \
     -e "s/\${name_vcf_installer}/${name_vcf_installer}/" \
     -e "s/\${basename_avi_ctrl}/${basename_avi_ctrl}/" \
     -e "s/\${domain}/${domain}/" ${template_html_file} | tee /home/ubuntu/html/index.html > /dev/null
-sed -e "s@\${ip_gw}@${ip_gw}@" "${templates_dir}/socks.html.template" | tee /home/ubuntu/html/socks.html > /dev/null
+sed -e "s@\${ip_gw_direct}@${ip_gw_direct}@" "${templates_dir}/socks.html.template" | tee /home/ubuntu/html/socks.html > /dev/null
 sudo mv /home/ubuntu/html/index.html /var/www/html/index.html
 sudo mv /home/ubuntu/html/socks.html /var/www/html/socks.html
 sudo chown root /var/www/html/index.html
@@ -269,7 +269,7 @@ while read -r line; do echo \"$line<br>\" ; done < /var/www/html/esxi_raw.html |
 sudo cp /home/ubuntu/json/${basename_sddc}.json /var/www/html/${basename_sddc}.json
 sudo chown root /var/www/html/${basename_sddc}.json
 sudo chgrp root /var/www/html/${basename_sddc}.json
-log_notify "deployment JSON ready, details available at http://${ip_gw}/"
+log_notify "deployment JSON ready, details available at http://${ip_gw_direct}/"
 #
 #
 #
