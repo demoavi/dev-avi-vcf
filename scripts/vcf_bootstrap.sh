@@ -467,6 +467,25 @@ curl -sk -X POST "${gw_vm_href}/metadata" \
 log_notify "VCF-I: posted machineId to VCD metadata, waiting for the operator to relay the activation code"
 retry_activation=60 ; pause_activation=30 ; attempt_activation=1
 while true; do
+  # Confirm the machineId write actually landed - a single unretried POST
+  # can be silently dropped by VCD's optimistic-locking on concurrent VM
+  # metadata writes (seen empirically: "Row was updated or deleted by
+  # another transaction"), which would otherwise strand this loop for the
+  # full retry budget waiting on an activation code the operator has
+  # nothing to relay. Re-post it here (folded into the existing poll
+  # interval, no extra delay) if it's ever missing.
+  posted_machine_id=$(curl -sk "${gw_vm_href}/metadata/vcfi_machineId" \
+    -H "Authorization: Bearer ${vcd_auth_token}" \
+    -H "Accept: application/*+xml;version=${vcd_api_version}" \
+    | grep -oP '(?<=<Value>).*?(?=</Value>)')
+  if [ -z "${posted_machine_id}" ]; then
+    log_only "VCF-I: vcfi_machineId missing from VCD metadata, re-posting"
+    curl -sk -X POST "${gw_vm_href}/metadata" \
+      -H "Authorization: Bearer ${vcd_auth_token}" \
+      -H "Accept: application/*+xml;version=${vcd_api_version}" \
+      -H "Content-Type: application/vnd.vmware.vcloud.metadata+xml" \
+      --data "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Metadata xmlns=\"http://www.vmware.com/vcloud/v1.5\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><MetadataEntry><Key>vcfi_machineId</Key><TypedValue xsi:type=\"MetadataStringValue\"><Value>${vcfi_machineId}</Value></TypedValue></MetadataEntry></Metadata>" > /dev/null
+  fi
   vcfi_activation_code=$(curl -sk "${gw_vm_href}/metadata/vcfi_activation_code" \
     -H "Authorization: Bearer ${vcd_auth_token}" \
     -H "Accept: application/*+xml;version=${vcd_api_version}" \
