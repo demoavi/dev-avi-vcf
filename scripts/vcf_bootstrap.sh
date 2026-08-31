@@ -1,4 +1,9 @@
 #!/bin/bash
+# Runs as ubuntu (see gw-setup.sh.tpl's launch line) - pinned explicitly
+# rather than trusting sudo/nohup to propagate it, since govc resolves its
+# session cache/debug paths off $HOME and a stale/inherited root value here
+# silently breaks those (e.g. "govc: open ...: permission denied").
+export HOME=/home/ubuntu
 jsonFile=${1}
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 templates_dir="${script_dir}/../templates"
@@ -202,11 +207,24 @@ do
   export GOVC_PASSWORD=$(jq -c -r .generic_password $jsonFile)
   export GOVC_INSECURE=true
   export GOVC_PERSIST_SESSION=false
-  govc host.storage.info -json -rescan | jq -c -r '.storageDeviceInfo.scsiLun[] | select( .deviceType == "disk" ) | .deviceName' | while read -r disk_device
-  do
-    govc host.storage.mark -ssd "${disk_device}" > /dev/null
-  done
-  log_notify "nested ESXi ${name_esxi} disks marked as SSD"
+  export GOVC_DEBUG=true
+  storage_info=$(govc host.storage.info -json -rescan 2>&1)
+  if [ $? -ne 0 ]; then
+    log_notify "ERROR: govc host.storage.info -rescan failed for ${name_esxi}: ${storage_info}"
+  else
+    marked=0
+    while read -r disk_device
+    do
+      [ -z "${disk_device}" ] && continue
+      mark_error=$(govc host.storage.mark -ssd "${disk_device}" 2>&1)
+      if [ $? -ne 0 ]; then
+        log_notify "ERROR: govc host.storage.mark -ssd ${disk_device} failed for ${name_esxi}: ${mark_error}"
+      else
+        ((marked++))
+      fi
+    done <<< "$(echo "${storage_info}" | jq -c -r '.storageDeviceInfo.scsiLun[] | select( .deviceType == "disk" ) | .deviceName')"
+    log_notify "nested ESXi ${name_esxi}: ${marked} disk(s) marked as SSD"
+  fi
 done
 #
 #
