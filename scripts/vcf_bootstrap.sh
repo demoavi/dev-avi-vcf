@@ -201,6 +201,7 @@ do
   export GOVC_USERNAME=root
   export GOVC_PASSWORD=$(jq -c -r .generic_password $jsonFile)
   export GOVC_INSECURE=true
+  export GOVC_PERSIST_SESSION=false
   govc host.storage.info -json -rescan | jq -c -r '.storageDeviceInfo.scsiLun[] | select( .deviceType == "disk" ) | .deviceName' | while read -r disk_device
   do
     govc host.storage.mark -ssd "${disk_device}" > /dev/null
