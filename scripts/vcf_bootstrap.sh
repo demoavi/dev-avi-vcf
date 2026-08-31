@@ -1,9 +1,20 @@
 #!/bin/bash
-# Runs as ubuntu (see gw-setup.sh.tpl's launch line) - pinned explicitly
-# rather than trusting sudo/nohup to propagate it, since govc resolves its
-# session cache/debug paths off $HOME and a stale/inherited root value here
-# silently breaks those (e.g. "govc: open ...: permission denied").
+# Runs as ubuntu (see gw-setup.sh.tpl's launch line).
 export HOME=/home/ubuntu
+# The real fix for govc's "open root: permission denied": govc treats
+# GOVC_USERNAME/GOVC_PASSWORD as a possible file path and tries
+# os.ReadFile(value) first (session.Secret() in govmomi) - with
+# GOVC_USERNAME=root that's a *relative* path, so if CWD is "/" (plausible
+# for a cloud-init runcmd-launched background process) it resolves to
+# /root, root's 0700 home dir. As ubuntu that's EACCES, which govc
+# propagates as a hard error instead of silently falling back to the
+# literal "root" username (it only falls back on ENOENT). As root the same
+# open() hits EISDIR instead (root can read /root's own dir entry, just not
+# open it as a file), which isn't a permission error, so it silently falls
+# back and never surfaced before this script ran as ubuntu. Pinning CWD
+# somewhere ubuntu-writable with no coincidentally-named files sidesteps it
+# entirely, regardless of whatever CWD cloud-init happened to launch us in.
+cd /home/ubuntu || exit 1
 jsonFile=${1}
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 templates_dir="${script_dir}/../templates"
