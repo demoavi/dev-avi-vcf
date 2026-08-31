@@ -553,7 +553,12 @@ while true ; do
   sleep ${pause_validation}
   ((attempt_validation++))
   if [ ${attempt_validation} -eq ${retry_validation} ]; then
-    log_notify "VCF-I: SDDC JSON validation not finished after ${attempt_validation} attempts of ${pause_validation} seconds"
+    log_notify "VCF-I: SDDC JSON validation not finished after ${attempt_validation} attempts of ${pause_validation} seconds, last executionStatus: ${executionStatus}"
+    log_only "VCF-I: last validation response: ${response_body}"
+    echo ${response_body} | jq -c -r '[.validationChecks[]? | select( .resultStatus != "SUCCEEDED").errorResponse.nestedErrors[]?.message]' 2>/dev/null | jq -c -r '.[]?' 2>/dev/null | while read item
+    do
+      log_notify "VCF-I: SDDC JSON validation item not SUCCEEDED - ${item}"
+    done
     exit 100
   fi
 done
