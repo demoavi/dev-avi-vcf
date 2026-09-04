@@ -219,10 +219,26 @@ do
   export GOVC_INSECURE=true
   export GOVC_PERSIST_SESSION=false
   export GOVC_DEBUG=true
-  storage_info=$(govc host.storage.info -json -rescan 2>&1)
-  if [ $? -ne 0 ]; then
-    log_notify "ERROR: govc host.storage.info -rescan failed for ${name_esxi}: ${storage_info}"
-  else
+  # hostd's own management API can still be initializing for a while after
+  # the HTTPS port itself starts accepting connections (the wait-loop
+  # above only checks the port) - a 503 here right after a kickstart
+  # reboot is expected, not a real failure, so retry a few times before
+  # giving up.
+  retry_storage_rescan=6 ; pause_storage_rescan=20 ; attempt_storage_rescan=0 ; rescan_ok=false
+  while true ; do
+    storage_info=$(govc host.storage.info -json -rescan 2>&1)
+    if [ $? -eq 0 ]; then
+      rescan_ok=true
+      break
+    fi
+    ((attempt_storage_rescan++))
+    if [ ${attempt_storage_rescan} -eq ${retry_storage_rescan} ]; then
+      log_notify "ERROR: govc host.storage.info -rescan failed for ${name_esxi} after ${attempt_storage_rescan} attempts: ${storage_info}"
+      break
+    fi
+    sleep ${pause_storage_rescan}
+  done
+  if [ "${rescan_ok}" = true ]; then
     marked=0
     while read -r disk_device
     do
