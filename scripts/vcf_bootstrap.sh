@@ -322,9 +322,9 @@ sudo chgrp root /var/www/html/index.html
 sudo chown root /var/www/html/socks.html
 sudo chgrp root /var/www/html/socks.html
 sudo cat /var/lib/bind/db.${domain} | grep avi | sudo tee /var/www/html/avi_raw.html
-while read -r line; do echo \"\$line<br>\" ; done < /var/www/html/avi_raw.html | sudo tee /var/www/html/avi.html
+while read -r line; do echo "${line}<br>"; done < /var/www/html/avi_raw.html | sudo tee /var/www/html/avi.html
 sudo cat /var/lib/bind/db.${domain} | grep wld | sudo tee /var/www/html/esxi_raw.html
-while read -r line; do echo \"$line<br>\" ; done < /var/www/html/esxi_raw.html | sudo tee /var/www/html/esxi.html
+while read -r line; do echo "${line}<br>"; done < /var/www/html/esxi_raw.html | sudo tee /var/www/html/esxi.html
 sudo cp /home/ubuntu/json/${basename_sddc}.json /var/www/html/${basename_sddc}.json
 sudo chown root /var/www/html/${basename_sddc}.json
 sudo chgrp root /var/www/html/${basename_sddc}.json
@@ -671,5 +671,39 @@ while true ; do
   fi
 done
 
+#
+# port groups (merged from the reference project's vcenter/vcsa.sh - content
+# library creation/OVA upload deliberately dropped, same as the earlier
+# Cloud Builder/9.0 branches: VCF 9.1-only scope, so the EDGE_OVERLAY
+# portgroup that reference script only creates for 9.0/8.0U3b is skipped
+# too. govc here talks to the newly-built nested vCenter, not an ESXi host
+# directly - GOVC_CLUSTER is unset since portgroups sit on the vDS itself,
+# independent of any specific cluster. Folded back in here (rather than
+# staying its own 0N-*.sh) once confirmed working against a live build -
+# no reason to make this one a separate manual step.
+#
+export GOVC_URL="${basename_sddc}-vc01.${domain}"
+export GOVC_USERNAME="administrator@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)"
+export GOVC_PASSWORD="${generic_password}"
+export GOVC_DATACENTER="${basename_sddc}-dc"
+export GOVC_INSECURE=true
+export GOVC_PERSIST_SESSION=false
+unset GOVC_CLUSTER
+vds_name="${basename_sddc}-vds-01"
 
-log_notify "vcf_bootstrap.sh complete (SDDC build only - see scripts/0N-*.sh for the remaining pipeline stages, run standalone)"
+external_vlan_id=$(jq -c -r --arg arg "EXTERNAL" '.sddc.vcenter.networks[] | select( .type == $arg).vlan_id' $jsonFile)
+pg_error=$(govc dvs.portgroup.add -dvs "${vds_name}" -vlan "${external_vlan_id}" "${basename_sddc}-pg-external" 2>&1)
+if [ $? -ne 0 ]; then
+  log_notify "ERROR: govc dvs.portgroup.add ${basename_sddc}-pg-external failed: ${pg_error}"
+else
+  log_notify "VCF-I: portgroup ${basename_sddc}-pg-external created (vlan ${external_vlan_id})"
+fi
+
+pg_error=$(govc dvs.portgroup.add -dvs "${vds_name}" -vlan-mode=trunking "${basename_sddc}-edge-uplink1" 2>&1)
+if [ $? -ne 0 ]; then
+  log_notify "ERROR: govc dvs.portgroup.add ${basename_sddc}-edge-uplink1 failed: ${pg_error}"
+else
+  log_notify "VCF-I: portgroup ${basename_sddc}-edge-uplink1 created (trunking)"
+fi
+
+log_notify "vcf_bootstrap.sh complete (SDDC build + vCenter port groups - see scripts/0N-*.sh for the remaining pipeline stages, run standalone)"
