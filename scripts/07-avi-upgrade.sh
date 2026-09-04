@@ -18,9 +18,15 @@ log_notify "07-avi-upgrade.sh started"
 # ran later in the same bash process as it originally did) - matches the
 # reference project's own upgrade_avi.sh, which re-derives these fresh too.
 ip_sddcm="${basename_sddc}-sddcm.${domain}"
-create_api_session "administrator@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)" "${generic_password}" "${ip_sddcm}" /tmp/token_sddcm.json
-sddc_manager_api 3 2 GET '' "${ip_sddcm}" v1/bundles $(jq -c -r .accessToken /tmp/token_sddcm.json)
-avi_version=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" '.elements[] | select(.components[0].description == $arg) | .version' | cut -d"-" -f1)
+# spec.sddc.avi.version pins this explicitly when set (see crd-vapp.yaml)
+# - only fall back to deriving it from SDDC Manager's v1/bundles list when
+# unset, filtered on downloadStatus == "SUCCESSFUL" to disambiguate if
+# more than one NSX_ALB bundle is listed there.
+if [ -z "${avi_version}" ]; then
+  create_api_session "administrator@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)" "${generic_password}" "${ip_sddcm}" /tmp/token_sddcm.json
+  sddc_manager_api 3 2 GET '' "${ip_sddcm}" v1/bundles $(jq -c -r .accessToken /tmp/token_sddcm.json)
+  avi_version=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" '.elements[] | select(.components[0].description == $arg and .downloadStatus == "SUCCESSFUL") | .version' | head -1 | cut -d"-" -f1)
+fi
 ip_avi=$(echo ${ips_avi} | jq -r '.[0]')
 avi_login
 

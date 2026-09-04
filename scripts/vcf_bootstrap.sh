@@ -1185,9 +1185,19 @@ done < <(echo ${nsx_segments_overlay} | jq -c -r '.[]')
 ip_sddcm="${basename_sddc}-sddcm.${domain}"
 create_api_session "administrator@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)" "${generic_password}" "${ip_sddcm}" /tmp/token_sddcm.json
 
+# spec.sddc.avi.version pins which NSX_ALB bundle to use when set (see
+# crd-vapp.yaml) - matched by version prefix. Otherwise falls back to
+# just taking the first NSX_ALB entry found (the historical behavior,
+# ambiguous only if a later depot sync adds a second one before this
+# first-ever download/deploy runs - unusual but not impossible).
 sddc_manager_api 3 2 GET '' "${ip_sddcm}" v1/bundles $(jq -c -r .accessToken /tmp/token_sddcm.json)
-avi_bundle_id=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" '.elements[] | select(.components[0].description == $arg) | .id')
-avi_download_status=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" '.elements[] | select(.components[0].description == $arg) | .downloadStatus')
+if [ -n "${avi_version}" ]; then
+  avi_bundle_id=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" --arg ver "${avi_version}" '.elements[] | select(.components[0].description == $arg and (.version | startswith($ver))) | .id')
+  avi_download_status=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" --arg ver "${avi_version}" '.elements[] | select(.components[0].description == $arg and (.version | startswith($ver))) | .downloadStatus')
+else
+  avi_bundle_id=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" '.elements[] | select(.components[0].description == $arg) | .id' | head -1)
+  avi_download_status=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" '.elements[] | select(.components[0].description == $arg) | .downloadStatus' | head -1)
+fi
 if [[ ${avi_download_status} != "SUCCESSFUL" ]]; then
   sddc_manager_api 3 2 PATCH '{"bundleDownloadSpec":{"downloadNow":true}}' "${ip_sddcm}" v1/bundles/${avi_bundle_id} $(jq -c -r .accessToken /tmp/token_sddcm.json)
   log_only "VCF-I: waiting 120 seconds for Avi bundle download to start"
@@ -1197,7 +1207,11 @@ fi
 retry_avi_download=30 ; pause_avi_download=10 ; attempt_avi_download=1
 while true ; do
   sddc_manager_api 3 2 GET '' "${ip_sddcm}" v1/bundles $(jq -c -r .accessToken /tmp/token_sddcm.json)
-  avi_download_status=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" '.elements[] | select(.components[0].description == $arg) | .downloadStatus')
+  if [ -n "${avi_version}" ]; then
+    avi_download_status=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" --arg ver "${avi_version}" '.elements[] | select(.components[0].description == $arg and (.version | startswith($ver))) | .downloadStatus')
+  else
+    avi_download_status=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" '.elements[] | select(.components[0].description == $arg) | .downloadStatus' | head -1)
+  fi
   if [[ ${avi_download_status} == "SUCCESSFUL" ]]; then
     log_notify "Avi bundle downloaded"
     break

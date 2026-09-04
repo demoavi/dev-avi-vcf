@@ -60,17 +60,34 @@ do
 done
 log_notify "Avi ctrl reachable at https://${ip_avi}"
 
-create_api_session "administrator@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)" "${generic_password}" "${ip_sddcm}" /tmp/token_sddcm.json
-sddc_manager_api 3 2 GET '' "${ip_sddcm}" v1/bundles $(jq -c -r .accessToken /tmp/token_sddcm.json)
-avi_version=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" '.elements[] | select(.components[0].description == $arg) | .version' | cut -d"-" -f1)
+# spec.sddc.avi.version pins this explicitly when set (see crd-vapp.yaml)
+# - only fall back to deriving it from SDDC Manager's v1/bundles list when
+# unset. That lookup is ambiguous once more than one NSX_ALB bundle shows
+# up there (a later depot sync can add a newer one alongside whatever was
+# already downloaded) - filtering on downloadStatus == "SUCCESSFUL" picks
+# the one that's actually usable rather than just whatever jq happens to
+# return first.
+if [ -z "${avi_version}" ]; then
+  create_api_session "administrator@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)" "${generic_password}" "${ip_sddcm}" /tmp/token_sddcm.json
+  sddc_manager_api 3 2 GET '' "${ip_sddcm}" v1/bundles $(jq -c -r .accessToken /tmp/token_sddcm.json)
+  avi_version=$(echo ${response_body} | jq -c -r --arg arg "NSX_ALB" '.elements[] | select(.components[0].description == $arg and .downloadStatus == "SUCCESSFUL") | .version' | head -1 | cut -d"-" -f1)
+fi
 
 avi_login
 
 #
 # backup user + backup config
 #
-avi_api 2 2 POST "$(jq -n --arg n "ubuntu" --arg p "${generic_password}" '{name: $n, password: $p}')" api/cloudconnectoruser
-cloudconnectoruser_uuid=$(echo ${response_body} | jq -c -r '.uuid')
+# Idempotent (unlike the reference project's own always-POST version) -
+# reuses an existing "ubuntu" cloudconnectoruser instead of erroring with
+# a 409 on every re-run after the first, since this step has no natural
+# reason to ever need re-creating.
+avi_api 2 2 GET "" "api/cloudconnectoruser?name=ubuntu"
+cloudconnectoruser_uuid=$(echo ${response_body} | jq -c -r '.results[0].uuid // empty')
+if [ -z "${cloudconnectoruser_uuid}" ]; then
+  avi_api 2 2 POST "$(jq -n --arg n "ubuntu" --arg p "${generic_password}" '{name: $n, password: $p}')" api/cloudconnectoruser
+  cloudconnectoruser_uuid=$(echo ${response_body} | jq -c -r '.uuid')
+fi
 avi_api 2 2 GET "" api/backupconfiguration
 backupconfiguration_uuid=$(echo ${response_body} | jq -c -r '.results[0].uuid')
 backup_json=$(jq -n --arg pw "${generic_password}" --arg host "${ip_gw}" --arg ssh "${cloudconnectoruser_uuid}" \
@@ -139,7 +156,7 @@ avi_api 2 2 PATCH "${cloud_update_json}" "api/cloud/${cloud_uuid}"
 # here, presumably to pick up the cloud placement before the next calls)
 #
 avi_api 2 2 POST "$(jq -n --arg fqdn "${avi_subdomain}.${domain}" '{name: "dns-avi", type: "IPAMDNS_TYPE_INTERNAL_DNS", internal_profile: {dns_service_domain: [{domain_name: $fqdn}]}}')" api/ipamdnsproviderprofile
-log_only "VCF-I: configure Avi - waiting 120 seconds"
+log_only "configure Avi - waiting 120 seconds"
 sleep 120
 avi_login
 
@@ -171,19 +188,19 @@ avi_api 2 2 PATCH "${network_update_json}" "api/network/${vip_uuid}"
 if [ -n "${avi_jwt_token}" ] && [ -n "${avi_account_id}" ]; then
   avi_api 2 2 GET "" api/albservices/status
   avi_api 2 2 POST "$(jq -n --arg t "${avi_jwt_token}" '{jwt_token: $t}')" api/portal/refresh-access-token
-  log_only "VCF-I: waiting 20 seconds"
+  log_only "waiting 20 seconds"
   sleep 20
   random_string=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 10 | head -n 1)
   avi_api 2 2 POST "$(jq -n --arg n "workshop-demo-${random_string}" --arg acct "${avi_account_id}" '{name: $n, description: "Registration and deregistration", email: "avi.workshop@broadcom.com", account_id: $acct}')" api/albservices/register
-  log_only "VCF-I: waiting 20 seconds"
+  log_only "waiting 20 seconds"
   sleep 20
   avi_api 2 2 PATCH '{"replace": {"feature_opt_in_status": {"enable_appsignature_sync": true, "enable_ip_reputation": true, "enable_pulse_case_management": false, "enable_pulse_waf_management": true, "enable_user_agent_db_sync": false}, "waf_config": {"enable_auto_download_waf_signatures": true, "enable_waf_signatures_notifications": true}}}' api/albservicesconfig
-  log_only "VCF-I: waiting 10 seconds"
+  log_only "waiting 10 seconds"
   sleep 10
   avi_api 2 2 GET "" api/albservices/pool
   avi_api 2 2 POST "$(jq -n --arg id "$(echo ${response_body} | jq -c -r '.results[0].pool_id')" '{pool_id: $id}')" api/licensing/v1/cloud/subscribe
 else
-  log_only "VCF-I: avi_jwt_token/avi_account_id not set, skipping Pulse cloud-services registration"
+  log_only "avi_jwt_token/avi_account_id not set, skipping Pulse cloud-services registration"
 fi
 
 #
@@ -192,19 +209,26 @@ fi
 #
 avi_api 2 2 GET "" api/vcenterserver
 vcenter_uuid=$(echo ${response_body} | jq -c -r '.results[0].uuid')
-log_only "VCF-I: waiting 10 seconds"
+log_only "waiting 10 seconds"
 sleep 10
 avi_api 2 2 GET "" api/cloud
 cloud_uuid=$(echo ${response_body} | jq -c -r --arg arg "CLOUD_NSXT" '.results[] | select(.vtype == $arg) | .uuid')
-log_only "VCF-I: waiting 60 seconds"
+log_only "waiting 60 seconds"
 sleep 60
-avi_api 2 2 POST "$(jq -n --arg c "${cloud_uuid}" --arg v "${vcenter_uuid}" '{cloud_uuid: $c, vcenter_uuid: $v}')" api/nsxt/transportnodes
+# transport_zone_id is required here even though neither the reference
+# project's own script nor Avi's inferred-from-cloud-config behavior
+# includes it - confirmed empirically (fails with "Transportzone path
+# missing" / HTTP 500 without it, works with it) against this Avi
+# version (32.1.1), despite the cloud object's own nsxt_configuration
+# already having a valid transport_zone set. tz_id was already looked up
+# earlier in this same script (transport zone discovery, above).
+avi_api 2 2 POST "$(jq -n --arg c "${cloud_uuid}" --arg v "${vcenter_uuid}" --arg tz "${tz_id}" '{cloud_uuid: $c, vcenter_uuid: $v, transport_zone_id: $tz}')" api/nsxt/transportnodes
 list_az_uuids="[]"
 while read -r item
 do
   az_json=$(jq -n --arg hid "$(echo ${item} | jq -c -r '.vc_mobj_id')" --arg vc "${vcenter_uuid}" --arg cloud "${cloud_uuid}" --arg n "az-$(echo ${item} | jq -c -r '.name')" \
     '{az_hosts: [{host_ids: [$hid], vcenter_ref: $vc}], cloud_ref: $cloud, name: $n}')
-  log_only "VCF-I: waiting 10 seconds"
+  log_only "waiting 10 seconds"
   sleep 10
   avi_api 2 2 POST "${az_json}" api/availabilityzone
   list_az_uuids=$(echo ${list_az_uuids} | jq -c --arg id "$(echo ${response_body} | jq -c -r '.uuid')" '. + [$id]')
@@ -246,7 +270,7 @@ do
     exit 100
   fi
 done
-log_notify "VCF-I: DNS VS UP after ${count_dns} attempts of ${pause_dns} seconds"
+log_notify "DNS VS UP after ${count_dns} attempts of ${pause_dns} seconds"
 
 #
 # demo traffic generator - adds loopback IPs to source synthetic client
@@ -308,6 +332,6 @@ echo ${avi_loopback_ips} | jq -c -r . | tee /home/ubuntu/json/loopback_ips.json 
 echo ${avi_user_agents} | jq -c -r . | tee /home/ubuntu/json/user_agents.json > /dev/null
 echo ${avi_loopback_ips} | jq -c -r '.[]' | while read -r lo_ip ; do sudo ip a add ${lo_ip} dev lo: ; done
 (crontab -l 2>/dev/null; echo "* * * * * /home/ubuntu/avi/traffic_gen_client.sh") | crontab -
-log_notify "VCF-I: Avi ctrl configured, traffic generator scheduled"
+log_notify "Avi ctrl configured, traffic generator scheduled"
 
 log_notify "06-avi-configure.sh complete"
