@@ -1,5 +1,5 @@
 #!/bin/bash
-# Avi Controller upgrade (merged from the reference project's avi/upgrade_avi.sh). Standalone here (unlike when this ran later in the same process as 06-avi-configure.sh) - re-derives ip_sddcm/avi_version/ip_avi and logs in fresh, matching how the reference project's own upgrade_avi.sh runs standalone too.
+# Avi Controller upgrade (merged from the reference project's avi/upgrade_avi.sh). Standalone here (unlike vcf_bootstrap.sh's own folded-in Avi configuration section, which runs in the same process as the Avi deployment right above it) - re-derives ip_sddcm/avi_version/ip_avi and logs in fresh, matching how the reference project's own upgrade_avi.sh runs standalone too.
 # Part of the split-up vcf_bootstrap.sh (see 00-lib.sh for why) - run
 # standalone as:
 #   bash 07-avi-upgrade.sh /home/ubuntu/json/deployment.json
@@ -14,9 +14,9 @@ log_notify "07-avi-upgrade.sh started"
 # simply later in the same run.
 #
 
-# Re-derived standalone (06-avi-configure.sh set these in-memory when this
-# ran later in the same bash process as it originally did) - matches the
-# reference project's own upgrade_avi.sh, which re-derives these fresh too.
+# Re-derived standalone (vcf_bootstrap.sh's own Avi configuration section
+# sets these in-memory when it runs there) - matches the reference
+# project's own upgrade_avi.sh, which re-derives these fresh too.
 ip_sddcm="${basename_sddc}-sddcm.${domain}"
 # spec.sddc.avi.version pins this explicitly when set (see crd-vapp.yaml)
 # - only fall back to deriving it from SDDC Manager's v1/bundles list when
