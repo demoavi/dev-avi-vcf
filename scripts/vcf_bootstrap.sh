@@ -1664,4 +1664,266 @@ echo ${avi_loopback_ips} | jq -c -r '.[]' | while read -r lo_ip ; do sudo ip a a
 (crontab -l 2>/dev/null; echo "* * * * * /home/ubuntu/avi/traffic_gen_client.sh") | crontab -
 log_notify "Avi ctrl configured, traffic generator scheduled"
 
-log_notify "vcf_bootstrap.sh complete (SDDC build + vCenter port groups + NSX config + Avi deployment + Avi configuration - see scripts/0N-*.sh for the remaining pipeline stages, run standalone)"
+#
+# Avi Controller upgrade (merged from the reference project's
+# avi/upgrade_avi.sh) - entirely skipped if spec.sddc.avi.pkg_iso isn't
+# set, since most deployments don't need one. Reuses ip_avi/avi_version/
+# avi_login/avi_api from the configuration section just above instead of
+# re-deriving them, since this now runs later in the same process.
+#
+if [ -z "${avi_pkg_filename}" ]; then
+  log_only "VCF-I: sddc.avi.pkg_iso not set, skipping Avi upgrade check"
+else
+  # gw has no route to download this itself - gw-setup.sh.tpl already
+  # copied it here at boot from the Iso CR referenced by
+  # sddc.avi.pkg_iso, mounted as gw's CD-ROM (see
+  # vapp_operator._ensure_gw_tools_media). If it's still missing, that
+  # Iso's media didn't contain a file matching pkg_iso.file, or wasn't
+  # attached at all - not something retrying here would fix.
+  avi_pkg_file="/home/ubuntu/avi/${avi_pkg_filename}"
+  if [ ! -f "${avi_pkg_file}" ]; then
+    log_notify "ERROR: ${avi_pkg_file} not found - gw tools ISO was not attached or didn't contain this file"
+    exit 100
+  fi
+  avi_login
+  avi_api 2 2 GET "" api/version/controller "*"
+  current_version=$(echo ${response_body} | jq -c -r '.[0].version' | cut -d")" -f1 | tr '(' '-')
+  target_version=$(basename "${avi_pkg_filename}" .pkg | cut -d"-" -f2-3)
+  if [[ ${current_version} == ${target_version} ]]; then
+    log_notify "VCF-I: Avi upgrade not required (already ${current_version})"
+  else
+    log_notify "VCF-I: Avi upgrade required, from ${current_version} to ${target_version}"
+    avi_api 2 2 POST "" api/image admin "${avi_pkg_file}"
+    image_uuid=$(echo ${response_body} | jq -c -r '.uuid')
+    sleep 10
+    upgrade_json=$(jq -n --arg id "${image_uuid}" '{image_uuid: $id, system: true, skip_warnings: true, dryrun: false, prechecks_only: false, se_group_options: {action_on_error: "CONTINUE_UPGRADE_OPS_ON_ERROR"}}')
+    avi_api 2 2 POST "${upgrade_json}" api/upgrade
+    log_only "VCF-I: waiting 1200 seconds for Avi upgrade to apply"
+    sleep 1200
+    retry_avi_up=10 ; pause_avi_up=60 ; attempt_avi_up=1
+    while true ; do
+      http_code=$(curl -k -o /dev/null -s --write-out '%{http_code}' "https://${ip_avi}/api/initial-data")
+      if [[ ${http_code} -eq 200 ]]; then
+        log_only "VCF-I: Avi ctrl reachable again after upgrade"
+        break
+      fi
+      ((attempt_avi_up++))
+      if [ ${attempt_avi_up} -eq ${retry_avi_up} ]; then
+        log_notify "ERROR: Avi ctrl not reachable after ${retry_avi_up} attempts of ${pause_avi_up} seconds post-upgrade"
+        exit 100
+      fi
+      sleep ${pause_avi_up}
+    done
+    avi_login
+    avi_api 2 2 GET "" api/upgradestatusinfo "*"
+    failed_items=$(echo ${response_body} | jq -c --arg tv "${target_version}" '[.results[] | select(.version != null and (.version | startswith($tv)) and .state.state != "UPGRADE_FSM_COMPLETED")]')
+    if [ "$(echo ${failed_items} | jq -c -r 'length')" -gt 0 ]; then
+      log_notify "ERROR: Avi has not been upgraded to ${target_version}: ${failed_items}"
+      exit 100
+    else
+      log_notify "VCF-I: Avi has been upgraded to ${target_version}"
+    fi
+  fi
+fi
+
+#
+# NSX Project/VPC/Transit-Gateway setup (merged from the reference
+# project's nsx/vpc_avi.sh) - despite the filename, the only Avi-specific
+# action in that script (registering Avi via
+# policy/api/v1/infra/alb-onboarding-workflow) is gated to 9.0/8.0U3b only
+# and is dropped here, same 9.1-only scope as everywhere else in this
+# script; what's left is pure NSX multi-tenancy setup, unrelated to the
+# Avi cloud config done earlier (that uses the traditional flat
+# CLOUD_NSXT integration, not this VPC/Project-scoped one). Reuses the
+# nsx_get_object/nsx_set_object/nsx_retrieve_object_path/
+# nsx_retrieve_object_id helpers already defined above for the NSX
+# configuration section - no new HTTP helpers needed. Also skips the
+# reference's own "wait for NSX Manager STABLE" re-check at the top of
+# this section, since that was already confirmed long ago earlier in this
+# same run.
+#
+while read -r item
+do
+  if [[ "$(echo ${item} | jq -r -c .project_ref)" == "default" ]]; then
+    ib_name=$(echo ${item} | jq -c -r .name)
+    nsx_set_object "policy/api/v1/infra/ip-blocks/${ib_name}" PATCH "$(jq -n --arg n "${ib_name}" --arg c "$(echo ${item} | jq -c -r .cidr)" --arg v "$(echo ${item} | jq -c -r .visibility)" '{display_name: $n, cidr: $c, visibility: $v}')"
+  fi
+done < <(echo ${nsx_config_ip_blocks} | jq -c -r '.[]')
+
+while read -r item
+do
+  gwc_name=$(echo ${item} | jq -c -r .name)
+  tier0_path=$(nsx_retrieve_object_path "policy/api/v1/infra/tier-0s" "$(echo ${item} | jq -c -r '.tier0_ref')")
+  nsx_set_object "policy/api/v1/infra/gateway-connections/${gwc_name}" PUT "$(jq -n --arg t "${tier0_path}" --arg n "${gwc_name}" '{tier0_path: $t, display_name: $n}')"
+done < <(echo ${nsx_config_gw_connections} | jq -c -r '.[]')
+
+while read -r item
+do
+  proj_name=$(echo ${item} | jq -c -r .name)
+  ip_block_external_path=$(nsx_retrieve_object_path "policy/api/v1/infra/ip-blocks" "$(echo ${item} | jq -c -r '.ip_block_ref')")
+  tier0_path=$(nsx_retrieve_object_path "policy/api/v1/infra/tier-0s" "$(echo ${item} | jq -c -r '.tier0_ref')")
+  edge_cluster_id=$(nsx_retrieve_object_id "api/v1/edge-clusters" "$(echo ${item} | jq -c -r '.edge_cluster_ref')")
+  gw_connections_refs="[]"
+  while read -r gwc_ref
+  do
+    gwc_path=$(nsx_retrieve_object_path "policy/api/v1/infra/gateway-connections" "${gwc_ref}")
+    gw_connections_refs=$(echo ${gw_connections_refs} | jq -c --arg p "${gwc_path}" '. + [$p]')
+  done < <(echo ${item} | jq -c -r '.gw_connections_refs[]')
+  project_json=$(jq -n --arg ep "/infra/sites/default/enforcement-points/default/edge-clusters/${edge_cluster_id}" --arg t0 "${tier0_path}" \
+    --argjson gwc "${gw_connections_refs}" --arg ipb "${ip_block_external_path}" --arg n "${proj_name}" \
+    '{site_infos: [{edge_cluster_paths: [$ep], site_path: "/infra/sites/default"}], tier_0s: [$t0], tgw_external_connections: $gwc, external_ipv4_blocks: [$ipb], activate_default_dfw_rules: false, display_name: $n}')
+  nsx_set_object "policy/api/v1/orgs/default/projects/${proj_name}" PATCH "${project_json}"
+done < <(echo ${nsx_config_projects} | jq -c -r '.[]')
+
+# Known rough edge, per the reference project's own captured error log:
+# this call fails with HTTP 400 ("Parent ... does not exist. Please first
+# create the parent with id default.") for any non-default project unless
+# NSX has already set up that project's default transit gateway on its
+# own - not something this port works around, just carried over as-is.
+while read -r item
+do
+  gwc_ref=$(echo ${item} | jq -c -r .gw_connection_ref)
+  proj_ref=$(echo ${item} | jq -c -r .project_ref)
+  tgw_name=$(echo ${item} | jq -c -r .name)
+  gwc_path=$(nsx_retrieve_object_path "policy/api/v1/infra/gateway-connections" "${gwc_ref}")
+  nsx_set_object "policy/api/v1/orgs/default/projects/${proj_ref}/transit-gateways/${tgw_name}/attachments/${gwc_ref}" PATCH "$(jq -n --arg p "${gwc_path}" --arg n "${gwc_ref}" '{connection_path: $p, display_name: $n}')"
+done < <(echo ${nsx_config_transit_gateways} | jq -c -r '.[]')
+
+# ip-block creation for non-default projects - only the inter-VPC transit
+# gateway CIDR (scope vpc_tgw) gets created under each project this way.
+while read -r item
+do
+  proj_ref=$(echo ${item} | jq -r -c .project_ref)
+  scope=$(echo ${item} | jq -r -c .scope)
+  if [[ "${proj_ref}" != "default" && "${proj_ref}" != "null" && "${scope}" == "vpc_tgw" ]]; then
+    project_id=$(nsx_retrieve_object_id "policy/api/v1/orgs/default/projects" "${proj_ref}")
+    ib_name=$(echo ${item} | jq -c -r .name)
+    nsx_set_object "policy/api/v1/orgs/default/projects/${project_id}/infra/ip-blocks/${ib_name}" PATCH "$(jq -n --arg n "${ib_name}" --arg c "$(echo ${item} | jq -c -r .cidr)" --arg v "$(echo ${item} | jq -c -r .visibility)" '{display_name: $n, cidr: $c, visibility: $v}')"
+  fi
+done < <(echo ${nsx_config_ip_blocks} | jq -c -r '.[]')
+
+while read -r item
+do
+  vcp_name=$(echo ${item} | jq -c -r .name)
+  proj_ref=$(echo ${item} | jq -c -r .project_ref)
+
+  external_ip_block_refs_paths="[]"
+  while read -r ref
+  do
+    p=$(nsx_retrieve_object_path "policy/api/v1/infra/ip-blocks" "${ref}")
+    external_ip_block_refs_paths=$(echo ${external_ip_block_refs_paths} | jq -c --arg p "${p}" '. + [$p]')
+  done < <(echo ${item} | jq -c -r '.external_ip_block_refs[]')
+
+  edge_cluster_refs_path="[]"
+  while read -r ref
+  do
+    eid=$(nsx_retrieve_object_id "api/v1/edge-clusters" "${ref}")
+    edge_cluster_refs_path=$(echo ${edge_cluster_refs_path} | jq -c --arg p "/infra/sites/default/enforcement-points/default/edge-clusters/${eid}" '. + [$p]')
+  done < <(echo ${item} | jq -c -r '.edge_cluster_refs[]')
+
+  if [[ "${proj_ref}" == "default" ]]; then
+    ipb_endpoint="policy/api/v1/infra/ip-blocks"
+  else
+    ipb_endpoint="policy/api/v1/orgs/default/projects/${proj_ref}/infra/ip-blocks"
+  fi
+  private_tgw_ip_block_refs_path="[]"
+  while read -r ref
+  do
+    p=$(nsx_retrieve_object_path "${ipb_endpoint}" "${ref}")
+    private_tgw_ip_block_refs_path=$(echo ${private_tgw_ip_block_refs_path} | jq -c --arg p "${p}" '. + [$p]')
+  done < <(echo ${item} | jq -c -r '.private_tgw_ip_block_refs[]')
+
+  vcp_json=$(jq -n --arg tgp "/orgs/default/projects/${proj_ref}/transit-gateways/default" \
+    --argjson eib "${external_ip_block_refs_paths}" --argjson ptib "${private_tgw_ip_block_refs_path}" \
+    --argjson ecp "${edge_cluster_refs_path}" --arg n "${vcp_name}" \
+    '{transit_gateway_path: $tgp, external_ip_blocks: $eib, is_default: true, private_tgw_ip_blocks: $ptib,
+      service_gateway: {enable: true, nat_config: {enable_default_snat: true}, edge_cluster_paths: $ecp}, display_name: $n}')
+  nsx_set_object "policy/api/v1/orgs/default/projects/${proj_ref}/vpc-connectivity-profiles/${vcp_name}" PUT "${vcp_json}"
+done < <(echo ${nsx_config_vpc_connectivity_profiles} | jq -c -r '.[]')
+
+while read -r item
+do
+  vsp_name=$(echo ${item} | jq -c -r .name)
+  proj_ref=$(echo ${item} | jq -c -r .project_ref)
+  vsp_json=$(jq -n --arg n "${vsp_name}" --arg dns "${ip_gw}" \
+    '{display_name: $n, is_default: true, dhcp_config: {dhcp_server_config: {dns_client_config: {dns_server_ips: [$dns]}, lease_time: 86400, ntp_servers: [$dns], advanced_config: {is_distributed_dhcp: true}}}}')
+  nsx_set_object "policy/api/v1/orgs/default/projects/${proj_ref}/vpc-service-profiles/${vsp_name}" PUT "${vsp_json}"
+done < <(echo ${nsx_config_vpc_service_profiles} | jq -c -r '.[]')
+
+while read -r item
+do
+  vpc_name=$(echo ${item} | jq -c -r .name)
+  proj_ref=$(echo ${item} | jq -c -r .project_ref)
+
+  private_ips="[]"
+  while read -r ref
+  do
+    cidr=$(echo ${nsx_config_ip_blocks} | jq -c -r --arg arg "${ref}" '.[] | select( .name == $arg).cidr')
+    private_ips=$(echo ${private_ips} | jq -c --arg c "${cidr}" '. + [$c]')
+  done < <(echo ${item} | jq -c -r '.private_ips_refs[]')
+
+  vpc_service_profile_path=$(nsx_retrieve_object_path "policy/api/v1/orgs/default/projects/${proj_ref}/vpc-service-profiles" "$(echo ${item} | jq -c -r .vpc_service_profile_ref)")
+  nsx_set_object "policy/api/v1/orgs/default/projects/${proj_ref}/vpcs/${vpc_name}" PUT "$(jq -n --arg vsp "${vpc_service_profile_path}" --argjson pi "${private_ips}" --arg n "${vpc_name}" '{vpc_service_profile: $vsp, load_balancer_vpc_endpoint: {enabled: true}, private_ips: $pi, display_name: $n}')"
+
+  vpc_connectivity_profile_path=$(nsx_retrieve_object_path "policy/api/v1/orgs/default/projects/${proj_ref}/vpc-connectivity-profiles" "$(echo ${item} | jq -c -r .connectivity_profile_ref)")
+  nsx_set_object "policy/api/v1/orgs/default/projects/${proj_ref}/vpcs/${vpc_name}/attachments/$(echo ${item} | jq -c -r .connectivity_profile_ref)" PUT "$(jq -n --arg p "${vpc_connectivity_profile_path}" '{vpc_connectivity_profile: $p}')"
+done < <(echo ${nsx_config_vpcs} | jq -c -r '.[]')
+
+log_notify "VCF-I: NSX Project/VPC setup complete"
+
+#
+# vSAN health alarm silencing (merged from the reference project's
+# vcenter/silent_alarm.sh + templates/silence_vsan_expect_script.sh.template)
+# - needed for Tanzu/Supervisor enablement, which checks vSAN health as a
+# prerequisite and would otherwise flag/block on checks a NESTED vSAN can
+# never pass (controller driver/firmware/HCL support are meaningless for
+# virtualized disk controllers). Retargeted from the reference's "outer
+# host vCenter" (a vCenter/govc-managed physical layer this project has no
+# equivalent of - everything outer-layer here is VCD-managed) to OUR own
+# nested vCenter instead, which has exactly the same class of vSAN alarm
+# noise. Also fixes what looks like a bug in the reference's own SSH
+# invocation - it embeds a password directly into the ssh destination
+# argument ("user@domain:password@host", not valid SSH syntax, and
+# redundant anyway since the very next expect step still waits for an
+# interactive password prompt) - with a clean `-l` username instead. The
+# later `rvc user:password@host` line keeps that embedded-password form
+# (RVC's own real, documented login syntax, not ssh's), but the password
+# itself needs single-quoting there - confirmed live: this project's
+# generic_password contains "!", and bash's interactive history expansion
+# (the shell this gets typed into, via "pi shell") treats an unquoted "!"
+# as a history-substitution trigger ("event not found"), silently
+# preventing rvc from ever launching and leaving every subsequent
+# vsan.health.silent_health_check_configure command typed into a bare
+# bash prompt instead of rvc's. The reference project's own template
+# already single-quotes the password for exactly this reason - this port
+# had dropped those quotes.
+#
+export VC_ROOT_PASSWORD="${generic_password}"
+export VC_SSO_USER="administrator@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)"
+export VC_HOST="${basename_sddc}-vc01.${domain}"
+export VC_DC="${basename_sddc}-dc"
+export VC_CLUSTER="${basename_sddc}-cluster"
+expect <<'VSAN_EXPECT_EOF'
+set timeout 60
+set password $env(VC_ROOT_PASSWORD)
+spawn ssh -tt -o StrictHostKeyChecking=no -l $env(VC_SSO_USER) $env(VC_HOST)
+expect "assword:" { send "$password\r" }
+expect "and>" { send "com.vmware.appliance.version1.access.shell.set --enabled true\r" }
+expect "and> " { send "shell\r" }
+expect " ]$ " { send "rvc $env(VC_SSO_USER):'$password'@$env(VC_HOST) -a -q\r" }
+expect "> " { send "vsan.health.silent_health_check_configure -a controllerdriver $env(VC_HOST)/$env(VC_DC)/computers/$env(VC_CLUSTER)\n" }
+expect "> " { send "vsan.health.silent_health_check_configure -a controllerdiskmode $env(VC_HOST)/$env(VC_DC)/computers/$env(VC_CLUSTER)\n" }
+expect "> " { send "vsan.health.silent_health_check_configure -a controllerfirmware $env(VC_HOST)/$env(VC_DC)/computers/$env(VC_CLUSTER)\n" }
+expect "> " { send "vsan.health.silent_health_check_configure -a controllerreleasesupport $env(VC_HOST)/$env(VC_DC)/computers/$env(VC_CLUSTER)\n" }
+expect "> " { send "vsan.health.silent_health_check_configure -a controlleronhcl $env(VC_HOST)/$env(VC_DC)/computers/$env(VC_CLUSTER)\n" }
+expect "> " { send "vsan.health.silent_health_check_configure -a upgradelowerhosts $env(VC_HOST)/$env(VC_DC)/computers/$env(VC_CLUSTER)\n" }
+expect "> " { send "vsan.health.silent_health_check_configure -a perfsvcstatus $env(VC_HOST)/$env(VC_DC)/computers/$env(VC_CLUSTER)\n" }
+expect "> " { send "exit\n" }
+expect " ]$ " { send "exit\n" }
+expect "and> " { send "exit\n" }
+expect eof
+VSAN_EXPECT_EOF
+unset VC_ROOT_PASSWORD VC_SSO_USER VC_HOST VC_DC VC_CLUSTER
+log_notify "VCF-I: vSAN health alarm silencing applied on ${basename_sddc}-vc01.${domain}"
+
+log_notify "vcf_bootstrap.sh complete (SDDC build + vCenter port groups + NSX config + Avi deployment + Avi configuration + Avi upgrade + NSX Project/VPC + vSAN alarm silencing - see scripts/0N-*.sh for the remaining pipeline stages, run standalone)"
