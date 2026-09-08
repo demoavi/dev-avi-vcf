@@ -1251,7 +1251,7 @@ else
 fi
 if [[ ${avi_download_status} != "SUCCESSFUL" ]]; then
   sddc_manager_api 3 2 PATCH '{"bundleDownloadSpec":{"downloadNow":true}}' "${ip_sddcm}" v1/bundles/${avi_bundle_id} $(jq -c -r .accessToken /tmp/token_sddcm.json)
-  log_only "VCF-I: waiting 120 seconds for Avi bundle download to start"
+  log_only "waiting 120 seconds for Avi bundle download to start"
   sleep 120
 fi
 
@@ -1283,7 +1283,7 @@ if [[ $(echo ${ips_avi} | jq -c -r '. | length') -eq 3 ]]; then
     '{adminPassword: $pw, bundleId: $bundle, clusterFqdn: $fqdn, clusterName: "cluster-1", formFactor: "SMALL",
       nodes: [$ips[] | {ipAddress: .}], nsxIds: [$nsx], vcfopsAdminPassword: $pw}')
   sddc_manager_api 3 2 POST "${avi_cluster_json}" "${ip_sddcm}" v1/alb-clusters $(jq -c -r .accessToken /tmp/token_sddcm.json)
-  log_notify "VCF-I: Avi cluster deployment started"
+  log_notify "Avi cluster deployment started"
 else
   #
   # single-node Avi controller needs a feature flag enabled on SDDC Manager
@@ -1309,15 +1309,15 @@ expect "*$ " { send "exit\r" }
 expect eof
 SDDCM_EXPECT_EOF
 unset SDDCM_ROOT_PASSWORD SDDCM_HOST
-log_only "VCF-I: waiting 180 seconds for SDDC Manager services to restart"
+log_only "waiting 180 seconds for SDDC Manager services to restart"
 sleep 180
 
 avi_cluster_json=$(jq -n --arg pw "${generic_password}" --arg bundle "${avi_bundle_id}" --arg fqdn "${basename_sddc}-avi.${domain}" --arg nsx "${nsx_id}" --arg ip "$(echo ${ips_avi} | jq -r '.[0]')" \
   '{adminPassword: $pw, bundleId: $bundle, clusterFqdn: $fqdn, clusterName: "cluster-1", formFactor: "SMALL",
     nodes: [{ipAddress: $ip}], nsxIds: [$nsx], vcfopsAdminPassword: $pw}')
 sddc_manager_api 3 2 POST "${avi_cluster_json}" "${ip_sddcm}" v1/alb-clusters $(jq -c -r .accessToken /tmp/token_sddcm.json)
-log_notify "VCF-I: single-node Avi controller deployment started"
-log_only "VCF-I: waiting 1800 seconds for Avi controller deployment"
+log_notify "single-node Avi controller deployment started"
+log_only "waiting 1800 seconds for Avi controller deployment"
 sleep 1800
 
 create_api_session "administrator@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)" "${generic_password}" "${ip_sddcm}" /tmp/token_sddcm.json
@@ -1326,7 +1326,7 @@ while true ; do
   sddc_manager_api 3 2 GET '' "${ip_sddcm}" v1/alb-clusters $(jq -c -r .accessToken /tmp/token_sddcm.json)
   avi_deploy_status=$(echo ${response_body} | jq -c -r '.elements[0].deploymentStatus')
   if [[ ${avi_deploy_status} == "ACTIVE" ]]; then
-    log_notify "VCF-I: Avi controller deployed"
+    log_notify "Avi controller deployed"
     break
   fi
   if [ ${attempt_avi_deploy} -eq ${retry_avi_deploy} ]; then
@@ -1672,7 +1672,7 @@ log_notify "Avi ctrl configured, traffic generator scheduled"
 # re-deriving them, since this now runs later in the same process.
 #
 if [ -z "${avi_pkg_filename}" ]; then
-  log_only "VCF-I: sddc.avi.pkg_iso not set, skipping Avi upgrade check"
+  log_only "sddc.avi.pkg_iso not set, skipping Avi upgrade check"
 else
   # gw has no route to download this itself - gw-setup.sh.tpl already
   # copied it here at boot from the Iso CR referenced by
@@ -1690,21 +1690,21 @@ else
   current_version=$(echo ${response_body} | jq -c -r '.[0].version' | cut -d")" -f1 | tr '(' '-')
   target_version=$(basename "${avi_pkg_filename}" .pkg | cut -d"-" -f2-3)
   if [[ ${current_version} == ${target_version} ]]; then
-    log_notify "VCF-I: Avi upgrade not required (already ${current_version})"
+    log_notify "Avi upgrade not required (already ${current_version})"
   else
-    log_notify "VCF-I: Avi upgrade required, from ${current_version} to ${target_version}"
+    log_notify "Avi upgrade required, from ${current_version} to ${target_version}"
     avi_api 2 2 POST "" api/image admin "${avi_pkg_file}"
     image_uuid=$(echo ${response_body} | jq -c -r '.uuid')
     sleep 10
     upgrade_json=$(jq -n --arg id "${image_uuid}" '{image_uuid: $id, system: true, skip_warnings: true, dryrun: false, prechecks_only: false, se_group_options: {action_on_error: "CONTINUE_UPGRADE_OPS_ON_ERROR"}}')
     avi_api 2 2 POST "${upgrade_json}" api/upgrade
-    log_only "VCF-I: waiting 1200 seconds for Avi upgrade to apply"
+    log_only "waiting 1200 seconds for Avi upgrade to apply"
     sleep 1200
     retry_avi_up=10 ; pause_avi_up=60 ; attempt_avi_up=1
     while true ; do
       http_code=$(curl -k -o /dev/null -s --write-out '%{http_code}' "https://${ip_avi}/api/initial-data")
       if [[ ${http_code} -eq 200 ]]; then
-        log_only "VCF-I: Avi ctrl reachable again after upgrade"
+        log_only "Avi ctrl reachable again after upgrade"
         break
       fi
       ((attempt_avi_up++))
@@ -1721,7 +1721,7 @@ else
       log_notify "ERROR: Avi has not been upgraded to ${target_version}: ${failed_items}"
       exit 100
     else
-      log_notify "VCF-I: Avi has been upgraded to ${target_version}"
+      log_notify "Avi has been upgraded to ${target_version}"
     fi
   fi
 fi
@@ -1869,7 +1869,7 @@ do
   nsx_set_object "policy/api/v1/orgs/default/projects/${proj_ref}/vpcs/${vpc_name}/attachments/$(echo ${item} | jq -c -r .connectivity_profile_ref)" PUT "$(jq -n --arg p "${vpc_connectivity_profile_path}" '{vpc_connectivity_profile: $p}')"
 done < <(echo ${nsx_config_vpcs} | jq -c -r '.[]')
 
-log_notify "VCF-I: NSX Project/VPC setup complete"
+log_notify "NSX Project/VPC setup complete"
 
 #
 # vSAN health alarm silencing (merged from the reference project's
@@ -1924,7 +1924,7 @@ expect "and> " { send "exit\n" }
 expect eof
 VSAN_EXPECT_EOF
 unset VC_ROOT_PASSWORD VC_SSO_USER VC_HOST VC_DC VC_CLUSTER
-log_notify "VCF-I: vSAN health alarm silencing applied on ${basename_sddc}-vc01.${domain}"
+log_notify "vSAN health alarm silencing applied on ${basename_sddc}-vc01.${domain}"
 
 #
 # Supervisor (Tanzu) cluster enablement (merged from the reference
@@ -2007,8 +2007,8 @@ supervisor_json=$(jq -n \
   }')
 create_vcenter_api_session
 vcenter_api 3 3 POST "api/vcenter/namespace-management/supervisors/${cluster_id}?action=enable_on_compute_cluster" "${supervisor_json}"
-log_notify "VCF-I: Supervisor cluster enablement started"
-log_only "VCF-I: waiting 600 seconds"
+log_notify "Supervisor cluster enablement started"
+log_only "waiting 600 seconds"
 sleep 600
 
 retry_supervisor=121 ; pause_supervisor=60 ; attempt_supervisor=1
@@ -2018,7 +2018,7 @@ while true ; do
   config_status=$(echo ${response_body} | jq -c -r '.[0].config_status')
   k8s_status=$(echo ${response_body} | jq -c -r '.[0].kubernetes_status')
   if [[ "${config_status}" == "RUNNING" && "${k8s_status}" == "READY" ]]; then
-    log_notify "VCF-I: Supervisor config_status ${config_status}, kubernetes_status ${k8s_status} after ${attempt_supervisor} attempts of ${pause_supervisor} seconds"
+    log_notify "Supervisor config_status ${config_status}, kubernetes_status ${k8s_status} after ${attempt_supervisor} attempts of ${pause_supervisor} seconds"
     break
   fi
   ((attempt_supervisor++))
@@ -2118,6 +2118,6 @@ sed -e "s/\${generic_password}/${generic_password}/" \
 rm -f /tmp/auth_vks_context.sh.template
 chmod u+x /home/ubuntu/supervisor/auth_vks_context.sh
 
-log_notify "VCF-I: Supervisor cluster ready, auth helper scripts written to /home/ubuntu/supervisor/"
+log_notify "Supervisor cluster ready, auth helper scripts written to /home/ubuntu/supervisor/"
 
 log_notify "vcf_bootstrap.sh complete (SDDC build + vCenter port groups + NSX config + Avi deployment + Avi configuration + Avi upgrade + NSX Project/VPC + vSAN alarm silencing + Supervisor enablement - full pipeline, no remaining standalone stages)"
