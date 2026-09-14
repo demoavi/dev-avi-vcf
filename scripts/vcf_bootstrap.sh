@@ -66,6 +66,49 @@ vcd_find_vm_href() {
 }
 gw_vm_href=$(vcd_find_vm_href "gw")
 
+# Gates on the operator having actually finished this host's boot-ISO
+# upload+insert before we ever hit its HTTPS reachability loop below -
+# vapp_operator.py only powers an ESXi VM on AFTER its media upload/insert
+# completes, and that pipeline is serialized per host (host 1 alone pays
+# the one-time base-ISO download+extract cost), so it can legitimately take
+# far longer than a fixed HTTPS-reachability timeout budget. Polling this
+# real signal instead avoids racing a guessed duration against however long
+# that upload happens to take. Confirmed live against this VCD's own
+# api/query?type=vm records: the field is a plain string, "status" ==
+# "POWERED_ON"/"POWERED_OFF" (not a numeric/XML status code).
+vcd_wait_vm_powered_on() {
+  local target_name="$1"
+  local retry=180 pause=20 attempt=1
+  while true; do
+    local page=1
+    local page_size=128
+    local status=""
+    while true; do
+      local resp=$(curl -sk "https://${vcd_host}/api/query?type=vm&format=records&page=${page}&pageSize=${page_size}" \
+        -H "Authorization: Bearer ${vcd_auth_token}" \
+        -H "Accept: application/*+json;version=${vcd_api_version}")
+      status=$(echo "${resp}" | jq -r --arg name "${target_name}" '[.record[] | select(.name == $name) | .status][0] // empty')
+      if [ -n "${status}" ]; then
+        break
+      fi
+      local record_count=$(echo "${resp}" | jq -r '.record | length')
+      if [ "${record_count}" -lt "${page_size}" ]; then
+        break
+      fi
+      ((page++))
+    done
+    if [ "${status}" == "POWERED_ON" ]; then
+      return 0
+    fi
+    if [ ${attempt} -eq ${retry} ]; then
+      echo "ERROR: ${target_name} not POWERED_ON in VCD after ${attempt} attempts of ${pause} seconds (last status='${status:-not found}')"
+      return 1
+    fi
+    sleep ${pause}
+    ((attempt++))
+  done
+}
+
 # log_only just echoes (already captured by the caller's stdout redirect
 # into vcf_bootstrap.log); log_notify also posts to gchat AND writes the
 # same message into a VCD metadata key (vcf_bootstrap_progress) on gw's own
@@ -300,15 +343,21 @@ do
     name_esxi="${basename_sddc}-wld0${group}-esx0${pos_in_group}"
   fi
   ip_esxi="$(echo ${ips_esxi} | jq -r .[$(expr ${esxi} - 1)])"
+
+  if ! vcd_wait_vm_powered_on "${name_esxi}"; then
+    echo "ERROR: ${name_esxi} never reached POWERED_ON in VCD, skipping this host"
+    continue
+  fi
+
   count=1
   until $(curl --output /dev/null --silent --head -k https://${ip_esxi})
   do
     echo "Attempt ${count}: Waiting for ESXi host at https://${ip_esxi} to be reachable..."
     sleep 10
     count=$((count+1))
-    if [[ "${count}" -eq 60 ]]; then
-      echo "ERROR: Unable to connect to ESXi host at https://${ip_esxi}"
-      exit
+    if [[ "${count}" -eq 90 ]]; then
+      echo "ERROR: Unable to connect to ESXi host at https://${ip_esxi}, skipping this host"
+      continue 2
     fi
   done
   sleep 60
@@ -338,8 +387,11 @@ do
     sleep 10
     count=$((count+1))
     if [[ "${count}" -eq 60 ]]; then
-      echo "ERROR: Unable to connect to ESXi host at https://${ip_esxi} after power cycle"
-      exit
+      # hostSpec for this host was already appended to hostSpecs above -
+      # a single stuck host here shouldn't abort the whole SDDC bootstrap,
+      # so skip its remaining customization below rather than exiting.
+      echo "ERROR: Unable to connect to ESXi host at https://${ip_esxi} after power cycle, skipping this host"
+      continue 2
     fi
   done
   sleep 20
