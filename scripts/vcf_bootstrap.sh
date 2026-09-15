@@ -1623,6 +1623,23 @@ seg_update_json=$(jq -n --argjson azs "$(echo ${list_az_uuids} | jq -c '.[-3:]')
 avi_api 2 2 PATCH "${seg_update_json}" "api/serviceenginegroup/${serviceenginegroup_uuid}"
 
 #
+# Extra Service Engine Groups (spec.sddc.avi.service_engine_groups) - in
+# addition to the Default-Group patched above. Mirrors the reference
+# project's avi/configure_avi.sh "seg creation" section exactly: each
+# entry's fields are passed through as-is, only cloud_ref is added.
+# Optional - skipped entirely if unset/empty.
+#
+if [ -z "${service_engine_groups}" ] || [ "${service_engine_groups}" == "null" ] || [ "${service_engine_groups}" == "[]" ]; then
+  log_only "skipping seg creation"
+else
+  while read -r item
+  do
+    json_data=$(echo ${item} | jq -c --arg cloud_url "${cloud_url}" '. + {cloud_ref: $cloud_url}')
+    avi_api 2 2 POST "${json_data}" api/serviceenginegroup
+  done < <(echo "${service_engine_groups}" | jq -c -r '.[]')
+fi
+
+#
 # DNS VsVip + DNS virtual service, then wait for it to come up
 #
 vsvip_json=$(jq -n --arg cloud "${cloud_url}" --arg fqdn "dns.${avi_subdomain}.${domain}" --arg ref "/api/network/${vip_uuid}" \
