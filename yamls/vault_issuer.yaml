@@ -1,0 +1,14 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: vault-issuer
+  namespace: namespace
+spec:
+  vault:
+    server: server
+    path: pki_int/sign/pki_intermediate_role
+    caBundle: caBundle
+auth:
+  tokenSecretRef:
+    name: cert-manager-vault-token
+    key: token
