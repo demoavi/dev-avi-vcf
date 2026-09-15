@@ -8,7 +8,7 @@ spec:
     server: server
     path: pki_int/sign/pki_intermediate_role
     caBundle: caBundle
-auth:
-  tokenSecretRef:
-    name: cert-manager-vault-token
-    key: token
+    auth:
+      tokenSecretRef:
+        name: cert-manager-vault-token
+        key: token
