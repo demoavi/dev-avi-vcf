@@ -1552,7 +1552,22 @@ avi_api 2 2 PATCH "${cloud_update_json}" "api/cloud/${cloud_uuid}"
 # DNS profile, then re-login (matching the reference's own wait+relogin
 # here, presumably to pick up the cloud placement before the next calls)
 #
-avi_api 2 2 POST "$(jq -n --arg fqdn "${avi_subdomain}.${domain}" '{name: "dns-avi", type: "IPAMDNS_TYPE_INTERNAL_DNS", internal_profile: {dns_service_domain: [{domain_name: $fqdn}]}}')" api/ipamdnsproviderprofile
+# One dns_service_domain entry for the base avi_subdomain (e.g.
+# app.vcf9.lab, used by anything not org-scoped) PLUS one entry per org
+# actually configured (org-1.vcf9.lab, org-2.vcf9.lab, ...) - needed
+# because each org's blueprints resolve their own per-org FQDN (see the
+# blueprints section further below, which substitutes avi_subdomain with
+# the org's own name for exactly this reason) - without a matching DNS
+# service domain per org, Avi's internal DNS/IPAM has nothing
+# authoritative to resolve those hostnames against. vcf_a_organizations
+# is already the full expanded per-org list (empty array if
+# sddc.vcf_a is unset, matching every other vcf_a_* variable). Confirmed
+# live (pass_through: true on every entry) via the equivalent manual
+# config on the sddc/vCenter reference environment's own Avi controller.
+#
+avi_dns_domains_json=$(jq -n --arg base "${avi_subdomain}.${domain}" --argjson orgs "${vcf_a_organizations}" --arg domain "${domain}" \
+  '[{domain_name: $base, pass_through: true}] + ($orgs | map({domain_name: (.name + "." + $domain), pass_through: true}))')
+avi_api 2 2 POST "$(jq -n --argjson dsd "${avi_dns_domains_json}" '{name: "dns-avi", type: "IPAMDNS_TYPE_INTERNAL_DNS", internal_profile: {dns_service_domain: $dsd}}')" api/ipamdnsproviderprofile
 log_only "configure Avi - waiting 120 seconds"
 sleep 120
 avi_login
