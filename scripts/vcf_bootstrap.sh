@@ -4231,19 +4231,42 @@ fi
 
 #
 # Blueprints (org-portal phase) - idempotent, one independent copy
-# uploaded+released per org with blueprints.enabled, from every *.yaml
-# file in a fixed local directory (project convention, not a CR field).
-# Unrelated to namespace/vks_cluster gating - blueprints are a plain
-# Aria Automation Cloud Template concept, no Avi/segName dependency.
+# uploaded+released per org with blueprints.enabled, from every
+# *.yaml.template file in the bootstrap repo's own blueprints/ dir (a
+# dedicated folder there, deliberately separate from yamls/ - that one's
+# entries are k8s-shaped manifests dispatched by .kind in
+# gw-setup.sh.tpl; these are Aria Automation Cloud Template YAML, a
+# different schema with no .kind field at all). Unrelated to
+# namespace/vks_cluster gating - blueprints are a plain Aria Automation
+# Cloud Template concept, no Avi/segName dependency.
 #
 # NOT cross-org shared (confirmed live: organizationSharings requires a
 # rights-bundle right that, even granted, still didn't clear the "does
 # not have required privileges to share catalog items" error - root
 # cause not found yet). Each enabled org gets its own separate upload.
 #
-blueprints_dir="/home/ubuntu/vcf-automation/blueprints"
-if [ ! -d "${blueprints_dir}" ]; then
-  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${blueprints_dir} does not exist, skipping all blueprint provisioning" "${log_file}" "" ""
+# ${avi_subdomain} in each template is deliberately substituted with
+# THIS ORG'S OWN NAME, not the deployment's actual avi_subdomain value -
+# substituting the real (single, deployment-wide) avi_subdomain would
+# give every org's copy of a blueprint the exact same FQDN (e.g.
+# app.alb.vcf9.lab for org-1 AND org-2 alike), a real routing conflict
+# once more than one org has the same blueprint deployed. Using the org
+# name instead keeps every org's instance unique (app.org-1.vcf9.lab,
+# app.org-2.vcf9.lab, ...) with no extra CR field needed. domain is
+# still the real, shared domain value - no per-org conflict there.
+# Substitution happens HERE, not in gw-setup.sh.tpl, because that file
+# is itself rendered through userdata.py's own ${name} Python templating
+# before it ever reaches gw - any ${avi_subdomain}/${domain}/org_name
+# placeholder text put there gets consumed by THAT pass instead of
+# surviving to run as a real sed command. vcf_bootstrap.sh has no such
+# pass (delivered verbatim via git clone), so ${domain} below is a
+# genuine, already-set bash variable (same one used elsewhere in this
+# script, e.g. the Avi DNS profile step above) - safe to substitute
+# with here, and ${org_name} is this loop's own per-iteration variable.
+#
+blueprints_src_dir="/home/ubuntu/dev-avi-vcf/blueprints"
+if [ ! -d "${blueprints_src_dir}" ]; then
+  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${blueprints_src_dir} does not exist, skipping all blueprint provisioning" "${log_file}" "" ""
 else
   while read item
   do
@@ -4275,9 +4298,9 @@ else
         continue
       fi
 
-      for bp_file in "${blueprints_dir}"/*.yaml; do
+      for bp_file in "${blueprints_src_dir}"/*.yaml.template; do
         [ -e "${bp_file}" ] || continue
-        bp_name=$(basename "${bp_file}" .yaml)
+        bp_name=$(basename "${bp_file}" .yaml.template)
 
         blueprint_api GET "blueprint/api/blueprints" "" "${org_token}"
         bp_id=$(echo ${response_body} | jq -c -r --arg arg "${bp_name}" '.content[] | select(.name == $arg) | .id')
@@ -4286,7 +4309,7 @@ else
           continue
         fi
 
-        bp_content=$(cat "${bp_file}")
+        bp_content=$(sed -e "s@\${avi_subdomain}@${org_name}@g" -e "s/\${domain}/${domain}/g" "${bp_file}")
         bp_json=$(jq -n --arg n "${bp_name}" --arg pid "${project_id}" --arg content "${bp_content}" \
           '{name: $n, description: null, valid: true, content: $content, projectId: $pid, requestScopeOrg: true, iconId: null}')
         blueprint_api POST "blueprint/api/blueprints?apiVersion=2020-08-25" "${bp_json}" "${org_token}"
