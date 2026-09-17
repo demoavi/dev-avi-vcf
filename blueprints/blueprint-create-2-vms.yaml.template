@@ -67,6 +67,21 @@ resources:
             name: ${input.vm_image_id} #ID of the VM image to build from
           storageClass: sddc01-cluster-vsan-storage-policy
           powerState: PoweredOn
+          bootstrap:
+            vAppConfig:
+              properties:
+                - key: guestinfo.labweb.latency_active
+                  value:
+                    value: hold
+                - key: guestinfo.labweb.latency_to_ms
+                  value:
+                    value: '100'
+                - key: guestinfo.labweb.latency_sched_start
+                  value:
+                    value: '10:00'
+                - key: guestinfo.labweb.latency_sched_minutes
+                  value:
+                    value: '90'
       wait:
         conditions:
           - type: VirtualMachineCreated
