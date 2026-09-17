@@ -27,17 +27,6 @@ resources:
     properties:
       name: ${input.namespace}
       existing: true
-  Username_Secret:
-    type: CCI.Supervisor.Resource
-    properties:
-      context: ${resource.Namespace.id}
-      manifest:
-        apiVersion: v1
-        kind: Secret
-        metadata:
-          name: ${env.deploymentName}-bootstrap-secret
-        stringData:
-          aviuser-passwd: $1$xITZYmhL$wz6xxzHHCnaZBJFkzfXIz0
   Virtual_Machine_1:
     type: CCI.Supervisor.Resource
     properties:
