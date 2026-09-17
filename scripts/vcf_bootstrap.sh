@@ -3358,29 +3358,33 @@ do
     # (previously this whole item step was unreachable on re-runs because
     # the library-exists branch used `continue` - fixed here).
     #
-    # ova_url is downloaded LOCALLY on the gw first (no internet egress
-    # from VCFA/vCenter's side) to /home/ubuntu/vcf-automation/, then
-    # extracted (a .ova is a plain tar archive) and its .ovf descriptor's
-    # bytes PUT to the transferUrl VCFA hands back. Confirmed live
-    # end-to-end with a real multi-file OVA (lab-web-test-base-2.8.ova:
-    # .ovf + .vmdk + .nvram, 40MB): PUT the descriptor -> re-GET files ->
-    # server lists the .vmdk AND .nvram (by their real original filenames,
-    # matched against the extracted directory here) with their own
-    # transferUrls -> PUT each -> item reaches status READY with a real
-    # imageIdentifier assigned. The .mf manifest is never listed for
-    # separate upload. A deliberately-invalid descriptor was also
-    # confirmed to correctly surface as status FAILED rather than silently
-    # succeed.
+    # Exactly one of ova_url (sddc/vCenter use case)/name (vApp/VCD use
+    # case) per item - see crd-vapp.yaml's own description. Either way,
+    # once ova_file exists locally it's extracted (a .ova is a plain tar
+    # archive) and its .ovf descriptor's bytes PUT to the transferUrl VCFA
+    # hands back. Confirmed live end-to-end with a real multi-file OVA
+    # (lab-web-test-base-2.8.ova: .ovf + .vmdk + .nvram, 40MB): PUT the
+    # descriptor -> re-GET files -> server lists the .vmdk AND .nvram (by
+    # their real original filenames, matched against the extracted
+    # directory here) with their own transferUrls -> PUT each -> item
+    # reaches status READY with a real imageIdentifier assigned. The .mf
+    # manifest is never listed for separate upload. A deliberately-invalid
+    # descriptor was also confirmed to correctly surface as status FAILED
+    # rather than silently succeed.
     #
     while read cl_item
     do
       if [ -n "${cl_item}" ] && [ "${cl_item}" != "null" ]; then
-        ova_url=$(echo ${cl_item} | jq -c -r '.ova_url')
-        # No name field in the input - derived from the URL's own
-        # filename (basename, .ova extension stripped) rather than
-        # requiring a redundant separate field.
-        item_name="${ova_url##*/}"
-        item_name="${item_name%.ova}"
+        ova_url=$(echo ${cl_item} | jq -c -r '.ova_url // empty')
+        ova_name=$(echo ${cl_item} | jq -c -r '.name // empty')
+        if [ -n "${ova_name}" ]; then
+          item_name="${ova_name%.ova}"
+        else
+          # No separate name field for the url case - derived from the
+          # URL's own filename (basename, .ova extension stripped).
+          item_name="${ova_url##*/}"
+          item_name="${item_name%.ova}"
+        fi
 
         vcfa_api GET "cloudapi/v1/contentLibraryItems" ""
         item_id=$(echo ${response_body} | jq -c -r --arg arg "${item_name}" '.values[] | select(.name == $arg) | .id')
@@ -3394,7 +3398,17 @@ do
         extract_dir="${ova_dir}/${item_name}"
         mkdir -p "${ova_dir}" "${extract_dir}"
 
-        download_file_from_url_to_location "${ova_url}" "${ova_file}" "content library item ${item_name}"
+        if [ -n "${ova_name}" ]; then
+          # vApp/VCD use case - already delivered via spec.vms.gw.iso's
+          # generic ISO-passthrough loop, no download needed.
+          if [ ! -f "/home/ubuntu/${ova_name}" ]; then
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: content library item file ${ova_name} not found at /home/ubuntu/${ova_name} - was it added to vms.gw.iso's Iso CR?, skipping item ${item_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+            continue
+          fi
+          cp "/home/ubuntu/${ova_name}" "${ova_file}"
+        else
+          download_file_from_url_to_location "${ova_url}" "${ova_file}" "content library item ${item_name}"
+        fi
 
         if [ -z "$(ls -A "${extract_dir}" 2>/dev/null)" ]; then
           tar -xf "${ova_file}" -C "${extract_dir}"
