@@ -3918,6 +3918,60 @@ else
       fi
 
       #
+      # VM Service content library binding - a separate, lower layer than
+      # VCFA's own "content library visible from every org's portal"
+      # sharing above (cloudapi/v1/contentLibraries, done once for all
+      # orgs) - confirmed live (blueprint admission webhook error:
+      # VirtualMachineImage "vmi-..." not found, traced down to vCenter's
+      # own API) that VM Service only projects a content library's items
+      # into a namespace as VirtualMachineImage objects if that library's
+      # vCenter-NATIVE uuid is explicitly listed in the namespace's own
+      # vm_service_spec.content_libraries (vCenter's
+      # api/vcenter/namespaces/instances/{ns} API) - a completely
+      # different id space than VCFA's own urn:vcloud:contentLibrary:...
+      # id, so the two can't just be string-matched. VCFA-level "shared"
+      # visibility alone does NOT populate this. Every
+      # vcf_a_content_libraries entry is provider-wide/shared by design
+      # (see the "one library serves every org" comment above), so all of
+      # them are bound to every eligible org's namespace here
+      # automatically - no new CRD field needed. Existing entries (e.g. a
+      # tenant's own org-created library, confirmed live to exist
+      # side-by-side) are preserved by merging rather than overwriting.
+      # Runs regardless of whether ns_name was just created above or
+      # already existed, same as the Vault step below, since an
+      # already-existing namespace from before this step existed would
+      # otherwise never get the binding retrofitted.
+      #
+      if [ -n "${ns_name}" ]; then
+        create_vcenter_api_session
+        vcenter_api 3 3 GET "api/content/library" ""
+        all_lib_ids=$(echo "${response_body}" | jq -r '.[]')
+        vc_lib_uuids=""
+        while read -r shared_cl_name
+        do
+          [ -z "${shared_cl_name}" ] && continue
+          for lib_id in ${all_lib_ids}; do
+            vcenter_api 3 3 GET "api/content/library/${lib_id}" ""
+            lib_name=$(echo "${response_body}" | jq -r '.name')
+            if [ "${lib_name}" == "${shared_cl_name}" ]; then
+              vc_lib_uuids="${vc_lib_uuids} ${lib_id}"
+              break
+            fi
+          done
+        done < <(echo "${vcf_a_content_libraries}" | jq -c -r '.[].name')
+
+        if [ -n "$(echo ${vc_lib_uuids})" ]; then
+          vcenter_api 3 3 GET "api/vcenter/namespaces/instances/${ns_name}" ""
+          existing_libs=$(echo "${response_body}" | jq -c '.vm_service_spec.content_libraries // []')
+          merged_libs=$(jq -n --argjson existing "${existing_libs}" --arg new "${vc_lib_uuids}" \
+            '$existing + ($new | split(" ") | map(select(length > 0))) | unique')
+          patch_json=$(jq -n --argjson libs "${merged_libs}" '{vm_service_spec: {content_libraries: $libs}}')
+          vcenter_api 3 3 PATCH "api/vcenter/namespaces/instances/${ns_name}" "${patch_json}"
+          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: bound shared content libraries to namespace ${ns_name}'s vm_service_spec.content_libraries (${merged_libs})" "${log_file}" "" ""
+        fi
+      fi
+
+      #
       # Vault cert-manager bootstrap - runs kubectl directly against the
       # Supervisor cluster (NOT VCFA's own API - these are plain K8s
       # objects VCFA doesn't manage), once this org's namespace is
