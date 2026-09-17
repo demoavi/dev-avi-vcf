@@ -20,6 +20,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 templates_dir="${script_dir}/../templates"
 mkdir -p /home/ubuntu/html /home/ubuntu/json
 source /home/ubuntu/bash/variables.sh
+# VCFA's own FQDN - a simple derived value (not a CR field), needed both
+# for the Supervisor auth helper scripts rendered further down and for
+# the VCFA org-provisioning section appended at the end of this script.
+# Computed here (once, near the top) rather than at either point of use,
+# so both sections share the exact same value with no duplication.
+fqdn_vcfa="${basename_sddc}-auto-vip.${domain}"
 
 # VCD session, established up front (not just before the ESX power-cycle
 # step) so log_notify below can use it too - govc has no session that can
@@ -2187,6 +2193,440 @@ sed -e "s/\${generic_password}/${generic_password}/" \
 rm -f /tmp/auth_vks_context.sh.template
 chmod u+x /home/ubuntu/supervisor/auth_vks_context.sh
 
+# vcfa_select_ns.sh / vcfa_select_vks_cluster.sh - interactive discovery
+# scripts (browse org -> supervisor namespace -> VKS cluster via VCF
+# Automation's provider API, then connect) - ported from the reference
+# project's templates/vcfa_select_ns.sh.template and
+# templates/vcfa_select_vks_cluster.sh.template verbatim. Same quoted-
+# heredoc + targeted sed pattern as auth_vks_context.sh above, for the
+# same reason - these generated scripts have their own $1/$2/${ns}/
+# ${cluster_name}/etc that must survive completely untouched.
+cat > /tmp/vcfa_select_vks_cluster.sh.template <<'VCFA_SELECT_VKS_TEMPLATE_EOF'
+#!/bin/bash
+#
+# Logs into a VKS Kubernetes cluster via the vcf CLI. The namespace and
+# cluster name can either be given directly, or discovered by browsing VCF
+# Automation in provider mode (org -> supervisor namespace -> VKS cluster).
+#
+# Discovery auth uses the programmatic token-generation flow (provider bearer
+# token -> org-scoped OAuth token via jwt-bearer exchange), not a service
+# account: https://vrealize.it/2025/12/04/vcf-automation-9-programmatic-token-generation/
+#
+set -euo pipefail
+
+show_help() {
+    cat << EOF
+Usage: $0 [<namespace> <cluster_name>]
+       $0 [-H host] [-u username]
+
+With <namespace> and <cluster_name> given directly, connects straight to that
+VKS cluster. With no positional arguments, browses VCF Automation (provider
+mode) to pick an org, a supervisor namespace, and a VKS cluster interactively,
+then connects to the selection.
+
+Options:
+  -H, --host HOST        VCF Automation FQDN/URL, used only for discovery
+                          (default: \$VCFA_HOST or https://sddc01-auto-vip.vcf9.lab)
+  -u, --username USER    Provider username, used only for discovery
+                          (default: \$VCFA_USERNAME or admin)
+  -h, --help             Show this help message and exit
+
+Discovery password is read from \$VCFA_PASSWORD if set, otherwise prompted for.
+
+Examples:
+  $0 my-namespace my-cluster     # skip discovery, connect directly
+  $0                              # browse org/namespace/cluster interactively
+EOF
+}
+
+HOST="https://${fqdn_vcfa}"
+USERNAME="${VCFA_USERNAME:-admin}"
+VCFA_PASSWORD='${generic_password}'
+POSITIONAL=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -H|--host) HOST="$2"; shift 2 ;;
+        -u|--username) USERNAME="$2"; shift 2 ;;
+        -h|--help) show_help; exit 0 ;;
+        -*) echo "Unknown argument: $1" >&2; show_help; exit 1 ;;
+        *) POSITIONAL+=("$1"); shift ;;
+    esac
+done
+
+# Prompts among multiple choices; auto-selects if there's only one.
+# Usage: prompt_choice "Prompt text" "${array[@]}" ; result left in CHOICE
+prompt_choice() {
+    local prompt="$1"; shift
+    local -a options=("$@")
+    if [ "${#options[@]}" -eq 0 ]; then
+        echo "Error: no options available for: $prompt" >&2
+        exit 1
+    fi
+    if [ "${#options[@]}" -eq 1 ]; then
+        CHOICE="${options[0]}"
+        echo "$prompt -> only one option, auto-selected: $CHOICE" >&2
+        return
+    fi
+    echo "$prompt" >&2
+    local PS3="Select a number: "
+    select opt in "${options[@]}"; do
+        if [ -n "${opt:-}" ]; then
+            CHOICE="$opt"
+            break
+        fi
+        echo "Invalid selection, try again." >&2
+    done
+}
+
+# Browses VCF Automation (provider mode) and sets ns/cluster_name from the
+# selected org/namespace/cluster.
+discover_namespace_and_cluster() {
+    for cmd in curl jq base64; do
+        command -v "$cmd" >/dev/null 2>&1 || { echo "Error: '$cmd' is required but not installed." >&2; exit 1; }
+    done
+
+    if [ -n "${VCFA_PASSWORD:-}" ]; then
+        local password="$VCFA_PASSWORD"
+    else
+        read -rsp "Password for ${USERNAME}@${HOST}: " password
+        echo >&2
+    fi
+
+    local accept="Accept: application/json;version=9.0.0"
+
+    echo "Logging in to ${HOST} as provider..." >&2
+    local creds provider_resp provider_token client_id
+    creds=$(printf '%s@system:%s' "$USERNAME" "$password" | base64 -w0)
+    provider_resp=$(curl -sk -i -X POST "${HOST}/cloudapi/1.0.0/sessions/provider" \
+        -H "$accept" \
+        -H "Content-Type: application/json;version=9.0.0" \
+        -H "Authorization: Basic ${creds}")
+
+    provider_token=$(printf '%s' "$provider_resp" | grep -i '^x-vmware-vcloud-access-token:' | awk '{print $2}' | tr -d '\r')
+    if [ -z "$provider_token" ]; then
+        echo "Error: provider login failed. Response:" >&2
+        printf '%s\n' "$provider_resp" >&2
+        exit 1
+    fi
+
+    client_id=$(curl -sk "${HOST}/cloudapi/1.0.0/openIdProvider/relyingParties" \
+        -H "$accept" \
+        -H "Authorization: Bearer ${provider_token}" \
+        | jq -r '[.values[] | select(.clientName == "automation-relying-party")][0].clientId // [.values[] | select(.isPublic == true)][0].clientId')
+    if [ -z "$client_id" ] || [ "$client_id" == "null" ]; then
+        echo "Error: could not determine the automation relying party clientId." >&2
+        exit 1
+    fi
+
+    # "System" is the built-in provider bucket, not a real tenant org - exclude it.
+    local org_lines org_names org_urn org_uuid selected_org
+    readarray -t org_lines < <(curl -sk "${HOST}/cloudapi/1.0.0/orgs" \
+        -H "$accept" \
+        -H "Authorization: Bearer ${provider_token}" \
+        | jq -r '.values[] | select(.name != "System") | "\(.name)\t\(.id)"')
+    if [ "${#org_lines[@]}" -eq 0 ]; then
+        echo "Error: no organizations found." >&2
+        exit 1
+    fi
+    org_names=()
+    for line in "${org_lines[@]}"; do org_names+=("${line%%$'\t'*}"); done
+
+    prompt_choice "Available organizations:" "${org_names[@]}"
+    selected_org="$CHOICE"
+    for line in "${org_lines[@]}"; do
+        if [ "${line%%$'\t'*}" == "$selected_org" ]; then
+            org_urn="${line##*$'\t'}"
+            break
+        fi
+    done
+    org_uuid="${org_urn##*:}"
+
+    echo "Requesting org-scoped token for '${selected_org}'..." >&2
+    local org_token
+    org_token=$(curl -sk -X POST "${HOST}/oidc/oauth2/token" \
+        -H "$accept" \
+        -H "x-vmware-vcloud-tenant-context: ${org_uuid}" \
+        --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
+        --data-urlencode "scope=openid profile email phone groups vcd_idp" \
+        --data-urlencode "assertion=${provider_token}" \
+        --data-urlencode "client_id=${client_id}" \
+        | jq -r '.access_token')
+    if [ -z "$org_token" ] || [ "$org_token" == "null" ]; then
+        echo "Error: failed to obtain an org-scoped token for ${selected_org}." >&2
+        exit 1
+    fi
+
+    local namespace_lines namespaces namespace_urn
+    readarray -t namespace_lines < <(curl -sk "${HOST}/cci/kubernetes/apis/infrastructure.cci.vmware.com/v1alpha3/supervisornamespaces?limit=500" \
+        -H "Accept: application/json" \
+        -H "Authorization: Bearer ${org_token}" \
+        | jq -r '.items[] | "\(.metadata.name)\t\(.metadata.annotations["infrastructure.cci.vmware.com/id"])"')
+    if [ "${#namespace_lines[@]}" -eq 0 ]; then
+        echo "Error: no supervisor namespaces found in org '${selected_org}'." >&2
+        exit 1
+    fi
+    namespaces=()
+    for line in "${namespace_lines[@]}"; do namespaces+=("${line%%$'\t'*}"); done
+
+    prompt_choice "Available namespaces in org '${selected_org}':" "${namespaces[@]}"
+    ns="$CHOICE"
+    for line in "${namespace_lines[@]}"; do
+        if [ "${line%%$'\t'*}" == "$ns" ]; then
+            namespace_urn="${line##*$'\t'}"
+            break
+        fi
+    done
+
+    local clusters
+    readarray -t clusters < <(curl -sk "${HOST}/proxy/k8s/namespaces/${namespace_urn}/apis/cluster.x-k8s.io/v1beta2/namespaces/${ns}/clusters?limit=500" \
+        -H "Accept: application/json" \
+        -H "Authorization: Bearer ${org_token}" \
+        | jq -r '.items[].metadata.name')
+    if [ "${#clusters[@]}" -eq 0 ]; then
+        echo "Error: no Kubernetes clusters found in namespace '${ns}'." >&2
+        exit 1
+    fi
+
+    prompt_choice "Available Kubernetes clusters in namespace '${ns}':" "${clusters[@]}"
+    cluster_name="$CHOICE"
+}
+
+if [ "${#POSITIONAL[@]}" -eq 2 ]; then
+    ns="${POSITIONAL[0]}"
+    cluster_name="${POSITIONAL[1]}"
+elif [ "${#POSITIONAL[@]}" -eq 0 ]; then
+    discover_namespace_and_cluster
+else
+    echo "Error: expected either 0 or 2 positional arguments (namespace, cluster_name)." >&2
+    show_help
+    exit 1
+fi
+
+echo "Connecting to namespace '${ns}', cluster '${cluster_name}'..." >&2
+export VCF_CLI_VSPHERE_PASSWORD='${generic_password}'
+
+# vcf context create derives a namespace context named "${ns}:${cluster_name}" and,
+# as a related child context, the actual guest/VKS cluster context named
+# "${ns}:${cluster_name}:${cluster_name}" - the latter is what we want to log into.
+guest_context="${ns}:${cluster_name}:${cluster_name}"
+
+if [[ $(vcf context list -o json | jq -c -r --arg arg "${guest_context}" '[.[] | select( .name == $arg)] | if length > 0 then .[0] else null end') == "null" ]] ; then
+  vcf context create "${ns}:${cluster_name}" --type k8s --auth-type basic --endpoint=https://${api_server_cluster_endpoint} --username administrator@vsphere.local --workload-cluster-name "${cluster_name}" --workload-cluster-namespace "${ns}" --insecure-skip-tls-verify
+  # vcf context use can exit non-zero on a benign Harbor plugin-discovery
+  # warning even after successfully activating the context - don't abort on it.
+  vcf context use "${guest_context}" --insecure-skip-tls-verify || true
+  kubectl config set-context --current --namespace=default
+  kubectl config use-context "${guest_context}"
+else
+  # vcf context use can exit non-zero on a benign Harbor plugin-discovery
+  # warning even after successfully activating the context - don't abort on it.
+  vcf context use "${guest_context}" --insecure-skip-tls-verify || true
+  kubectl config set-context --current --namespace=default
+  kubectl config use-context "${guest_context}"
+fi
+VCFA_SELECT_VKS_TEMPLATE_EOF
+sed -e "s/\${generic_password}/${generic_password}/" \
+    -e "s/\${fqdn_vcfa}/${fqdn_vcfa}/" \
+    -e "s/\${api_server_cluster_endpoint}/${api_server_cluster_endpoint}/" \
+    /tmp/vcfa_select_vks_cluster.sh.template > /home/ubuntu/supervisor/vcfa_select_vks_cluster.sh
+rm -f /tmp/vcfa_select_vks_cluster.sh.template
+chmod u+x /home/ubuntu/supervisor/vcfa_select_vks_cluster.sh
+
+cat > /tmp/vcfa_select_ns.sh.template <<'VCFA_SELECT_NS_TEMPLATE_EOF'
+#!/bin/bash
+#
+# Browses VCF Automation in provider mode, lets you pick an org and a
+# supervisor namespace within it, then assigns the chosen namespace to the
+# variable "namespace" (auto-assigned if there's only one).
+#
+# Auth uses the programmatic token-generation flow (provider bearer token ->
+# org-scoped OAuth token via jwt-bearer exchange), not a service account:
+# https://vrealize.it/2025/12/04/vcf-automation-9-programmatic-token-generation/
+#
+set -euo pipefail
+
+show_help() {
+    cat << EOF
+Usage: $0 [-H host] [-u username]
+
+Browses VCF Automation (provider mode) to pick an org and a supervisor
+namespace interactively (auto-selecting when there's only one option), then
+assigns the result to the variable "namespace". Run with 'source $0' if you
+want "namespace" to persist in your current shell.
+
+Options:
+  -H, --host HOST        VCF Automation FQDN/URL (default: \$VCFA_HOST or https://sddc01-auto-vip.vcf9.lab)
+  -u, --username USER    Provider username (default: \$VCFA_USERNAME or admin)
+  -h, --help             Show this help message and exit
+
+Password is read from \$VCFA_PASSWORD if set, otherwise prompted for.
+EOF
+}
+
+HOST="https://${fqdn_vcfa}"
+USERNAME="${VCFA_USERNAME:-admin}"
+VCFA_PASSWORD='${generic_password}'
+
+# Files to update, paired with the jq path of the key to set in each.
+NAMESPACE_UPDATE_FILES=(
+    /home/ubuntu/yaml-files/secret_vault.yaml
+    /home/ubuntu/yaml-files/vault_issuer.yaml
+)
+NAMESPACE_UPDATE_JQ_PATHS=(
+    .metadata.namespace
+    .metadata.namespace
+)
+
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -H|--host) HOST="$2"; shift 2 ;;
+        -u|--username) USERNAME="$2"; shift 2 ;;
+        -h|--help) show_help; exit 0 ;;
+        *) echo "Unknown argument: $1" >&2; show_help; exit 1 ;;
+    esac
+done
+
+for cmd in curl jq base64; do
+    command -v "$cmd" >/dev/null 2>&1 || { echo "Error: '$cmd' is required but not installed." >&2; exit 1; }
+done
+
+if [ -n "${VCFA_PASSWORD:-}" ]; then
+    PASSWORD="$VCFA_PASSWORD"
+else
+    read -rsp "Password for ${USERNAME}@${HOST}: " PASSWORD
+    echo
+fi
+
+ACCEPT="Accept: application/json;version=9.0.0"
+
+# Prompts among multiple choices; auto-selects if there's only one.
+# Usage: prompt_choice "Prompt text" "${array[@]}" ; result left in CHOICE
+prompt_choice() {
+    local prompt="$1"; shift
+    local -a options=("$@")
+    if [ "${#options[@]}" -eq 0 ]; then
+        echo "Error: no options available for: $prompt" >&2
+        exit 1
+    fi
+    if [ "${#options[@]}" -eq 1 ]; then
+        CHOICE="${options[0]}"
+        echo "$prompt -> only one option, auto-selected: $CHOICE" >&2
+        return
+    fi
+    echo "$prompt" >&2
+    local PS3="Select a number: "
+    select opt in "${options[@]}"; do
+        if [ -n "${opt:-}" ]; then
+            CHOICE="$opt"
+            break
+        fi
+        echo "Invalid selection, try again." >&2
+    done
+}
+
+echo "Logging in to ${HOST} as provider..." >&2
+CREDS=$(printf '%s@system:%s' "$USERNAME" "$PASSWORD" | base64 -w0)
+PROVIDER_RESP=$(curl -sk -i -X POST "${HOST}/cloudapi/1.0.0/sessions/provider" \
+    -H "$ACCEPT" \
+    -H "Content-Type: application/json;version=9.0.0" \
+    -H "Authorization: Basic ${CREDS}")
+
+PROVIDER_TOKEN=$(printf '%s' "$PROVIDER_RESP" | grep -i '^x-vmware-vcloud-access-token:' | awk '{print $2}' | tr -d '\r')
+if [ -z "$PROVIDER_TOKEN" ]; then
+    echo "Error: provider login failed. Response:" >&2
+    printf '%s\n' "$PROVIDER_RESP" >&2
+    exit 1
+fi
+
+CLIENT_ID=$(curl -sk "${HOST}/cloudapi/1.0.0/openIdProvider/relyingParties" \
+    -H "$ACCEPT" \
+    -H "Authorization: Bearer ${PROVIDER_TOKEN}" \
+    | jq -r '[.values[] | select(.clientName == "automation-relying-party")][0].clientId // [.values[] | select(.isPublic == true)][0].clientId')
+if [ -z "$CLIENT_ID" ] || [ "$CLIENT_ID" == "null" ]; then
+    echo "Error: could not determine the automation relying party clientId." >&2
+    exit 1
+fi
+
+# "System" is the built-in provider bucket, not a real tenant org - exclude it.
+readarray -t ORG_LINES < <(curl -sk "${HOST}/cloudapi/1.0.0/orgs" \
+    -H "$ACCEPT" \
+    -H "Authorization: Bearer ${PROVIDER_TOKEN}" \
+    | jq -r '.values[] | select(.name != "System") | "\(.name)\t\(.id)"')
+if [ "${#ORG_LINES[@]}" -eq 0 ]; then
+    echo "Error: no organizations found." >&2
+    exit 1
+fi
+ORG_NAMES=()
+for line in "${ORG_LINES[@]}"; do ORG_NAMES+=("${line%%$'\t'*}"); done
+
+prompt_choice "Available organizations:" "${ORG_NAMES[@]}"
+SELECTED_ORG="$CHOICE"
+for line in "${ORG_LINES[@]}"; do
+    if [ "${line%%$'\t'*}" == "$SELECTED_ORG" ]; then
+        ORG_URN="${line##*$'\t'}"
+        break
+    fi
+done
+ORG_UUID="${ORG_URN##*:}"
+
+echo "Requesting org-scoped token for '${SELECTED_ORG}'..." >&2
+ORG_TOKEN=$(curl -sk -X POST "${HOST}/oidc/oauth2/token" \
+    -H "$ACCEPT" \
+    -H "x-vmware-vcloud-tenant-context: ${ORG_UUID}" \
+    --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
+    --data-urlencode "scope=openid profile email phone groups vcd_idp" \
+    --data-urlencode "assertion=${PROVIDER_TOKEN}" \
+    --data-urlencode "client_id=${CLIENT_ID}" \
+    | jq -r '.access_token')
+if [ -z "$ORG_TOKEN" ] || [ "$ORG_TOKEN" == "null" ]; then
+    echo "Error: failed to obtain an org-scoped token for ${SELECTED_ORG}." >&2
+    exit 1
+fi
+
+readarray -t NAMESPACES < <(curl -sk "${HOST}/cci/kubernetes/apis/infrastructure.cci.vmware.com/v1alpha3/supervisornamespaces?limit=500" \
+    -H "Accept: application/json" \
+    -H "Authorization: Bearer ${ORG_TOKEN}" \
+    | jq -r '.items[].metadata.name')
+if [ "${#NAMESPACES[@]}" -eq 0 ]; then
+    echo "Error: no supervisor namespaces found in org '${SELECTED_ORG}'." >&2
+    exit 1
+fi
+
+prompt_choice "Available namespaces in org '${SELECTED_ORG}':" "${NAMESPACES[@]}"
+
+export namespace="$CHOICE"
+echo "Selected namespace: ${namespace}" >&2
+echo "namespace=${namespace}"
+
+echo "Updating namespace in the following YAML files:" >&2
+for i in "${!NAMESPACE_UPDATE_FILES[@]}"; do
+    echo "  - ${NAMESPACE_UPDATE_FILES[$i]} (${NAMESPACE_UPDATE_JQ_PATHS[$i]})" >&2
+done
+
+yaml_to_json() { python3 -c 'import sys, json, yaml; json.dump(yaml.safe_load(sys.stdin), sys.stdout)'; }
+# width=100000 prevents PyYAML from line-folding long plain scalars (e.g. base64 blobs).
+json_to_yaml() { python3 -c 'import sys, json, yaml; yaml.safe_dump(json.load(sys.stdin), sys.stdout, default_flow_style=False, sort_keys=False, width=100000)'; }
+
+for i in "${!NAMESPACE_UPDATE_FILES[@]}"; do
+    f="${NAMESPACE_UPDATE_FILES[$i]}"
+    jq_path="${NAMESPACE_UPDATE_JQ_PATHS[$i]}"
+    if [ ! -f "$f" ]; then
+        echo "Error: ${f} not found." >&2
+        exit 1
+    fi
+    tmp=$(mktemp)
+    yaml_to_json < "$f" | jq --arg ns "$namespace" "${jq_path} = \$ns" | json_to_yaml > "$tmp"
+    mv "$tmp" "$f"
+done
+VCFA_SELECT_NS_TEMPLATE_EOF
+sed -e "s/\${generic_password}/${generic_password}/" \
+    -e "s/\${fqdn_vcfa}/${fqdn_vcfa}/" \
+    /tmp/vcfa_select_ns.sh.template > /home/ubuntu/supervisor/vcfa_select_ns.sh
+rm -f /tmp/vcfa_select_ns.sh.template
+chmod u+x /home/ubuntu/supervisor/vcfa_select_ns.sh
+
 log_notify "Supervisor cluster ready, auth helper scripts written to /home/ubuntu/supervisor/"
 
 log_notify "vcf_bootstrap.sh complete (SDDC build + vCenter port groups + NSX config + Avi deployment + Avi configuration + Avi upgrade + NSX Project/VPC + vSAN alarm silencing + Supervisor enablement - full pipeline, no remaining standalone stages)"
@@ -2210,13 +2650,14 @@ log_notify "vcf_bootstrap.sh complete (SDDC build + vCenter port groups + NSX co
 # so vcf_a_regions/vcf_a_ip_spaces/vcf_a_provider_gws/vcf_a_organizations/
 # vcf_a_content_libraries already come pre-computed from userdata.py's
 # derive_vcf_a_organizations()/derive_vcf_a_ip_space_template() instead of
-# being derived here from $jsonFile). fqdn_vcfa/default_storage_class are
-# simple derived values the original computed inline, not CR fields.
+# being derived here from $jsonFile). fqdn_vcfa is computed once near the
+# top of this script (shared with the Supervisor auth helper scripts
+# rendered further up) - default_storage_class is the only simple derived
+# value needed here specifically, not a CR field.
 # slack_webhook is left empty - this project only supports google_webhook
 # notifications so far, and log_message below silently no-ops on an empty
 # slack_url exactly like it does for google_url.
 #
-fqdn_vcfa="${basename_sddc}-auto-vip.${domain}"
 default_storage_class="${supervisor_cluster_name} vSAN Storage Policy"
 slack_webhook=""
 log_file="/home/ubuntu/vcf_bootstrap.log"
