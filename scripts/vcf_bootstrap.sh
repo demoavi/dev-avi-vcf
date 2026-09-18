@@ -36,6 +36,87 @@ vcsa_fqdn="${basename_sddc}-vc01.${domain}"
 # inline), not a CR field.
 vsphere_nested_username="administrator"
 
+# Demo Gateway API/Ingress/workload yaml templating - ported here from
+# gw-setup.sh.tpl (this project's own port target per that file's
+# comments) rather than left at cloud-init time, so it can also cover
+# workloads that need this environment's own Harbor (not yet up at
+# cloud-init time, though the substitution below is a pure deterministic
+# string rewrite that doesn't actually need Harbor already running - see
+# the Deployment case). The cloned repo's yamls/ dir holds workshop demo
+# manifests with placeholder hostnames/fqdns (all "*.mydomain.com"-style)
+# and Docker Hub image refs; these get substituted per-Kind with real
+# values derived from this deployment's own avi_subdomain/domain (and,
+# for images, harbor's own hostname/registry project). Output goes to a
+# fresh /home/ubuntu/yaml-files/ - every file is copied there, rendered
+# or not, leaving the git-cloned originals under dev-avi-vcf/yamls/
+# untouched. Rendered only, never applied to any cluster here - that's
+# left to whoever actually deploys these demos. Uses mikefarah/yq
+# (installed by gw-setup.sh.tpl, NOT apt's incompatible python/jq-wrapper
+# "yq") for the del()/wildcard-index/path-assignment/sub() mutations
+# below.
+if [ -d /home/ubuntu/dev-avi-vcf/yamls ]; then
+  mkdir -p /home/ubuntu/yaml-files
+  full_domain="${avi_subdomain}.${domain}"
+  harbor_registry_fqdn="harbor.${full_domain}"
+  for yaml_src in /home/ubuntu/dev-avi-vcf/yamls/*.yaml; do
+    yaml_dst="/home/ubuntu/yaml-files/$(basename "$yaml_src")"
+    cp "$yaml_src" "$yaml_dst"
+    # select(di == 0), not a bare '.kind' - a multi-doc file (e.g.
+    # demo-http-apps.yaml's 3 Deployments + 3 Services) would otherwise
+    # yield every document's kind concatenated, which never matches any
+    # single case label below and always fell through to the silent no-op
+    # catch-all instead.
+    yaml_kind="$(yq 'select(di == 0) | .kind' "$yaml_dst")"
+    case "$yaml_kind" in
+      Ingress)
+        # .spec.rules[i].host = "v<i+1>.<full_domain>"
+        rule_count=$(yq '.spec.rules | length' "$yaml_dst")
+        for ((i = 0; i < rule_count; i++)); do
+          yq -i ".spec.rules[$i].host = \"v$((i + 1)).${full_domain}\"" "$yaml_dst"
+        done
+        ;;
+      HTTPRoute)
+        # .spec.hostnames = ["<metadata.name>.<full_domain>"]
+        httproute_name="$(yq '.metadata.name' "$yaml_dst")"
+        yq -i "del(.spec.hostnames) | .spec.hostnames[0] = \"${httproute_name}.${full_domain}\"" "$yaml_dst"
+        ;;
+      Gateway)
+        # every listener's hostname = "*.<full_domain>"
+        yq -i ".spec.listeners[].hostname = \"*.${full_domain}\"" "$yaml_dst"
+        ;;
+      HostRule)
+        # .spec.virtualhost.fqdn = "<metadata.name>.<full_domain>"
+        hostrule_name="$(yq '.metadata.name' "$yaml_dst")"
+        yq -i ".spec.virtualhost.fqdn = \"${hostrule_name}.${full_domain}\"" "$yaml_dst"
+        ;;
+      RouteBackendExtension)
+        # .spec.backendTLS.domainName[0] = "<metadata.name>.<full_domain>"
+        rbe_name="$(yq '.metadata.name' "$yaml_dst")"
+        yq -i ".spec.backendTLS.domainName[0] = \"${rbe_name}.${full_domain}\"" "$yaml_dst"
+        ;;
+      Deployment)
+        # every container's (and initContainer's) image, in every
+        # Deployment document in this file (not just the first - the sub()
+        # below runs per-document across the whole multi-doc stream, e.g.
+        # demo-http-apps.yaml's other two Deployments and its interleaved
+        # Service docs, where it's a safe no-op since Services have no
+        # .spec.template.spec.containers path at all) - registry host
+        # swapped for this environment's own Harbor, image name/tag kept
+        # as-is (untagged stays untagged, i.e. still implicitly ":latest"
+        # by Docker convention, matching how the harbor image-preload step
+        # above always pushes as ":latest"). Confirmed live this correctly
+        # leaves the 3 Service docs in demo-http-apps.yaml untouched while
+        # rewriting all 3 Deployments' images.
+        yq -i '(.. | select(has("containers")) | .containers[], .. | select(has("initContainers")) | .initContainers[] | select(.image != null)).image |= sub("^.*/", "'"${harbor_registry_fqdn}"'/registry/")' "$yaml_dst"
+        ;;
+      *)
+        # HealthMonitor, L7Rule, Service (incl. the LB demos) - no changes.
+        ;;
+    esac
+  done
+  chown -R ubuntu:ubuntu /home/ubuntu/yaml-files
+fi
+
 # VCD session, established up front (not just before the ESX power-cycle
 # step) so log_notify below can use it too - govc has no session that can
 # power-cycle a VCD-managed VM (GOVC_URL against the ESXi guest itself only
@@ -2670,11 +2751,19 @@ set -euo pipefail
 
 show_help() {
     cat << EOF
-Usage: $0 [-H host] [-u username] <path-to-supervisor-service-yaml>
+Usage: $0 [-H host] [-u username] <path-to-supervisor-service-yaml> [path-to-values-yaml]
 
 Registers and activates a vCenter Supervisor Service from the given YAML
 manifest. The service identifier, version, display name and description are
 derived from the manifest's own Package/PackageMetadata content.
+
+The optional second argument is a fully-rendered values YAML (already
+substituted, no \${...} placeholders left) to use as this service's
+yaml_service_config on enable - for services needing more than just a
+namespace (e.g. Harbor's secrets/storageClass/etc.). When omitted, behavior
+is unchanged: just "namespace: <the manifest's own valuesSchema default>".
+A "namespace: <default>" line is always prepended, so the values file itself
+doesn't need to (and normally shouldn't) set its own namespace key.
 
 Options:
   -H, --host HOST        vCenter FQDN/URL (default: \$VC_HOST or https://sddc01-vc01.vcf9.lab)
@@ -2683,8 +2772,9 @@ Options:
 
 Password is read from \$VC_PASSWORD if set, otherwise prompted for.
 
-Example:
+Examples:
   $0 /home/ubuntu/supervisor/supervisor-service-argocd-1.2.0-25642124.yml
+  $0 /home/ubuntu/supervisor/supervisor-service-harbor-v2.15.2+vmware.1-vks.1-25639075.yml /tmp/harbor-values-rendered.yml
 EOF
 }
 
@@ -2703,15 +2793,20 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ "${#POSITIONAL[@]}" -ne 1 ]; then
-    echo "Error: expected exactly one argument, the path to the Supervisor Service YAML." >&2
+if [ "${#POSITIONAL[@]}" -lt 1 ] || [ "${#POSITIONAL[@]}" -gt 2 ]; then
+    echo "Error: expected one or two arguments - the path to the Supervisor Service YAML, and optionally a rendered values YAML." >&2
     show_help
     exit 1
 fi
 YAML_FILE="${POSITIONAL[0]}"
+VALUES_FILE="${POSITIONAL[1]:-}"
 
 if [ ! -f "$YAML_FILE" ]; then
     echo "Error: ${YAML_FILE} not found." >&2
+    exit 1
+fi
+if [ -n "${VALUES_FILE}" ] && [ ! -f "${VALUES_FILE}" ]; then
+    echo "Error: ${VALUES_FILE} not found." >&2
     exit 1
 fi
 
@@ -2751,9 +2846,12 @@ prompt_choice() {
     done
 }
 
-# Derive the service identity from the manifest itself rather than hardcoding it,
-# so this script works for any supervisor-service-*.yml file.
-IFS=$'\t' read -r SUPERVISOR_SERVICE VERSION DISPLAY_NAME DESCRIPTION DEFAULT_NAMESPACE < <(python3 - "$YAML_FILE" <<'PYEOF'
+# Derive a FALLBACK service identity from the manifest's own refName -
+# only actually used below if this turns out to be a genuinely new
+# registration (nothing in vCenter's own list matches this manifest's
+# displayName yet), since in that case this script's own caller is free
+# to pick the id being registered under.
+IFS=$'\t' read -r REF_DERIVED_SERVICE_ID VERSION DISPLAY_NAME DESCRIPTION DEFAULT_NAMESPACE < <(python3 - "$YAML_FILE" <<'PYEOF'
 import sys, yaml
 
 docs = list(yaml.safe_load_all(open(sys.argv[1])))
@@ -2780,15 +2878,36 @@ if [ -z "$SESSION_ID" ]; then
     exit 1
 fi
 
-echo "Checking whether '${SUPERVISOR_SERVICE}' is already registered..." >&2
-EXISTING_STATE=$(curl -sk "${VC_HOST}/api/vcenter/namespace-management/supervisor-services" \
+# Match by displayName against vCenter's own already-registered list
+# first, rather than trusting the refName-derived guess above - a
+# built-in service's real supervisor_service identifier can bear no
+# resemblance to its own refName (e.g. Harbor: refName
+# "harbor.tanzu.vmware.com" but the refName-derived guess above yields
+# just "harbor", while the REAL registered id is the full
+# "harbor.tanzu.vmware.com" - confirmed live this mismatch made the
+# script think Harbor wasn't registered yet, attempt a spurious
+# duplicate registration under the wrong id "harbor", which then failed
+# on its own downstream k8s object-naming validation since Harbor's
+# version string contains a literal "+", invalid in a k8s object name).
+# Only falls back to the refName-derived guess for a genuinely new
+# registration, where this script's own caller picks the id freely.
+echo "Checking whether a service matching '${DISPLAY_NAME}' is already registered..." >&2
+LOOKUP=$(curl -sk "${VC_HOST}/api/vcenter/namespace-management/supervisor-services" \
     -H "vmware-api-session-id: ${SESSION_ID}" \
     | python3 -c "
 import sys, json
 services = json.load(sys.stdin)
-match = next((s for s in services if s['supervisor_service'] == '${SUPERVISOR_SERVICE}'), None)
-print(match['state'] if match else '')
+match = next((s for s in services if s.get('display_name') == '''${DISPLAY_NAME}'''), None)
+if match:
+    print(f\"{match['supervisor_service']}\t{match['state']}\")
 ")
+if [ -n "${LOOKUP}" ]; then
+    SUPERVISOR_SERVICE="${LOOKUP%%$'\t'*}"
+    EXISTING_STATE="${LOOKUP##*$'\t'}"
+else
+    SUPERVISOR_SERVICE="${REF_DERIVED_SERVICE_ID}"
+    EXISTING_STATE=""
+fi
 
 if [ -n "$EXISTING_STATE" ]; then
     echo "Supervisor Service '${SUPERVISOR_SERVICE}' is already registered (state: ${EXISTING_STATE})." >&2
@@ -2796,20 +2915,29 @@ else
     echo "Registering and activating '${SUPERVISOR_SERVICE}' (version ${VERSION}) from ${YAML_FILE}..." >&2
     CONTENT_B64=$(base64 -w0 "$YAML_FILE")
 
+    # carvel_spec, not custom_spec - confirmed live by capturing the exact
+    # request vSphere Client's own UI sends for this operation (browser
+    # devtools). custom_spec (this project's own original design, also
+    # what the upstream reference project's own captured guess used) is a
+    # generic/simplified wrapper that does NOT retain the manifest's own
+    # valuesSchema - it appeared to register successfully, but the later
+    # enable-on-cluster step then rejected any nested yaml_service_config
+    # with "Nested maps are not allowed for given content type", even
+    # though the exact same nested config works fine against a natively
+    # (carvel_spec-equivalent) pre-registered service. carvel_spec just
+    # takes the raw Package+PackageMetadata YAML content - the server
+    # derives supervisor_service/display_name/description/version and,
+    # critically, the full valuesSchema itself from the real manifest, so
+    # this correctly matches the identifier the "already registered"
+    # check ends up looking for too (this project's own DISPLAY_NAME/
+    # VERSION variables above are still used for that check and for
+    # logging, just not sent back to the server here anymore).
     python3 -c "
 import json
 body = {
-    'custom_spec': {
-        'supervisor_service': '${SUPERVISOR_SERVICE}',
-        'display_name': '''${DISPLAY_NAME}''',
-        'description': '''${DESCRIPTION}''',
+    'carvel_spec': {
         'version_spec': {
-            'version': '${VERSION}',
-            'display_name': '''${DISPLAY_NAME}''',
-            'description': '''${DESCRIPTION}''',
-            'content': '${CONTENT_B64}',
-            'content_type': 'CARVEL_APPS_YAML',
-            'registered_by_default': True
+            'content': '${CONTENT_B64}'
         }
     }
 }
@@ -2830,8 +2958,31 @@ print(json.dumps(body))
     fi
     rm -f /tmp/supervisor_service_create_response.json
 
-    STATE=$(curl -sk "${VC_HOST}/api/vcenter/namespace-management/supervisor-services/${SUPERVISOR_SERVICE}" \
-        -H "vmware-api-session-id: ${SESSION_ID}" | python3 -c "import sys,json; print(json.load(sys.stdin)['state'])")
+    # carvel_spec doesn't let the caller pick the id - the server derives
+    # it from the manifest's own refName, which does NOT always match the
+    # REF_DERIVED_SERVICE_ID guess above (that's the whole reason this
+    # falls back to it only when nothing was found - see comment above).
+    # Re-run the same displayName lookup now to discover the REAL id the
+    # server just assigned, instead of trusting the stale guess: confirmed
+    # live this guess is wrong for Harbor (registers as
+    # "harbor.tanzu.vmware.com", guess was "harbor"), which made the next
+    # status GET 404 and crash on a missing 'state' key before ever
+    # reaching the enable-on-cluster step below.
+    REGISTERED=$(curl -sk "${VC_HOST}/api/vcenter/namespace-management/supervisor-services" \
+        -H "vmware-api-session-id: ${SESSION_ID}" \
+        | python3 -c "
+import sys, json
+services = json.load(sys.stdin)
+match = next((s for s in services if s.get('display_name') == '''${DISPLAY_NAME}'''), None)
+if match:
+    print(f\"{match['supervisor_service']}\t{match['state']}\")
+")
+    if [ -z "${REGISTERED}" ]; then
+        echo "Error: registration reported success but '${DISPLAY_NAME}' can't be found afterwards." >&2
+        exit 1
+    fi
+    SUPERVISOR_SERVICE="${REGISTERED%%$'\t'*}"
+    STATE="${REGISTERED##*$'\t'}"
     echo "Supervisor Service '${SUPERVISOR_SERVICE}' registered. Current state: ${STATE}"
 fi
 
@@ -2873,7 +3024,11 @@ fi
 rm -f /tmp/cluster_svc_status.json
 
 echo "Enabling '${SUPERVISOR_SERVICE}' (version ${VERSION}) on cluster '${SELECTED_CLUSTER_NAME}'..." >&2
-CONFIG_B64=$(printf 'namespace: %s\n' "$DEFAULT_NAMESPACE" | base64 -w0)
+if [ -n "${VALUES_FILE}" ]; then
+    CONFIG_B64=$( { printf 'namespace: %s\n' "$DEFAULT_NAMESPACE"; cat "${VALUES_FILE}"; } | base64 -w0)
+else
+    CONFIG_B64=$(printf 'namespace: %s\n' "$DEFAULT_NAMESPACE" | base64 -w0)
+fi
 
 python3 -c "
 import json
@@ -2897,7 +3052,13 @@ rm -f /tmp/cluster_svc_enable_response.json
 
 echo "Waiting for '${SUPERVISOR_SERVICE}' to reconcile on '${SELECTED_CLUSTER_NAME}'..." >&2
 CONFIG_STATUS="CONFIGURING"
-for i in $(seq 1 30); do
+# 60x10s=10min, not 30x10s=5min - confirmed live a multi-component service
+# like Harbor (7-8 pods: core/database/jobservice/nginx/portal/redis/
+# registry/trivy, each pulling its own image and provisioning its own PVC)
+# comfortably needs more than 5 minutes; a fast single-component service
+# like ArgoCD still exits this loop on its first non-CONFIGURING check
+# either way, so raising the ceiling doesn't slow that case down.
+for i in $(seq 1 60); do
     POLL_HTTP_CODE=$(curl -sk -o /tmp/cluster_svc_poll.json -w "%{http_code}" \
         "${VC_HOST}/api/vcenter/namespace-management/clusters/${CLUSTER_ID}/supervisor-services/${SUPERVISOR_SERVICE}" \
         -H "vmware-api-session-id: ${SESSION_ID}")
@@ -2925,6 +3086,89 @@ rm -f /tmp/enable_supervisor_service.sh.template
 chmod u+x /home/ubuntu/supervisor/enable_supervisor_service.sh
 
 #
+# harbor_rewrite_images.sh - generic, no baked-in environment values (unlike
+# enable_supervisor_service.sh above), so no sed-render step: registry
+# hostname/project are CLI args, not template placeholders, so this one
+# script stays reusable standalone, any time after this environment's own
+# Harbor is up, against any manifest referencing images pushed there (e.g.
+# demo-http-apps.yaml's own tacobayle/busybox-vN Docker Hub references)
+# without needing regeneration.
+#
+cat > /home/ubuntu/supervisor/harbor_rewrite_images.sh <<'HARBOR_REWRITE_IMAGES_EOF'
+#!/bin/bash
+#
+# Rewrites every container image reference in a Kubernetes manifest (any
+# number of YAML documents) to point at this environment's own Harbor
+# instead of wherever it originally came from (e.g. Docker Hub) - lets an
+# already-authored manifest be redirected with no other edits, once the
+# same image has been pushed to Harbor under the given project (see
+# vcf_bootstrap.sh's own harbor image-preload step for the push side).
+#
+# Usage: harbor_rewrite_images.sh <harbor-fqdn> <project> <yaml-file> [image-name ...]
+#   <yaml-file> is rewritten in place.
+#   [image-name ...] optionally restricts rewriting to only images whose
+#   basename (the final path segment, before any tag) matches one of these
+#   - omit to rewrite every container image in the file unconditionally.
+#
+set -euo pipefail
+
+if [ "$#" -lt 3 ]; then
+    echo "Usage: $0 <harbor-fqdn> <project> <yaml-file> [image-name ...]" >&2
+    exit 1
+fi
+HARBOR_FQDN="$1"
+PROJECT="$2"
+YAML_FILE="$3"
+shift 3
+
+if [ ! -f "${YAML_FILE}" ]; then
+    echo "Error: ${YAML_FILE} not found." >&2
+    exit 1
+fi
+
+HARBOR_FQDN="${HARBOR_FQDN}" PROJECT="${PROJECT}" python3 - "$YAML_FILE" "$@" <<'PYEOF'
+import os, sys
+import yaml
+
+yaml_file = sys.argv[1]
+names = set(sys.argv[2:])
+harbor_fqdn = os.environ["HARBOR_FQDN"]
+project = os.environ["PROJECT"]
+
+def rewrite(image):
+    base = image.rsplit("/", 1)[-1]
+    name, _, tag = base.partition(":")
+    if names and name not in names:
+        return image
+    return f"{harbor_fqdn}/{project}/{name}:{tag or 'latest'}"
+
+def walk_containers(spec):
+    if not spec:
+        return
+    for key in ("containers", "initContainers"):
+        for c in spec.get(key, []) or []:
+            if "image" in c:
+                c["image"] = rewrite(c["image"])
+
+docs = list(yaml.safe_load_all(open(yaml_file)))
+for doc in docs:
+    if not doc:
+        continue
+    kind = doc.get("kind")
+    if kind == "Pod":
+        walk_containers(doc.get("spec"))
+    elif kind in ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job"):
+        walk_containers((doc.get("spec") or {}).get("template", {}).get("spec"))
+    elif kind == "CronJob":
+        walk_containers((((doc.get("spec") or {}).get("jobTemplate") or {}).get("spec") or {}).get("template", {}).get("spec"))
+
+with open(yaml_file, "w") as f:
+    yaml.safe_dump_all(docs, f, default_flow_style=False, sort_keys=False)
+PYEOF
+HARBOR_REWRITE_IMAGES_EOF
+chmod u+x /home/ubuntu/supervisor/harbor_rewrite_images.sh
+
+#
 # Supervisor Services (spec.sddc.vcenter.supervisor_services) - unlike the
 # reference project (which downloads each by url - gw here has no route to
 # arbitrary external hosts), each entry names a file expected to already be
@@ -2938,6 +3182,204 @@ if [ -z "${supervisor_services}" ] || [ "${supervisor_services}" == "null" ] || 
 else
   while read -r item
   do
+    svc_type="$(echo ${item} | jq -c -r '.type // "carvel-yaml"')"
+
+    if [ "${svc_type}" == "harbor" ]; then
+      #
+      # Harbor is already globally registered/ACTIVATED in this VCF 9.1
+      # environment (confirmed live via GET
+      # api/vcenter/namespace-management/supervisor-services), so no real
+      # Package/PackageMetadata registration is needed - but .name still
+      # names the real upstream registration manifest (ISO-delivered like
+      # everything else) so enable_supervisor_service.sh's own "already
+      # registered, skip" check runs against real content, keeping this
+      # portable to a VCF environment where Harbor isn't pre-registered.
+      # What Harbor genuinely needs beyond that generic script is a much
+      # richer yaml_service_config than "namespace: X" alone (6 required
+      # secrets, 5 PVC storageClass entries, enableNginxLoadBalancer,
+      # tlsSecretLabels) - values_template names a SECOND ISO-delivered
+      # file (the actual data-values template, with ${...} placeholders)
+      # rendered here and passed as enable_supervisor_service.sh's new
+      # optional second argument.
+      #
+      # Confirmed live end-to-end on this exact environment:
+      # enableNginxLoadBalancer: true (baked into the values template,
+      # not overridden here) is required, not the Ingress path - there is
+      # no IngressClass registered at the Supervisor level at all (AKO's
+      # own IngressClass only exists inside guest VKS clusters), so
+      # Avi/AKO instead reconciles plain type: LoadBalancer Services
+      # directly, which is exactly what enableNginxLoadBalancer: true
+      # produces. This also happens to be the one path that avoids
+      # harbor-portal's own nginx crashing with "socket() [::]:8443
+      # failed (97: Address family not supported by protocol)" on this
+      # IPv6-less cluster - the Ingress path hits that crash regardless
+      # of network.ipFamilies (confirmed live that setting has no effect
+      # on the portal's own nginx template in this chart version).
+      #
+      name="$(echo ${item} | jq -c -r '.name // empty')"
+      values_template_name="$(echo ${item} | jq -c -r '.values_template // empty')"
+      # Not user-configurable - always the same well-known FQDN pattern
+      # every other Avi-fronted hostname in this deployment already uses
+      # (see avi_dns_domains_json/vsvip_json above), under the
+      # Avi-delegated app.vcf9.lab-style zone so dns-vs can serve it once
+      # registered below - no CRD/CR field needed.
+      harbor_hostname="harbor.${avi_subdomain}.${domain}"
+      if [ -z "${name}" ] || [ -z "${values_template_name}" ]; then
+        log_notify "ERROR: harbor supervisor_services entry needs name and values_template, skipping: ${item}"
+        continue
+      fi
+      service_file="/home/ubuntu/${name}"
+      values_template_file="/home/ubuntu/${values_template_name}"
+      if [ ! -f "${service_file}" ] || [ ! -f "${values_template_file}" ]; then
+        log_notify "ERROR: harbor supervisor service file(s) not found (${service_file}, ${values_template_file}) - were they added to vms.gw.iso's Iso CR?"
+        continue
+      fi
+
+      # Secrets are generated here, not authored in the CR - they're
+      # meaningless random strings with no reason to be memorable or
+      # CR-visible. storageClass reuses this project's own deterministic
+      # naming convention (matches bash/variables.sh's own
+      # cluster_name="${basename_sddc}-cluster") rather than deriving it
+      # via VCFA's regionStoragePolicies API (VCFA org provisioning runs
+      # much later in this script, and Harbor's PVCs are a direct
+      # Supervisor-level StorageClass reference, unrelated to VCFA).
+      harbor_storage_class="${cluster_name}-vsan-storage-policy"
+      harbor_admin_password="${generic_password}"
+      harbor_secret_key=$(echo -n "${generic_password}harbor-secretkey" | md5sum | cut -c1-16)
+      harbor_database_password=$(echo -n "${generic_password}harbor-database" | md5sum | cut -c1-16)
+      harbor_core_secret=$(echo -n "${generic_password}harbor-core" | md5sum | cut -c1-16)
+      harbor_core_xsrf_key_raw=$(echo -n "${generic_password}harbor-xsrf" | md5sum)
+      harbor_core_xsrf_key="${harbor_core_xsrf_key_raw}${harbor_core_xsrf_key_raw}"
+      harbor_core_xsrf_key="${harbor_core_xsrf_key:0:32}"
+      harbor_jobservice_secret=$(echo -n "${generic_password}harbor-jobservice" | md5sum | cut -c1-16)
+      harbor_registry_secret=$(echo -n "${generic_password}harbor-registry" | md5sum | cut -c1-16)
+
+      # Python literal string replacement, not sed - harbor_admin_password
+      # is this deployment's own generic_password verbatim, which may
+      # contain almost any character (confirmed live: this environment's
+      # own password contains "@", which broke a sed s@...@...@ delimiter
+      # here outright). Values are passed via environment variables, not
+      # embedded into the Python source itself, so no shell-quoting or
+      # string-escaping concern either regardless of what they contain.
+      rendered_values_file="/tmp/harbor-values-rendered.yml"
+      HARBOR_HOSTNAME="${harbor_hostname}" \
+      HARBOR_ADMIN_PASSWORD="${harbor_admin_password}" \
+      HARBOR_SECRET_KEY="${harbor_secret_key}" \
+      HARBOR_DATABASE_PASSWORD="${harbor_database_password}" \
+      HARBOR_CORE_SECRET="${harbor_core_secret}" \
+      HARBOR_CORE_XSRF_KEY="${harbor_core_xsrf_key}" \
+      HARBOR_JOBSERVICE_SECRET="${harbor_jobservice_secret}" \
+      HARBOR_REGISTRY_SECRET="${harbor_registry_secret}" \
+      HARBOR_STORAGE_CLASS="${harbor_storage_class}" \
+      python3 -c "
+import os
+text = open('${values_template_file}').read()
+for placeholder, env_var in [
+    ('\${harbor_hostname}', 'HARBOR_HOSTNAME'),
+    ('\${harbor_admin_password}', 'HARBOR_ADMIN_PASSWORD'),
+    ('\${harbor_secret_key}', 'HARBOR_SECRET_KEY'),
+    ('\${harbor_database_password}', 'HARBOR_DATABASE_PASSWORD'),
+    ('\${harbor_core_secret}', 'HARBOR_CORE_SECRET'),
+    ('\${harbor_core_xsrf_key}', 'HARBOR_CORE_XSRF_KEY'),
+    ('\${harbor_jobservice_secret}', 'HARBOR_JOBSERVICE_SECRET'),
+    ('\${harbor_registry_secret}', 'HARBOR_REGISTRY_SECRET'),
+    ('\${harbor_storage_class}', 'HARBOR_STORAGE_CLASS'),
+]:
+    text = text.replace(placeholder, os.environ[env_var])
+open('${rendered_values_file}', 'w').write(text)
+"
+
+      /home/ubuntu/supervisor/enable_supervisor_service.sh "${service_file}" "${rendered_values_file}"
+      rm -f "${rendered_values_file}"
+
+      # Register harbor_hostname with Avi now that harbor-nginx's own
+      # LoadBalancer Service has a real VIP - app.vcf9.lab (or whatever
+      # zone harbor_hostname falls under) is delegated to Avi's own
+      # dns-vs Virtual Service (confirmed live: the dns-avi
+      # IPAMDNSProviderProfile's dns_service_domain lists app.vcf9.lab),
+      # and arbitrary FQDN->IP static mappings not tied to an
+      # Avi-managed Ingress/Service belong on dns-vs's own
+      # static_dns_records field directly (confirmed live via a
+      # UI-added entry's resulting API payload) - not per-VS dns_info,
+      # which only applies to VSes Avi itself created from an
+      # Ingress/Service hostname.
+      kubectl config use-context "${supervisor_cluster_name}" >&2
+      harbor_namespace="$(kubectl get namespaces -o name | grep -o 'svc-harbor-[a-z0-9]*' | head -1)"
+      if [ -z "${harbor_namespace}" ]; then
+        log_notify "ERROR: harbor namespace (svc-harbor-*) not found - skipping DNS registration for ${harbor_hostname}"
+      else
+        harbor_ip=""
+        for attempt_harbor_ip in $(seq 1 12); do
+          harbor_ip="$(kubectl get svc -n "${harbor_namespace}" harbor-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)"
+          [ -n "${harbor_ip}" ] && break
+          sleep 10
+        done
+        if [ -z "${harbor_ip}" ]; then
+          log_notify "ERROR: harbor-nginx Service in ${harbor_namespace} has no LoadBalancer IP after waiting - skipping DNS registration for ${harbor_hostname}"
+        else
+          avi_login
+          avi_api 3 3 GET "" "api/virtualservice?name=dns-vs"
+          dns_vs_uuid=$(echo ${response_body} | jq -c -r '.results[0].uuid')
+          avi_api 3 3 GET "" "api/virtualservice/${dns_vs_uuid}"
+          static_dns_records=$(echo ${response_body} | jq -c --arg fqdn "${harbor_hostname}" --arg ip "${harbor_ip}" \
+            '[.static_dns_records[]? | select(.fqdn != [$fqdn])] + [{type: "DNS_RECORD_A", algorithm: "DNS_RECORD_RESPONSE_ROUND_ROBIN", fqdn: [$fqdn], ip_address: [{ip_address: {addr: $ip, type: "V4"}}]}]')
+          avi_api 3 3 PATCH "$(jq -n --argjson records "${static_dns_records}" '{replace: {static_dns_records: $records}}')" "api/virtualservice/${dns_vs_uuid}"
+          log_notify "Registered DNS record ${harbor_hostname} -> ${harbor_ip} on Avi's dns-vs"
+
+          # Optional image preload (spec's 'images', ISO-delivered
+          # OCI-archive tarballs) - pushed straight to Harbor's own
+          # LoadBalancer IP rather than harbor_hostname, since the DNS
+          # record above may take a moment to propagate through gw's own
+          # BIND delegation to Avi's dns-vs even though it was already
+          # confirmed live to resolve correctly end-to-end once settled.
+          # harbor_admin_password was already derived above, alongside
+          # this same entry's other secrets. Confirmed live: images
+          # pushed here pull successfully (no trust.additionalTrustedCAs
+          # ClusterClass variable needed) on any VKS cluster created
+          # AFTER Harbor's own activation - VMware's own "managed-by:
+          # vmware-vRegistry" mechanism (see the values template)
+          # propagates Harbor's self-signed CA into new clusters'
+          # trust stores automatically, just not retroactively into
+          # clusters that already existed beforehand.
+          harbor_images_json="$(echo ${item} | jq -c '.images // []')"
+          if [ "${harbor_images_json}" != "[]" ]; then
+            if ! command -v skopeo >/dev/null 2>&1; then
+              sudo apt-get install -y skopeo || log_notify "ERROR: apt-get install skopeo failed, skipping harbor image preload"
+            fi
+            if command -v skopeo >/dev/null 2>&1; then
+              harbor_registry_project="registry"
+              project_check_code=$(curl -sk -o /dev/null -w "%{http_code}" -u "admin:${harbor_admin_password}" \
+                "https://${harbor_ip}/api/v2.0/projects/${harbor_registry_project}")
+              if [ "${project_check_code}" == "404" ]; then
+                curl -sk -u "admin:${harbor_admin_password}" -X POST "https://${harbor_ip}/api/v2.0/projects" \
+                  -H "Content-Type: application/json" \
+                  -d "$(jq -n --arg name "${harbor_registry_project}" '{project_name: $name, public: true}')" >/dev/null
+              fi
+              echo "${harbor_images_json}" | jq -c -r .[] | while read -r image_file
+              do
+                image_path="/home/ubuntu/${image_file}"
+                if [ ! -f "${image_path}" ]; then
+                  log_notify "ERROR: harbor image ${image_file} not found at ${image_path} - was it added to vms.gw.iso's Iso CR?"
+                  continue
+                fi
+                image_name="$(basename "${image_file}" .tar.gz)"
+                image_name="$(basename "${image_name}" .tar)"
+                if skopeo copy --dest-tls-verify=false --dest-creds "admin:${harbor_admin_password}" \
+                    "oci-archive:${image_path}" "docker://${harbor_ip}/${harbor_registry_project}/${image_name}:latest"; then
+                  log_notify "Pushed ${image_file} to Harbor as ${harbor_registry_project}/${image_name}:latest (pull via ${harbor_hostname}/${harbor_registry_project}/${image_name}:latest)"
+                else
+                  log_notify "ERROR: failed to push ${image_file} to Harbor"
+                fi
+              done
+            fi
+          fi
+        fi
+      fi
+
+      continue
+    fi
+
+    # carvel-yaml (default) - existing behavior, unchanged.
     name="$(echo ${item} | jq -c -r '.name // empty')"
     if [ -z "${name}" ]; then
       log_notify "ERROR: supervisor_services entry has no name, skipping: ${item}"
