@@ -2209,6 +2209,20 @@ while true ; do
   sleep ${pause_supervisor}
 done
 
+# Extra settle time beyond config_status=RUNNING/kubernetes_status=READY -
+# confirmed live this API-level readiness doesn't mean the Supervisor's own
+# appplatform-operator has finished its own async backend init yet (per-
+# service ServiceAccount creation, signature verification records): a
+# Supervisor Service registered+enabled too soon after this point can fail
+# with either "signature verification result not found" or "the service
+# account is not ready. Please try again later" (both HTTP 500, both seen
+# live, both cleared on a later retry with no config change) - a plain
+# fixed wait here is simpler and cheaper than teaching every enable-on-
+# cluster call its own retry-on-500 logic for what's a one-time startup
+# race, not a recurring condition.
+log_only "waiting 300 more seconds for the Supervisor's own backend (appplatform-operator) to settle before registering/enabling any Supervisor Services"
+sleep 300
+
 create_vcenter_api_session
 vcenter_api 3 3 GET "api/vcenter/namespace-management/clusters" ""
 cluster_id=$(echo ${response_body} | jq -c -r .[0].cluster)
@@ -3617,6 +3631,49 @@ vcfa_api() {
   done
 }
 
+vcfa_put_file() {
+  # $1 item_id, $2 file_name (as listed by .../files), $3 transfer URL,
+  # $4 local file path, $5 description for logging, $6 retries, $7 pause
+  # - confirmed live these contentLibraryItem file PUTs can silently
+  # transfer 0 bytes with curl itself reporting HTTP 200/no error
+  # (previously not checked here at all, --data-binary piped to
+  # /dev/null), leaving the item stuck NOT_READY/FAILED with no
+  # indication which file (or that a file at all, versus some other
+  # server-side issue) was actually the cause.
+  #
+  # Content-Type: application/octet-stream turned out to be one real
+  # cause (curl's --data-binary defaults to
+  # application/x-www-form-urlencoded when no Content-Type is set, which
+  # the transfer endpoint accepts with a genuine 200 while discarding the
+  # body) - but NOT the only one: confirmed live a second time, even with
+  # this header set, the very same PUT (identical body/headers) can still
+  # silently transfer 0 bytes with an unqualified HTTP 200, while an
+  # immediate manual retry of the exact same transfer URL succeeds fully.
+  # A likely per-transfer-session readiness race on VCFA's own transfer
+  # endpoint, not something fixable by tweaking the request. So: an HTTP
+  # 2xx here is necessary but still not sufficient - re-fetch this item's
+  # own /files listing after every PUT and check bytesTransferred ==
+  # expectedSizeBytes for THIS file by name before considering it done,
+  # retrying the whole PUT (not just re-checking) otherwise.
+  local item_id="$1" file_name="$2" transfer_url="$3" local_path="$4" description="$5" retry="${6:-3}" pause="${7:-10}" attempt=1
+  while true; do
+    curl -sk -o /dev/null -X PUT "${transfer_url}" -H "Authorization: Bearer ${vcfa_token}" -H "Content-Type: application/octet-stream" --data-binary @"${local_path}"
+    vcfa_api GET "cloudapi/v1/contentLibraryItems/${item_id}/files" ""
+    transferred=$(echo ${response_body} | jq -c -r --arg n "${file_name}" '.values[] | select(.name == $n) | .bytesTransferred')
+    expected=$(echo ${response_body} | jq -c -r --arg n "${file_name}" '.values[] | select(.name == $n) | .expectedSizeBytes')
+    if [ -n "${transferred}" ] && [ "${transferred}" == "${expected}" ]; then
+      return 0
+    fi
+    log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: upload of ${description} incomplete (${transferred:-0}/${expected} bytes transferred), attempt ${attempt}/${retry}" "${log_file}" "" ""
+    if [ ${attempt} -eq ${retry} ]; then
+      log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: giving up uploading ${description} after ${retry} attempts" "${log_file}" "${slack_webhook}" "${google_webhook}"
+      return 1
+    fi
+    sleep "${pause}"
+    ((attempt++))
+  done
+}
+
 vcfa_login
 
 #
@@ -3899,20 +3956,36 @@ do
         vcfa_api GET "cloudapi/v1/contentLibraryItems/${item_id}/files" ""
         descriptor_name=$(echo ${response_body} | jq -c -r '.values[0].name')
         descriptor_transfer_url=$(echo ${response_body} | jq -c -r '.values[0].transferUrl')
-        curl -sk -X PUT "${descriptor_transfer_url}" -H "Authorization: Bearer ${vcfa_token}" --data-binary @"${ovf_file}" > /dev/null
+        vcfa_put_file "${item_id}" "${descriptor_name}" "${descriptor_transfer_url}" "${ovf_file}" "descriptor for item ${item_name}"
 
         # disk file(s) - discovered from the server AFTER the descriptor
         # upload (see the caveat above); uploaded by matching each
         # server-reported file name against the extracted directory.
-        sleep 5
-        vcfa_api GET "cloudapi/v1/contentLibraryItems/${item_id}/files" ""
-        disk_files=$(echo ${response_body} | jq -c -r --arg descname "${descriptor_name}" '.values[] | select(.name != $descname) | @base64')
+        # Retries the discovery GET itself, not just each file's later
+        # upload - confirmed live that under real load (concurrent org
+        # provisioning elsewhere in this same run) the /files listing can
+        # still only report the descriptor entry well past a fixed 5s
+        # sleep, silently leaving disk_files empty and skipping the
+        # upload loop entirely with no error at all (looked, at the
+        # symptom level, identical to the upload itself being stuck).
+        disk_files=""
+        for attempt_discover in $(seq 1 12); do
+          sleep 5
+          vcfa_api GET "cloudapi/v1/contentLibraryItems/${item_id}/files" ""
+          disk_files=$(echo ${response_body} | jq -c -r --arg descname "${descriptor_name}" '.values[] | select(.name != $descname) | @base64')
+          if [ -n "${disk_files}" ]; then
+            break
+          fi
+        done
+        if [ -z "${disk_files}" ]; then
+          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no disk files discovered for item ${item_name} after waiting, giving up on this item" "${log_file}" "${slack_webhook}" "${google_webhook}"
+        fi
         for encoded_file in ${disk_files}; do
           disk_name=$(echo "${encoded_file}" | base64 -d | jq -c -r '.name')
           disk_transfer_url=$(echo "${encoded_file}" | base64 -d | jq -c -r '.transferUrl')
           local_disk_path="${extract_dir}/${disk_name}"
           if [ -f "${local_disk_path}" ]; then
-            curl -sk -X PUT "${disk_transfer_url}" -H "Authorization: Bearer ${vcfa_token}" --data-binary @"${local_disk_path}" > /dev/null
+            vcfa_put_file "${item_id}" "${disk_name}" "${disk_transfer_url}" "${local_disk_path}" "disk file ${disk_name} for item ${item_name}"
           else
             log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: server-requested disk file ${disk_name} not found locally under ${extract_dir} for item ${item_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
           fi
@@ -4173,6 +4246,32 @@ do
         if [ -z "${avi_synced:-}" ]; then
           vcfa_api GET "cloudapi/v1/loadBalancer/aviControllers?filter=regionRef.id==${region_id}" ""
           avi_controller_id=$(echo ${response_body} | jq -c -r --arg arg "${region_id}" '.values[] | select(.regionRef.id == $arg) | .id' | head -1)
+          if [ -z "${avi_controller_id}" ]; then
+            #
+            # SDDC Manager registers Avi directly with NSX-T (enforcement
+            # point), but VCFA keeps its OWN, separate aviControllers
+            # catalog that is not populated automatically from that NSX
+            # registration - confirmed live: catalog stayed empty long
+            # after Avi/NSX were both healthy. It requires this explicit
+            # provider-side registration call (schema confirmed live via
+            # the API's own "Unrecognized field" error message).
+            #
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no avi controller registered in VCFA for region ${region_ref_name}, registering ${ip_avi}" "${log_file}" "" ""
+            avi_controller_json=$(jq -n --arg url "https://${ip_avi}" --arg pass "${generic_password}" --arg regionid "${region_id}" \
+              '{name: "provider-avi", url: $url, username: "admin", password: $pass, license: "ENTERPRISE", regionRef: {id: $regionid}, isDedicatedForClassicTenants: false}')
+            vcfa_api POST "cloudapi/v1/loadBalancer/aviControllers" "${avi_controller_json}"
+            for attempt_avi_reg in $(seq 1 12); do
+              sleep 10
+              vcfa_api GET "cloudapi/v1/loadBalancer/aviControllers?filter=regionRef.id==${region_id}" ""
+              avi_controller_id=$(echo ${response_body} | jq -c -r --arg arg "${region_id}" '.values[] | select(.regionRef.id == $arg) | .id' | head -1)
+              if [ -n "${avi_controller_id}" ]; then
+                break
+              fi
+            done
+            if [ -z "${avi_controller_id}" ]; then
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: FAILED to register avi controller ${ip_avi} in VCFA after waiting" "${log_file}" "${slack_webhook}" "${google_webhook}"
+            fi
+          fi
           if [ -n "${avi_controller_id}" ]; then
             vcfa_api POST "cloudapi/v1/loadBalancer/aviControllers/${avi_controller_id}/sync" ""
             sleep 30
