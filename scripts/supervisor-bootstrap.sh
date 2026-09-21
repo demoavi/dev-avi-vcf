@@ -7,6 +7,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 vcd_login
+log_notify "supervisor-bootstrap.sh started"
 
 # Also computed independently by vcf_bootstrap.sh itself (shared with the
 # VCFA org-provisioning phase, which needs fqdn_vcfa too) - duplicated

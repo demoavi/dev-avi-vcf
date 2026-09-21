@@ -1,12 +1,13 @@
 #!/bin/bash
 #
-# Vault + cert-manager PKI bootstrap (root/intermediate CA) - optional, gated on any org needing namespace.vault_integration. Runs early (right after yaml rendering) since it has no dependency on the SDDC build pipeline; must only complete before configure_vcfa.sh, which reads its root token.
+# Vault + cert-manager PKI bootstrap (root/intermediate CA) - optional, gated on any org needing namespace.vault_integration. Runs first, before the SDDC build pipeline, since it has no dependency on any of it; must only complete before configure_vcfa.sh, which reads its root token.
 #
 jsonFile="${1}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 vcd_login
+log_notify "vault-pki-bootstrap.sh started"
 
 slack_webhook=""
 log_file="/home/ubuntu/vcf_bootstrap.log"

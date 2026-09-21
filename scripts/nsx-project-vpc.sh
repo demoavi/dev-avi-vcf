@@ -7,6 +7,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 vcd_login
+log_notify "nsx-project-vpc.sh started"
 
 # NSX Project/VPC/Transit-Gateway setup (merged from the reference
 # project's nsx/vpc_avi.sh) - despite the filename, the only Avi-specific

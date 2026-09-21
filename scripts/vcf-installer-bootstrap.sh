@@ -7,6 +7,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 vcd_login
+log_notify "vcf-installer-bootstrap.sh started"
 
 # hostSpecs is built by esxi-bootstrap.sh (its own separate process) and
 # handed off via this temp file - see that script's own comment.

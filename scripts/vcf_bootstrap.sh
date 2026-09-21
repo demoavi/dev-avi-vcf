@@ -22,13 +22,13 @@ mkdir -p /home/ubuntu/html /home/ubuntu/json
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 
-# VCD session, established up front (not just before the ESX power-cycle
-# step) so log_notify below can use it too - see vcd_login() in
-# functions.sh, called by every phase script (including this orchestrator
-# itself) that wants log_notify's VCD-metadata progress reporting to work.
+# VCD session, established up front - see vcd_login() in functions.sh.
+# Every phase script below also calls this itself (each announces its own
+# "started" via log_notify at its own top, and does its own error
+# reporting) - kept here too only for this orchestrator's own two
+# remaining log_notify uses: the DNS/NTP check below, and the abort path
+# if a phase script fails (see the per-phase checks further down).
 vcd_login
-
-log_notify "vcf_bootstrap.sh started"
 
 # DNS (bind9) and NTP (chrony) health check - both are set up earlier in
 # gw's own cloud-init, well before this script is launched, so a failure
@@ -45,43 +45,35 @@ fi
 
 #
 # From here on, every remaining phase runs as its own separate, self-
-# contained script (each independently sources variables.sh/functions.sh
-# and calls vcd_login itself) rather than being inlined - keeps this
-# orchestrator thin and each phase independently testable/re-runnable.
-# Order matters and follows the original monolith's own sequence exactly
-# (each phase's comments above document its own real dependencies on the
-# ones before it), with two exceptions made deliberately: vault-pki-
-# bootstrap.sh now runs first (it has zero dependency on the SDDC build
-# pipeline and only needs to finish before configure_vcfa.sh at the very
-# end); and vSAN health alarm silencing moved into vcenter-bootstrap.sh
-# (see that script's own comment) rather than staying in its original,
-# much later position. Demo Gateway/Ingress/workload yaml rendering also
-# used to run here as its own first-phase script (vks-yaml-rendering.sh)
-# but has since moved into configure_vcfa.sh's own per-org loop - the
-# per-Kind hostnames it renders have to be unique PER ORG (Avi is one
-# shared, provider-managed controller), so it needs org_name in scope,
-# which only configure_vcfa.sh's loop has.
+# contained script (each independently sources variables.sh/functions.sh,
+# calls vcd_login itself, and announces its own "started" via log_notify
+# at its own top) rather than being inlined - keeps this orchestrator
+# thin and each phase independently testable/re-runnable. Order matters
+# and follows the original monolith's own sequence exactly (each phase's
+# comments above document its own real dependencies on the ones before
+# it), with two exceptions made deliberately: vault-pki-bootstrap.sh now
+# runs first (it has zero dependency on the SDDC build pipeline and only
+# needs to finish before configure_vcfa.sh at the very end); and vSAN
+# health alarm silencing moved into vcenter-bootstrap.sh (see that
+# script's own comment) rather than staying in its original, much later
+# position. Demo Gateway/Ingress/workload yaml rendering also used to run
+# here as its own first-phase script (vks-yaml-rendering.sh) but has
+# since moved into configure_vcfa.sh's own per-org loop - the per-Kind
+# hostnames it renders have to be unique PER ORG (Avi is one shared,
+# provider-managed controller), so it needs org_name in scope, which only
+# configure_vcfa.sh's loop has.
 #
-bash "${script_dir}/vault-pki-bootstrap.sh" "${jsonFile}"
-bash "${script_dir}/esxi-bootstrap.sh" "${jsonFile}"
-bash "${script_dir}/vcf-installer-bootstrap.sh" "${jsonFile}"
-bash "${script_dir}/vcenter-bootstrap.sh" "${jsonFile}"
-bash "${script_dir}/nsx-bootstrap.sh" "${jsonFile}"
-bash "${script_dir}/avi-bootstrap.sh" "${jsonFile}"
-bash "${script_dir}/nsx-project-vpc.sh" "${jsonFile}"
-bash "${script_dir}/supervisor-bootstrap.sh" "${jsonFile}"
-
-log_notify "vcf_bootstrap.sh complete (SDDC build + vCenter port groups + NSX config + Avi deployment + Avi configuration + Avi upgrade + NSX Project/VPC + vSAN alarm silencing + Supervisor enablement - full pipeline, no remaining standalone stages)"
-
+# Each call aborts the whole pipeline on a non-zero exit - a later phase
+# almost always assumes an earlier one actually succeeded (e.g. NSX/Avi
+# config assumes the SDDC actually got built), so silently continuing
+# past a failed phase would just fail more confusingly, several phases
+# later, with a much less obvious root cause.
 #
-# VCFA org provisioning - split into its own script (configure_vcfa.sh),
-# run as its own process rather than inlined here, matching the reference
-# project's own separate configure_vcfa.sh. Entirely optional - that
-# script is already a no-op throughout if spec.sddc.vcf_a is unset. Must
-# run after vault-pki-bootstrap.sh above (not just after it in file
-# order) - the org-provisioning loop reads Vault's root token for per-org
-# vault_integration setup, so Vault has to already be up; this is
-# guaranteed here since vault-pki-bootstrap.sh is a synchronous call that
-# already completed before we ever reach this line.
-#
-bash "${script_dir}/configure_vcfa.sh" "${jsonFile}"
+for phase in vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap configure_vcfa; do
+  bash "${script_dir}/${phase}.sh" "${jsonFile}"
+  phase_exit=$?
+  if [ ${phase_exit} -ne 0 ]; then
+    log_notify "ERROR: ${phase}.sh failed (exit code ${phase_exit}), aborting vcf_bootstrap.sh"
+    exit 1
+  fi
+done

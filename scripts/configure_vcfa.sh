@@ -40,6 +40,8 @@ resultFile="/home/ubuntu/configure_vcfa.done"
 slack_webhook=""
 default_storage_class="${supervisor_cluster_name} vSAN Storage Policy"
 
+log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: configure_vcfa.sh started" "${log_file}" "${slack_webhook}" "${google_webhook}"
+
 # fqdn_vcfa is also computed independently by vcf_bootstrap.sh itself
 # (shared with the Supervisor auth helper scripts it renders) - duplicated
 # here rather than passed through, since this runs as its own process.

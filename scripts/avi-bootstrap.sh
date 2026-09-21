@@ -7,6 +7,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 vcd_login
+log_notify "avi-bootstrap.sh started"
 
 # project's sddc-manager/avi-sddc.sh) - the 9.0 branch (manual pvc.json/OVA
 # upload over scp) is dropped, VCF 9.1-only scope as elsewhere in this

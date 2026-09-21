@@ -10,6 +10,19 @@
 # must stay self-contained wherever they end up deployed/run, so they are
 # deliberately left untouched).
 #
+# deployment_kind distinguishes vApp-use-case from SDDC-use-case runs in
+# log_notify's own gchat messages (both eventually post to the same
+# space) - NOT hardcoded here: the two use cases are meant to eventually
+# share this same vcf_bootstrap.sh/functions.sh, driven by two SEPARATE
+# operators (each with its own CRD/kopf watch - the vApp operator here in
+# epc-vapp, an equivalent one for the sddc CRD elsewhere), so this file
+# can't assume which one produced the JSON it's reading. Once each
+# operator renders its own deployment JSON with a "deployment_kind" field
+# (CR kind "vApp-avi-vcf" or "sddc" respectively) and bash/variables.sh
+# exports it, this picks that up automatically. Until that CR/variables.sh
+# plumbing exists, falls back to "vApp" (this repo's only real, working
+# path today) rather than an empty/broken tag.
+: "${deployment_kind:=vApp}"
 
 # This org has far more VMs (other users' labs) than fit in one page - a
 # single unpaginated page silently drops results past its page size and
@@ -114,7 +127,7 @@ log_only() {
   echo "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: $1"
 }
 log_notify() {
-  local message="$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: $1"
+  local message="$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc} (${deployment_kind}): $1"
   echo "${message}"
   if [ -n "${google_webhook}" ]; then
     curl -s -X POST -H 'Content-Type: application/json' --data "$(jq -n --arg text "${message}" '{text: $text}')" "${google_webhook}" >/dev/null 2>&1
