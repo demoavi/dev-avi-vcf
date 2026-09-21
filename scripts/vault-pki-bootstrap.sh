@@ -39,14 +39,26 @@ touch "${log_file}"
 # of this gate (cheap, harmless if unused) - only the actual service
 # start/init/PKI setup is conditional.
 #
+# The reference project runs this whole block directly as root in
+# cloud-init (no user-drop at all) - this port runs as ubuntu throughout
+# (see vcf_bootstrap.sh's own top comment), so every operation below that
+# touches /opt/vault, /etc/vault.d, or systemd needs an explicit sudo that
+# the reference never needed. Confirmed elsewhere in this project (see
+# configure_vcfa.sh's own "sudo cat /opt/vault/tls/tls.crt") that this
+# user has passwordless sudo. Where the target itself is root-owned,
+# "sudo tee file" is used instead of "cmd > file" or "sudo cmd > file" -
+# a plain ">" redirect is opened by the CURRENT (unprivileged) shell
+# before the command ever runs, so sudo on the command itself doesn't
+# help; tee's own file-writing happens inside the (sudo'd) tee process
+# instead, which does work.
 if echo "${vcf_a_organizations}" | jq -e 'any(.[]; .namespace.vault_integration.enabled == true)' > /dev/null 2>&1; then
   log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: at least one org needs vault_integration, bootstrapping Vault" "${log_file}" "${slack_webhook}" "${google_webhook}"
-  mkdir -p /opt/vault/tls
+  sudo mkdir -p /opt/vault/tls
   key_file="/opt/vault/tls/tls.key"
   cert_conf_file="/opt/vault/tls/crt.conf"
   cert_file="/opt/vault/tls/tls.crt"
-  openssl genrsa -out ${key_file} 4096
-  cat > ${cert_conf_file} <<CERT_CONF_EOF
+  sudo openssl genrsa -out ${key_file} 4096
+  sudo tee ${cert_conf_file} > /dev/null <<CERT_CONF_EOF
 [req]
 default_bits = 4096
 prompt = no
@@ -70,9 +82,9 @@ subjectAltName = @alt_names
 DNS.1 = vault.${domain}
 IP.1 = ${ip_gw}
 CERT_CONF_EOF
-  openssl req -new -x509 -key ${key_file} -out ${cert_file} -days 365 -config ${cert_conf_file} -extensions v3_req
-  mkdir -p /etc/vault.d
-  mv /etc/vault.d/vault.hcl /etc/vault.d/vault.hcl.ori 2>/dev/null
+  sudo openssl req -new -x509 -key ${key_file} -out ${cert_file} -days 365 -config ${cert_conf_file} -extensions v3_req
+  sudo mkdir -p /etc/vault.d
+  sudo mv /etc/vault.d/vault.hcl /etc/vault.d/vault.hcl.ori 2>/dev/null
   export VAULT_ADDR="https://127.0.0.1:8200"
   vault_config='
   storage "file" {
@@ -86,9 +98,9 @@ CERT_CONF_EOF
     }
     ui = true
     api_addr = "https://${ip_gw}:8200"'
-  echo "${vault_config}" | tee /etc/vault.d/vault.hcl
-  systemctl start vault
-  systemctl enable vault
+  echo "${vault_config}" | sudo tee /etc/vault.d/vault.hcl
+  sudo systemctl start vault
+  sudo systemctl enable vault
   vault operator init -key-shares=1 -key-threshold=1 -tls-skip-verify -format json | tee ${vault_secret_file_path}
   vault operator unseal -tls-skip-verify $(jq -c -r .unseal_keys_hex[0] ${vault_secret_file_path})
   vault login -tls-skip-verify $(jq -c -r .root_token ${vault_secret_file_path})
