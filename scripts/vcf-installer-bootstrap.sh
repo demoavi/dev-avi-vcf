@@ -4,6 +4,7 @@
 #
 jsonFile="${1}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+templates_dir="${script_dir}/../templates"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 vcd_login

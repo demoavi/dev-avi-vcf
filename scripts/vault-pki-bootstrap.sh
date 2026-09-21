@@ -9,11 +9,6 @@ source "${script_dir}/functions.sh"
 vcd_login
 log_notify "vault-pki-bootstrap.sh started"
 
-slack_webhook=""
-log_file="/home/ubuntu/vcf_bootstrap.log"
-touch "${log_file}"
-
-
 #
 # Vault + cert-manager PKI bootstrap - ported from the reference project's
 # own cloud-init (templates/userdata_external-gw-trunk.yaml.template), NOT
@@ -52,7 +47,7 @@ touch "${log_file}"
 # help; tee's own file-writing happens inside the (sudo'd) tee process
 # instead, which does work.
 if echo "${vcf_a_organizations}" | jq -e 'any(.[]; .namespace.vault_integration.enabled == true)' > /dev/null 2>&1; then
-  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: at least one org needs vault_integration, bootstrapping Vault" "${log_file}" "${slack_webhook}" "${google_webhook}"
+  log_notify "at least one org needs vault_integration, bootstrapping Vault"
   sudo mkdir -p /opt/vault/tls
   key_file="/opt/vault/tls/tls.key"
   cert_conf_file="/opt/vault/tls/crt.conf"
@@ -125,7 +120,7 @@ CERT_CONF_EOF
   vault write -tls-skip-verify -format=json ${vault_pki_name}/root/sign-intermediate issuer_ref="${vault_pki_cert_issuer_name}" csr=@${vault_pki_intermediate_cert_path} format=pem_bundle ttl="${vault_pki_intermediate_max_lease_ttl}" | jq -r '.data.certificate' | tee ${vault_pki_intermediate_cert_path_signed}
   vault write -tls-skip-verify ${vault_pki_intermediate_name}/intermediate/set-signed certificate=@${vault_pki_intermediate_cert_path_signed}
   vault write -tls-skip-verify ${vault_pki_intermediate_name}/roles/${vault_pki_intermediate_role_name} issuer_ref="$(vault read -tls-skip-verify -field=default ${vault_pki_intermediate_role_name}/config/issuers)" allowed_domains="${domain}" allow_subdomains=${vault_pki_intermediate_role_allow_subdomains} max_ttl="${vault_pki_intermediate_role_max_ttl}"
-  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: Vault bootstrap complete" "${log_file}" "${slack_webhook}" "${google_webhook}"
+  log_notify "Vault bootstrap complete"
 else
-  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no org needs vault_integration, skipping Vault bootstrap" "${log_file}" "${slack_webhook}" "${google_webhook}"
+  log_notify "no org needs vault_integration, skipping Vault bootstrap"
 fi
