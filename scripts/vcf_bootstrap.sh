@@ -61,58 +61,70 @@ if [ -d /home/ubuntu/dev-avi-vcf/yamls ]; then
   for yaml_src in /home/ubuntu/dev-avi-vcf/yamls/*.yaml; do
     yaml_dst="/home/ubuntu/yaml-files/$(basename "$yaml_src")"
     cp "$yaml_src" "$yaml_dst"
-    # select(di == 0), not a bare '.kind' - a multi-doc file (e.g.
-    # demo-http-apps.yaml's 3 Deployments + 3 Services) would otherwise
-    # yield every document's kind concatenated, which never matches any
-    # single case label below and always fell through to the silent no-op
-    # catch-all instead.
-    yaml_kind="$(yq 'select(di == 0) | .kind' "$yaml_dst")"
-    case "$yaml_kind" in
-      Ingress)
-        # .spec.rules[i].host = "v<i+1>.<full_domain>"
-        rule_count=$(yq '.spec.rules | length' "$yaml_dst")
-        for ((i = 0; i < rule_count; i++)); do
-          yq -i ".spec.rules[$i].host = \"v$((i + 1)).${full_domain}\"" "$yaml_dst"
-        done
-        ;;
-      HTTPRoute)
-        # .spec.hostnames = ["<metadata.name>.<full_domain>"]
-        httproute_name="$(yq '.metadata.name' "$yaml_dst")"
-        yq -i "del(.spec.hostnames) | .spec.hostnames[0] = \"${httproute_name}.${full_domain}\"" "$yaml_dst"
-        ;;
-      Gateway)
-        # every listener's hostname = "*.<full_domain>"
-        yq -i ".spec.listeners[].hostname = \"*.${full_domain}\"" "$yaml_dst"
-        ;;
-      HostRule)
-        # .spec.virtualhost.fqdn = "<metadata.name>.<full_domain>"
-        hostrule_name="$(yq '.metadata.name' "$yaml_dst")"
-        yq -i ".spec.virtualhost.fqdn = \"${hostrule_name}.${full_domain}\"" "$yaml_dst"
-        ;;
-      RouteBackendExtension)
-        # .spec.backendTLS.domainName[0] = "<metadata.name>.<full_domain>"
-        rbe_name="$(yq '.metadata.name' "$yaml_dst")"
-        yq -i ".spec.backendTLS.domainName[0] = \"${rbe_name}.${full_domain}\"" "$yaml_dst"
-        ;;
-      Deployment)
-        # every container's (and initContainer's) image, in every
-        # Deployment document in this file (not just the first - the sub()
-        # below runs per-document across the whole multi-doc stream, e.g.
-        # demo-http-apps.yaml's other two Deployments and its interleaved
-        # Service docs, where it's a safe no-op since Services have no
-        # .spec.template.spec.containers path at all) - registry host
-        # swapped for this environment's own Harbor, image name/tag kept
-        # as-is (untagged stays untagged, i.e. still implicitly ":latest"
-        # by Docker convention, matching how the harbor image-preload step
-        # above always pushes as ":latest"). Confirmed live this correctly
-        # leaves the 3 Service docs in demo-http-apps.yaml untouched while
-        # rewriting all 3 Deployments' images.
-        yq -i '(.. | select(has("containers")) | .containers[], .. | select(has("initContainers")) | .initContainers[] | select(.image != null)).image |= sub("^.*/", "'"${harbor_registry_fqdn}"'/registry/")' "$yaml_dst"
-        ;;
-      *)
-        # HealthMonitor, L7Rule, Service (incl. the LB demos) - no changes.
-        ;;
-    esac
+    # Per-document dispatch, not per-file. An earlier version keyed the
+    # whole file's rewrite off select(di == 0) | .kind alone (to dodge a
+    # DIFFERENT bug: a bare '.kind' on a multi-doc file yields every
+    # document's kind concatenated, matching no case label at all) - but
+    # that still means only document 0's own kind ever reached a case
+    # label below; any other document's kind further down the same file
+    # was silently skipped regardless of what it was. Confirmed live with
+    # a Service-then-Gateway test file: the Gateway's listener hostname
+    # stayed at its unrendered placeholder value. Looping per document
+    # index and dispatching each one on ITS OWN kind fixes this for any
+    # Kind/ordering combination while keeping every per-Kind expression
+    # below unchanged (each is now just scoped to "select(di == $di) |
+    # ..." instead of running bare against the whole file).
+    last_di=$(yq 'document_index' "$yaml_dst" | tail -1)
+    doc_count=$((last_di + 1))
+    for ((di = 0; di < doc_count; di++)); do
+      this_kind="$(yq "select(di == $di) | .kind" "$yaml_dst")"
+      case "$this_kind" in
+        Ingress)
+          # .spec.rules[i].host = "v<i+1>.<full_domain>"
+          rule_count=$(yq "select(di == $di) | .spec.rules | length" "$yaml_dst")
+          for ((i = 0; i < rule_count; i++)); do
+            yq -i "(select(di == $di) | .spec.rules[$i].host) = \"v$((i + 1)).${full_domain}\"" "$yaml_dst"
+          done
+          ;;
+        HTTPRoute)
+          # .spec.hostnames = ["<metadata.name>.<full_domain>"]
+          httproute_name="$(yq "select(di == $di) | .metadata.name" "$yaml_dst")"
+          yq -i "(select(di == $di)) |= (del(.spec.hostnames) | .spec.hostnames[0] = \"${httproute_name}.${full_domain}\")" "$yaml_dst"
+          ;;
+        Gateway)
+          # every listener's hostname = "*.<full_domain>"
+          yq -i "(select(di == $di) | .spec.listeners[].hostname) = \"*.${full_domain}\"" "$yaml_dst"
+          ;;
+        HostRule)
+          # .spec.virtualhost.fqdn = "<metadata.name>.<full_domain>"
+          hostrule_name="$(yq "select(di == $di) | .metadata.name" "$yaml_dst")"
+          yq -i "(select(di == $di) | .spec.virtualhost.fqdn) = \"${hostrule_name}.${full_domain}\"" "$yaml_dst"
+          ;;
+        RouteBackendExtension)
+          # .spec.backendTLS.domainName[0] = "<metadata.name>.<full_domain>"
+          rbe_name="$(yq "select(di == $di) | .metadata.name" "$yaml_dst")"
+          yq -i "(select(di == $di) | .spec.backendTLS.domainName[0]) = \"${rbe_name}.${full_domain}\"" "$yaml_dst"
+          ;;
+        *)
+          # HealthMonitor, L7Rule, Service, Deployment (incl. the LB demos) -
+          # no per-Kind hostname/URL rewrite for this document. The Harbor
+          # image rewrite below runs unconditionally instead of as a case
+          # here - see that comment for why.
+          ;;
+      esac
+    done
+    # Runs on the whole file at once (not per-document like the loop
+    # above), unconditionally - the select(has("containers")) filter
+    # already makes it a safe no-op on every document that isn't a
+    # Deployment (or anything else without a .containers/.initContainers
+    # path), regardless of position in the file or of any document's own
+    # kind. Rewrites every container's (and initContainer's) image in
+    # every matching document across the whole multi-doc stream -
+    # registry host swapped for this environment's own Harbor, image
+    # name/tag kept as-is (untagged stays untagged, i.e. still implicitly
+    # ":latest" by Docker convention, matching how the harbor
+    # image-preload step above always pushes as ":latest").
+    yq -i '(.. | select(has("containers")) | .containers[], .. | select(has("initContainers")) | .initContainers[] | select(.image != null)).image |= sub("^.*/", "'"${harbor_registry_fqdn}"'/registry/")' "$yaml_dst"
   done
   chown -R ubuntu:ubuntu /home/ubuntu/yaml-files
 fi
@@ -4786,6 +4798,92 @@ else
         vks_available=$(echo ${response_body} | jq -c -r '.status.conditions[]? | select(.type=="Available") | .status')
         if [[ "${vks_available}" == "True" ]]; then
           log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster ${vks_name} for ${org_name} is Available after ${attempt_vks} attempts of ${pause_vks} seconds" "${log_file}" "" ""
+          #
+          # status.conditions[type=Available] only reflects CAPI's own
+          # control-plane/machine-level readiness (confirmed live earlier
+          # this session via the clusterNetwork.pods.cidrBlocks bug:
+          # Available flipped True well before antrea actually had a
+          # working pod network) - it says nothing about whether the
+          # cluster's own core add-on pods have actually finished
+          # starting. The org-scoped token used everywhere else in this
+          # script has no RBAC inside the workload cluster itself
+          # (confirmed live: "forbidden" on pods/secrets/namespaces even
+          # via its own namespaceEndpointURL proxy) - CAPI's own
+          # <cluster-name>-kubeconfig Secret (created automatically by
+          # the Supervisor, alongside the Cluster object, in the SAME
+          # namespace) is the one credential with genuine cluster-admin
+          # access, reachable only via the Supervisor's own kubectl
+          # context (sup-admin-01), same auth_supervisor_custer.sh helper
+          # the vault-integration step above already uses.
+          #
+          bash /home/ubuntu/supervisor/auth_supervisor_custer.sh >/dev/null 2>&1
+          vks_kubeconfig="/tmp/${org_name}-vks-admin-kubeconfig.yaml"
+          kubectl --context sup-admin-01 get secret "${vks_name}-kubeconfig" -n "${ns_name}" -o jsonpath='{.data.value}' 2>/dev/null | base64 -d > "${vks_kubeconfig}"
+          if [ ! -s "${vks_kubeconfig}" ]; then
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: could not retrieve admin kubeconfig for VKS cluster ${vks_name} (${org_name}), skipping pod-security/cert01 setup" "${log_file}" "${slack_webhook}" "${google_webhook}"
+          else
+            #
+            # Wait for every pod in the cluster to be Running/Succeeded
+            # before doing anything below that assumes a genuinely
+            # working cluster (matches this session's own hard-won lesson
+            # that "Available" alone isn't sufficient).
+            #
+            retry_pods=20 ; pause_pods=15 ; attempt_pods=1
+            while true; do
+              not_ready_count=$(kubectl --kubeconfig="${vks_kubeconfig}" get pods -A -o json 2>/dev/null | jq -c -r '[.items[] | select(.status.phase != "Running" and .status.phase != "Succeeded")] | length')
+              if [ "${not_ready_count}" == "0" ]; then
+                log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: all pods Running/Succeeded in VKS cluster ${vks_name} for ${org_name} after ${attempt_pods} attempts of ${pause_pods} seconds" "${log_file}" "" ""
+                break
+              fi
+              if [ ${attempt_pods} -eq ${retry_pods} ]; then
+                log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster ${vks_name} for ${org_name} still has ${not_ready_count:-unknown} non-Running pods after ${attempt_pods} attempts of ${pause_pods} seconds, proceeding anyway" "${log_file}" "${slack_webhook}" "${google_webhook}"
+                break
+              fi
+              sleep ${pause_pods}
+              ((attempt_pods++))
+            done
+
+            #
+            # Pod Security Admission defaults to "restricted" on this
+            # ClusterClass, which blocks workloads with no securityContext
+            # (e.g. the plain busybox demo containers) from starting in
+            # the default namespace - relax it to "privileged" there.
+            #
+            kubectl --kubeconfig="${vks_kubeconfig}" label --overwrite ns default pod-security.kubernetes.io/enforce=privileged
+            if [ $? -eq 0 ]; then
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: default namespace pod-security.kubernetes.io/enforce=privileged applied for ${org_name}'s VKS cluster ${vks_name}" "${log_file}" "" ""
+            else
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: failed to label default namespace pod-security.kubernetes.io/enforce=privileged for ${org_name}'s VKS cluster ${vks_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+            fi
+
+            #
+            # cert01 - a wildcard self-signed TLS cert for
+            # *.<avi_subdomain>.<domain>, matching the same wildcard
+            # hostname convention the demo Gateway yaml rendering already
+            # uses (Gateway listener hostname = "*.<full_domain>") - so
+            # this cert actually covers whatever hostname a demo
+            # Ingress/Gateway/HTTPRoute ends up using. Idempotent by
+            # presence (skip if cert01 already exists), not re-issued
+            # every run.
+            #
+            if kubectl --kubeconfig="${vks_kubeconfig}" get secret cert01 -n default >/dev/null 2>&1; then
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: TLS secret cert01 already exists in default namespace for ${org_name}'s VKS cluster ${vks_name}, skipping" "${log_file}" "" ""
+            else
+              ssl_key="/tmp/${org_name}-ssl.key"
+              ssl_crt="/tmp/${org_name}-ssl.crt"
+              openssl req -newkey rsa:4096 -x509 -sha256 -days 3650 -nodes \
+                -out "${ssl_crt}" -keyout "${ssl_key}" \
+                -subj "/C=US/ST=CA/L=Palo Alto/O=VMWARE/OU=IT/CN=*.${avi_subdomain}.${domain}" 2>/dev/null
+              kubectl --kubeconfig="${vks_kubeconfig}" create secret tls cert01 -n default --key="${ssl_key}" --cert="${ssl_crt}"
+              if [ $? -eq 0 ]; then
+                log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: TLS secret cert01 (CN=*.${avi_subdomain}.${domain}) created in default namespace for ${org_name}'s VKS cluster ${vks_name}" "${log_file}" "" ""
+              else
+                log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: failed to create TLS secret cert01 for ${org_name}'s VKS cluster ${vks_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+              fi
+              rm -f "${ssl_key}" "${ssl_crt}"
+            fi
+          fi
+          rm -f "${vks_kubeconfig}"
           break
         fi
         ((attempt_vks++))
