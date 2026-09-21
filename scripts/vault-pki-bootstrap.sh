@@ -48,6 +48,15 @@ log_notify "vault-pki-bootstrap.sh started"
 # instead, which does work.
 if echo "${vcf_a_organizations}" | jq -e 'any(.[]; .namespace.vault_integration.enabled == true)' > /dev/null 2>&1; then
   log_notify "at least one org needs vault_integration, bootstrapping Vault"
+  # Fail fast: none of the vault CLI calls below check their own exit
+  # status, so without this a failure (e.g. an empty vault_pki_* var)
+  # would silently fall through to the final "Vault bootstrap complete"
+  # log_notify below, exactly as happened live on 2026-09-21 - the
+  # unseal/root-CA/intermediate-CA calls all failed quietly against an
+  # empty bash/variables.sh and the script still reported success.
+  # pipefail is needed too since several of these run through `| tee`/
+  # `| jq` pipelines, which set -e alone won't catch a failure in.
+  set -e -o pipefail
   sudo mkdir -p /opt/vault/tls
   key_file="/opt/vault/tls/tls.key"
   cert_conf_file="/opt/vault/tls/crt.conf"
@@ -79,7 +88,7 @@ IP.1 = ${ip_gw}
 CERT_CONF_EOF
   sudo openssl req -new -x509 -key ${key_file} -out ${cert_file} -days 365 -config ${cert_conf_file} -extensions v3_req
   sudo mkdir -p /etc/vault.d
-  sudo mv /etc/vault.d/vault.hcl /etc/vault.d/vault.hcl.ori 2>/dev/null
+  sudo mv /etc/vault.d/vault.hcl /etc/vault.d/vault.hcl.ori 2>/dev/null || true
   export VAULT_ADDR="https://127.0.0.1:8200"
   # api_addr breaks out of the single-quoted string to expand ${ip_gw}
   # ("'"${ip_gw}"'" - close quote, double-quoted expansion, reopen quote)
@@ -104,7 +113,15 @@ CERT_CONF_EOF
   echo "${vault_config}" | sudo tee /etc/vault.d/vault.hcl
   sudo systemctl start vault
   sudo systemctl enable vault
-  vault operator init -key-shares=1 -key-threshold=1 -tls-skip-verify -format json | tee ${vault_secret_file_path}
+  # Idempotency: a re-run of just this phase script against a gw where
+  # Vault already got initialized (e.g. retrying after a later phase
+  # failed) must not hard-fail on vault operator init's "already
+  # initialized" error - reuse the existing secret file instead.
+  if vault status -tls-skip-verify 2>/dev/null | grep -q "Initialized.*true"; then
+    log_notify "Vault already initialized, reusing existing ${vault_secret_file_path}"
+  else
+    vault operator init -key-shares=1 -key-threshold=1 -tls-skip-verify -format json | tee ${vault_secret_file_path}
+  fi
   vault operator unseal -tls-skip-verify $(jq -c -r .unseal_keys_hex[0] ${vault_secret_file_path})
   vault login -tls-skip-verify $(jq -c -r .root_token ${vault_secret_file_path})
   # root ca
