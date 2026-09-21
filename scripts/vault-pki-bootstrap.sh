@@ -136,7 +136,7 @@ CERT_CONF_EOF
   vault write -tls-skip-verify -format=json ${vault_pki_intermediate_name}/intermediate/generate/internal common_name="${vault_pki_intermediate_cert_common_name}" issuer_name="${vault_pki_intermediate_cert_issuer_name}" | jq -r '.data.csr' | tee ${vault_pki_intermediate_cert_path}
   vault write -tls-skip-verify -format=json ${vault_pki_name}/root/sign-intermediate issuer_ref="${vault_pki_cert_issuer_name}" csr=@${vault_pki_intermediate_cert_path} format=pem_bundle ttl="${vault_pki_intermediate_max_lease_ttl}" | jq -r '.data.certificate' | tee ${vault_pki_intermediate_cert_path_signed}
   vault write -tls-skip-verify ${vault_pki_intermediate_name}/intermediate/set-signed certificate=@${vault_pki_intermediate_cert_path_signed}
-  vault write -tls-skip-verify ${vault_pki_intermediate_name}/roles/${vault_pki_intermediate_role_name} issuer_ref="$(vault read -tls-skip-verify -field=default ${vault_pki_intermediate_role_name}/config/issuers)" allowed_domains="${domain}" allow_subdomains=${vault_pki_intermediate_role_allow_subdomains} max_ttl="${vault_pki_intermediate_role_max_ttl}"
+  vault write -tls-skip-verify ${vault_pki_intermediate_name}/roles/${vault_pki_intermediate_role_name} issuer_ref="$(vault read -tls-skip-verify -field=default ${vault_pki_intermediate_name}/config/issuers)" allowed_domains="${domain}" allow_subdomains=${vault_pki_intermediate_role_allow_subdomains} max_ttl="${vault_pki_intermediate_role_max_ttl}"
   log_notify "Vault bootstrap complete"
 else
   log_notify "no org needs vault_integration, skipping Vault bootstrap"
