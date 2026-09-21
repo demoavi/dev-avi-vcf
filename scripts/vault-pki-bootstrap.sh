@@ -86,6 +86,14 @@ CERT_CONF_EOF
   sudo mkdir -p /etc/vault.d
   sudo mv /etc/vault.d/vault.hcl /etc/vault.d/vault.hcl.ori 2>/dev/null
   export VAULT_ADDR="https://127.0.0.1:8200"
+  # api_addr breaks out of the single-quoted string to expand ${ip_gw}
+  # ("'"${ip_gw}"'" - close quote, double-quoted expansion, reopen quote)
+  # rather than leaving it inside the single-quoted block like the rest of
+  # this string - a bare ${ip_gw} there would never expand at all
+  # (confirmed live: literally shipped as api_addr = "https://${ip_gw}:8200"
+  # in the real rendered vault.hcl). Matches the technique the reference
+  # project's own cloud-init version of this same config already used
+  # correctly (concatenating '$ip_gw' outside the quotes).
   vault_config='
   storage "file" {
     path    = "/opt/vault/data"
@@ -97,7 +105,7 @@ CERT_CONF_EOF
       tls_key_file = "/opt/vault/tls/tls.key"
     }
     ui = true
-    api_addr = "https://${ip_gw}:8200"'
+    api_addr = "https://'"${ip_gw}"':8200"'
   echo "${vault_config}" | sudo tee /etc/vault.d/vault.hcl
   sudo systemctl start vault
   sudo systemctl enable vault
