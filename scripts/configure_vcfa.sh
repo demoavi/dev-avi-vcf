@@ -195,9 +195,19 @@ do
     # (POST cloudapi/v1/ipSpaceAssociations) happens separately below,
     # after every ip_space and provider gateway exist.
     #
+    # allowAdvertisingPrivateIpBlocks must be explicit - confirmed live
+    # (2026-09-13, separate VCD/VCFA environment) that omitting it 500s
+    # with a server NPE (getAllowAdvertisingPrivateIpBlocks().
+    # booleanValue() on a null Boolean); `false` 400s instead, since no
+    # ip_space exists yet at this point in the script. `true` is the only
+    # value that creates successfully here.
+    #
     pgw_json=$(jq -n --arg n "${pgw_name}" --arg t0 "$(echo ${item} | jq -c -r '.tier0_ref')" --arg regionid "${region_id}" \
-      '{name: $n, description: "", backingRef: {id: $t0, name: $t0}, backingType: "NSX_TIER0", regionRef: {id: $regionid}}')
-    vcfa_api POST "cloudapi/v1/providerGateways" "${pgw_json}"
+      '{name: $n, description: "", backingRef: {id: $t0, name: $t0}, backingType: "NSX_TIER0", regionRef: {id: $regionid}, allowAdvertisingPrivateIpBlocks: true}')
+    if ! vcfa_api POST "cloudapi/v1/providerGateways" "${pgw_json}"; then
+      log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: provider gateway ${pgw_name} creation FAILED, aborting" "${log_file}" "${slack_webhook}" "${google_webhook}"
+      exit 100
+    fi
     #
     # This exact POST (no natConfig, no explicit gatewayConnectionBackingId)
     # was confirmed live on a separate VCD/VCFA environment: 202 ->
