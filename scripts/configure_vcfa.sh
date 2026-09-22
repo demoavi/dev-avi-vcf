@@ -117,7 +117,23 @@ do
     region_json=$(jq -n --arg n "${region_name}" --arg nsxid "${nsx_manager_id}" --arg nsxname "${nsx_manager_name}" \
       --arg supid "${supervisor_id}" --arg supname "${supervisor_name}" --arg sc "${default_storage_class}" \
       '{name: $n, description: "", nsxManager: {name: $nsxname, id: $nsxid}, supervisors: [{name: $supname, id: $supid}], storagePolicies: [$sc]}')
-    vcfa_api POST "cloudapi/v1/regions" "${region_json}"
+    #
+    # Confirmed live on 2026-09-21: right after supervisor-bootstrap.sh
+    # reports the Supervisor ready, this POST can 400 with "the following
+    # zones of the specified supervisors do not have a network stack
+    # configured ... ensure ... the supervisor inventory has been
+    # refreshed" - NSX hasn't finished syncing the Supervisor's own
+    # network-stack inventory yet. vcfa_api's default retry budget (2
+    # attempts, 5s apart) was never exercised against this race before
+    # (this create path had only ever run against an already-existing
+    # region until now) and is far too short for it. Every failure past
+    # this point in the script cascades from region_id resolving empty,
+    # so fail fast here with a clear message instead of continuing into
+    # ten unrelated-looking downstream errors.
+    if ! vcfa_api POST "cloudapi/v1/regions" "${region_json}" 20 30; then
+      log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: region ${region_name} creation FAILED after extended retry, aborting" "${log_file}" "${slack_webhook}" "${google_webhook}"
+      exit 100
+    fi
   fi
 done < <(echo "${vcf_a_regions}" | jq -c -r .[])
 
