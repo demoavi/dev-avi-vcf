@@ -999,8 +999,20 @@ done
 
 echo "Supervisor Service '${SUPERVISOR_SERVICE}' on cluster '${SELECTED_CLUSTER_NAME}': config_status=${CONFIG_STATUS}"
 ENABLE_SUPERVISOR_SERVICE_TEMPLATE_EOF
+#
+# ssoDomain is never a plain bash variable in this script's own scope
+# (only available via jq against $jsonFile, see the vcf-context-create
+# render a few hundred lines up) - using bare ${ssoDomain} here
+# substituted empty, baking VC_USERNAME="administrator@" (no domain)
+# into the rendered enable_supervisor_service.sh, which made every
+# vCenter API call in it 401 (confirmed live: 401 UNAUTHENTICATED on
+# /api/vcenter/namespace-management/supervisor-services, its raw error
+# object then iterated by the Python one-liner as if it were a service
+# list, producing "AttributeError: 'str' object has no attribute
+# 'get'").
+#
 sed -e "s/\${generic_password}/${generic_password}/" \
-    -e "s/\${ssoDomain}/${ssoDomain}/" \
+    -e "s/\${ssoDomain}/$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)/" \
     -e "s/\${vsphere_nested_username}/${vsphere_nested_username}/" \
     -e "s/\${vcsa_fqdn}/${vcsa_fqdn}/" \
     /tmp/enable_supervisor_service.sh.template > /home/ubuntu/supervisor/enable_supervisor_service.sh
