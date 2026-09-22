@@ -289,16 +289,17 @@ do
     ipspace_id=$(echo ${ipspace} | jq -c -r '.id')
     ipspace_name=$(echo ${ipspace} | jq -c -r '.name')
     #
-    # Client-side jq filtering, not a server-side ?filter= query param -
-    # confirmed live the ?filter=ipSpaceRef.id==X;providerGatewayRef.id==Y
-    # form used here previously does not reliably match (returned empty
-    # even for an association that demonstrably already existed, causing
-    # a redundant POST that then 400'd "already exists"). Every other
-    # "already exists" check in this script already uses this same
-    # unfiltered-GET-then-jq-select pattern - this one was the only
-    # exception.
+    # This endpoint requires a filter param (confirmed live: an
+    # unfiltered GET 400s "must contain the filter 'ipSpaceRef.id or
+    # distributedVxlanConnectionRef.id or providerGatewayRef.id'").
+    # Filter server-side by providerGatewayRef.id alone (a single-field
+    # filter, avoiding the compound ";"-AND form used here previously,
+    # which did not reliably match - confirmed live it returned empty
+    # for an association that demonstrably already existed, causing a
+    # redundant POST that then 400'd "already exists"), then narrow to
+    # the specific ip_space client-side via jq.
     #
-    vcfa_api GET "cloudapi/v1/ipSpaceAssociations" ""
+    vcfa_api GET "cloudapi/v1/ipSpaceAssociations?filter=providerGatewayRef.id==${pgw_id}" ""
     existing_assoc=$(echo ${response_body} | jq -c -r --arg ipsid "${ipspace_id}" --arg pgwid "${pgw_id}" \
       '.values[] | select(.ipSpaceRef.id == $ipsid and .providerGatewayRef.id == $pgwid) | .id' | head -1)
     if [ -n "${existing_assoc}" ]; then
