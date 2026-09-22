@@ -261,6 +261,15 @@ all_ip_spaces=$(echo ${response_body} | jq -c '[.values[] | {id, name}]')
 vcfa_api GET "cloudapi/v1/providerGateways" ""
 all_provider_gws=$(echo ${response_body} | jq -c '[.values[] | {id, name}]')
 
+#
+# Sentinel file, not `exit` inside the loops below - both while loops
+# are the right-hand side of a pipe, so bash runs them in subshells; an
+# `exit` inside one only terminates that subshell/iteration silently,
+# it does NOT abort this script the way every other hard-failure check
+# here does. Check the sentinel and exit for real once both loops (and
+# their subshells) have actually finished.
+#
+rm -f /tmp/ipspace_association_failed
 echo "${all_provider_gws}" | jq -c -r '.[]' | while read pgw
 do
   pgw_id=$(echo ${pgw} | jq -c -r '.id')
@@ -269,17 +278,45 @@ do
   do
     ipspace_id=$(echo ${ipspace} | jq -c -r '.id')
     ipspace_name=$(echo ${ipspace} | jq -c -r '.name')
-    vcfa_api GET "cloudapi/v1/ipSpaceAssociations?filter=ipSpaceRef.id==${ipspace_id};providerGatewayRef.id==${pgw_id}" ""
-    existing_assoc=$(echo ${response_body} | jq -c -r '.values[0].id // empty')
+    #
+    # Client-side jq filtering, not a server-side ?filter= query param -
+    # confirmed live the ?filter=ipSpaceRef.id==X;providerGatewayRef.id==Y
+    # form used here previously does not reliably match (returned empty
+    # even for an association that demonstrably already existed, causing
+    # a redundant POST that then 400'd "already exists"). Every other
+    # "already exists" check in this script already uses this same
+    # unfiltered-GET-then-jq-select pattern - this one was the only
+    # exception.
+    #
+    vcfa_api GET "cloudapi/v1/ipSpaceAssociations" ""
+    existing_assoc=$(echo ${response_body} | jq -c -r --arg ipsid "${ipspace_id}" --arg pgwid "${pgw_id}" \
+      '.values[] | select(.ipSpaceRef.id == $ipsid and .providerGatewayRef.id == $pgwid) | .id' | head -1)
     if [ -n "${existing_assoc}" ]; then
       log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${ipspace_name} already associated with ${pgw_name}, skipping" "${log_file}" "" ""
       continue
     fi
     assoc_json=$(jq -n --arg pgwid "${pgw_id}" --arg pgwname "${pgw_name}" --arg ipsid "${ipspace_id}" --arg ipsname "${ipspace_name}" \
       '{providerGatewayRef: {id: $pgwid, name: $pgwname}, ipSpaceRef: {id: $ipsid, name: $ipsname}}')
-    vcfa_api POST "cloudapi/v1/ipSpaceAssociations" "${assoc_json}"
+    #
+    # Belt-and-suspenders: if the pre-check above still missed an
+    # already-existing association for any reason, treat the server's
+    # own "already exists" response as success rather than a hard
+    # failure - the desired end state (associated) is already true.
+    #
+    if ! vcfa_api POST "cloudapi/v1/ipSpaceAssociations" "${assoc_json}"; then
+      if echo "${response_body}" | grep -qi "already exists"; then
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${ipspace_name} association with ${pgw_name} already existed (server-reported), continuing" "${log_file}" "" ""
+      else
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: failed to associate ${ipspace_name} with ${pgw_name}, aborting" "${log_file}" "${slack_webhook}" "${google_webhook}"
+        touch /tmp/ipspace_association_failed
+      fi
+    fi
   done
 done
+if [ -f /tmp/ipspace_association_failed ]; then
+  rm -f /tmp/ipspace_association_failed
+  exit 100
+fi
 
 #
 # Create content libraries - idempotent. Shared, provider-wide resource
