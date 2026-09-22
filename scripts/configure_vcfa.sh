@@ -1099,11 +1099,18 @@ else
       # re-run every time this script runs).
       #
       # secret_vault.yaml/vault_issuer.yaml are raw placeholder templates
-      # from demoavi/dev-avi-vcf (gw's own userdata clones that repo and
-      # copies every yamls/*.yaml file into /home/ubuntu/${yaml_folder}/
-      # untouched, since neither Kind is in the demo-yaml by-Kind dispatch
-      # there) - ALL their real values are filled in here instead, per
-      # org/namespace, using yq (mikefarah/yq, installed at
+      # from demoavi/dev-avi-vcf, copied per-org into ${org_yaml_folder}
+      # (set earlier in this same loop iteration by the yaml-rendering
+      # block above) untouched, since neither Kind is in the demo-yaml
+      # by-Kind dispatch there - confirmed live this script previously
+      # read them from a stale top-level /home/ubuntu/${yaml_folder}/
+      # path that's never actually populated (that copy step was moved
+      # into this script's own per-org loop, into a per-org subdirectory,
+      # a while back - this comment and the paths below just never got
+      # updated to match), so the kind/name sanity check below always
+      # found an empty/nonexistent file and silently skipped vault
+      # bootstrap for every org. ALL their real values are filled in
+      # here instead, per org/namespace, using yq (mikefarah/yq, installed at
       # /usr/local/bin/yq by gw's own userdata). This has to happen here
       # rather than in cloud-init because the actual namespace name isn't
       # known until VCF-A creates it under this org (well after gw's own
@@ -1135,17 +1142,17 @@ else
       if [ -n "${ns_name}" ] && [ "${vault_integration_enabled}" == "true" ]; then
         bash /home/ubuntu/supervisor/auth_supervisor_custer.sh >/dev/null 2>&1
 
-        secret_kind="$(yq '.kind' /home/ubuntu/${yaml_folder}/secret_vault.yaml)"
-        secret_name="$(yq '.metadata.name' /home/ubuntu/${yaml_folder}/secret_vault.yaml)"
-        issuer_kind="$(yq '.kind' /home/ubuntu/${yaml_folder}/vault_issuer.yaml)"
+        secret_kind="$(yq '.kind' ${org_yaml_folder}/secret_vault.yaml)"
+        secret_name="$(yq '.metadata.name' ${org_yaml_folder}/secret_vault.yaml)"
+        issuer_kind="$(yq '.kind' ${org_yaml_folder}/vault_issuer.yaml)"
         if [ "${secret_kind}" != "Secret" ] || [ "${secret_name}" != "cert-manager-vault-token" ] || [ "${issuer_kind}" != "Issuer" ]; then
           log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: secret_vault.yaml/vault_issuer.yaml have unexpected kind/name (secret_kind=${secret_kind}, secret_name=${secret_name}, issuer_kind=${issuer_kind}), skipping vault bootstrap for ${org_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
         else
-          cp /home/ubuntu/${yaml_folder}/secret_vault.yaml "/tmp/${org_name}-secret_vault.yaml"
+          cp ${org_yaml_folder}/secret_vault.yaml "/tmp/${org_name}-secret_vault.yaml"
           yq -i ".metadata.namespace = \"${ns_name}\"" "/tmp/${org_name}-secret_vault.yaml"
           yq -i ".data.token = \"$(echo -n $(jq -c -r .root_token ${vault_secret_file_path}) | base64)\"" "/tmp/${org_name}-secret_vault.yaml"
 
-          cp /home/ubuntu/${yaml_folder}/vault_issuer.yaml "/tmp/${org_name}-vault_issuer.yaml"
+          cp ${org_yaml_folder}/vault_issuer.yaml "/tmp/${org_name}-vault_issuer.yaml"
           yq -i ".metadata.namespace = \"${ns_name}\"" "/tmp/${org_name}-vault_issuer.yaml"
           yq -i ".spec.vault.server = \"https://${ip_gw}:8200\"" "/tmp/${org_name}-vault_issuer.yaml"
           yq -i ".spec.vault.path = \"${vault_pki_intermediate_name}/sign/${vault_pki_intermediate_role_name}\"" "/tmp/${org_name}-vault_issuer.yaml"
