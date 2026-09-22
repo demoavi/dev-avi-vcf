@@ -38,7 +38,21 @@ log_file="/home/ubuntu/vcf_bootstrap.log"
 touch "${log_file}"
 resultFile="/home/ubuntu/configure_vcfa.done"
 slack_webhook=""
-default_storage_class="${supervisor_cluster_name} vSAN Storage Policy"
+#
+# The per-cluster vSAN storage policy vSphere auto-generates is named
+# after the vCenter CLUSTER ("${basename_sddc}-cluster"), not the
+# Supervisor object's own name (supervisor_cluster_name, "sup-admin-01"
+# on this deployment) - the two happened to be identical in the
+# reference project's own environment (both "sddc01-cluster"), masking
+# this exact bug there. Confirmed live: VCFA's region-creation POST
+# 400'd with "sup-admin-01 vSAN Storage Policy" not accessible to any
+# host, while the reference project's own captured api.log shows the
+# real policy name as "sddc01-cluster vSAN Storage Policy" - same
+# "${basename_sddc}-cluster" pattern already used for VC_CLUSTER in
+# vcenter-bootstrap.sh and the cluster_id lookups in
+# supervisor-bootstrap.sh/nsx-bootstrap.sh.
+#
+default_storage_class="${basename_sddc}-cluster vSAN Storage Policy"
 
 log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: configure_vcfa.sh started" "${log_file}" "${slack_webhook}" "${google_webhook}"
 
