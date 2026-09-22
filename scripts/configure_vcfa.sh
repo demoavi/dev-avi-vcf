@@ -219,15 +219,20 @@ do
     # (POST cloudapi/v1/ipSpaceAssociations) happens separately below,
     # after every ip_space and provider gateway exist.
     #
-    # allowAdvertisingPrivateIpBlocks must be explicit - confirmed live
-    # (2026-09-13, separate VCD/VCFA environment) that omitting it 500s
-    # with a server NPE (getAllowAdvertisingPrivateIpBlocks().
-    # booleanValue() on a null Boolean); `false` 400s instead, since no
-    # ip_space exists yet at this point in the script. `true` is the only
-    # value that creates successfully here.
+    # allowAdvertisingPrivateIpBlocks must be explicit (omitting it 500s
+    # with a server NPE). `true` (an earlier fix, ported from a
+    # single-org environment) is WRONG here - confirmed live 2026-09-22
+    # it makes VCFA dedicate this provider gateway to a single org
+    # (creates it with a real orgRef, e.g. org-1), so every other org
+    # sharing the same provider_gateway_ref then 403s with "already
+    # assigned to another organization". This CR has all 20 orgs sharing
+    # one provider gateway (ext-connection1), so `false` is required.
+    # The old "false 400s, no ip_space exists yet" note doesn't apply to
+    # this script's own ordering - ip_spaces are already created above,
+    # before provider gateways.
     #
     pgw_json=$(jq -n --arg n "${pgw_name}" --arg t0 "$(echo ${item} | jq -c -r '.tier0_ref')" --arg regionid "${region_id}" \
-      '{name: $n, description: "", backingRef: {id: $t0, name: $t0}, backingType: "NSX_TIER0", regionRef: {id: $regionid}, allowAdvertisingPrivateIpBlocks: true}')
+      '{name: $n, description: "", backingRef: {id: $t0, name: $t0}, backingType: "NSX_TIER0", regionRef: {id: $regionid}, allowAdvertisingPrivateIpBlocks: false}')
     if ! vcfa_api POST "cloudapi/v1/providerGateways" "${pgw_json}"; then
       log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: provider gateway ${pgw_name} creation FAILED, aborting" "${log_file}" "${slack_webhook}" "${google_webhook}"
       exit 100
