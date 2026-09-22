@@ -1358,6 +1358,16 @@ else
       do
         ns_k8s_api GET "${ns_endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns_name}/clusters/${vks_name}" "" "${org_token}"
         vks_available=$(echo ${response_body} | jq -c -r '.status.conditions[]? | select(.type=="Available") | .status')
+        #
+        # This loop can silently wait up to retry_vks*pause_vks (20
+        # minutes) per org with zero log output otherwise - confirmed
+        # live this reads as "the script looks stuck" from the log
+        # alone, even when it's working correctly. One progress line
+        # every 5 attempts (~2.5 min) so a long wait stays visible.
+        #
+        if [ $((attempt_vks % 5)) -eq 0 ]; then
+          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: still waiting for VKS cluster ${vks_name} for ${org_name} to become Available (attempt ${attempt_vks}/${retry_vks}, last status=${vks_available:-unknown})" "${log_file}" "" ""
+        fi
         if [[ "${vks_available}" == "True" ]]; then
           log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster ${vks_name} for ${org_name} is Available after ${attempt_vks} attempts of ${pause_vks} seconds" "${log_file}" "" ""
           #
