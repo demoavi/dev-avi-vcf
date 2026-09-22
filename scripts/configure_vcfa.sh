@@ -1259,9 +1259,27 @@ else
                     ]
                   }
                 }}')
-            ns_k8s_api POST "${ns_endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns_name}/clusters" "${vks_json}" "${org_token}"
-            if [ $? -ne 0 ]; then
-              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster creation for ${org_name} FAILED, response was: ${response_body}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+            #
+            # Retry a few times - confirmed live (org-20 of 20, all
+            # created back-to-back) this can fail with the Supervisor's
+            # own CAPI validating webhook refusing the connection
+            # ("dial tcp ...:443: connect: connection refused"), most
+            # likely the webhook pod briefly restarting/overloaded under
+            # the load of creating many clusters in quick succession.
+            # Safe to retry - a connection-refused at the admission-
+            # webhook stage means the request never reached the point of
+            # actually creating the object, so no duplicate-creation risk.
+            #
+            vks_create_ok=1
+            for vks_create_attempt in $(seq 1 5); do
+              if ns_k8s_api POST "${ns_endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns_name}/clusters" "${vks_json}" "${org_token}"; then
+                vks_create_ok=0
+                break
+              fi
+              sleep 20
+            done
+            if [ ${vks_create_ok} -ne 0 ]; then
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster creation for ${org_name} FAILED after retries, response was: ${response_body}" "${log_file}" "${slack_webhook}" "${google_webhook}"
             else
               vks_name=$(echo ${response_body} | jq -c -r '.metadata.name')
               log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster ${vks_name} for ${org_name} created, will check Available status in a later pass (see below) once every org's cluster has been created" "${log_file}" "" ""
