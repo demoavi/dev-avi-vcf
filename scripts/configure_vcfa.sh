@@ -1276,25 +1276,23 @@ else
             log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster for ${org_name} already exists (${existing_vks}), skipping creation" "${log_file}" "" ""
           else
             #
-            # Harbor's self-signed CA (confirmed live 2026-09-25, subject/
-            # issuer both "CN = Harbor CA") is NOT trusted by guest VKS
-            # clusters automatically - supervisor-bootstrap.sh (which runs
-            # well before this script in vcf_bootstrap.sh's phase order)
-            # persists it to this well-known path once Harbor is enabled.
-            # builtin-generic-v3.6.0's own ClusterClass schema (confirmed
-            # live via `k get clusterclass ... -o yaml`) exposes a "trust"
-            # variable with additionalTrustedCAs[].caCert.content taking
-            # the raw PEM directly - no secret pre-creation needed. Only
-            # added when the file exists, so environments without Harbor
-            # enabled keep the original behavior.
+            # Harbor's self-signed CA is NOT trusted by guest VKS clusters
+            # automatically. Tried wiring it in via this ClusterClass's own
+            # "trust" variable (additionalTrustedCAs) - REVERTED, confirmed
+            # live 2026-09-25 this is rejected outright by the
+            # "capi.mutating.tanzukubernetescluster.run.tanzu.vmware.com"
+            # admission webhook ("variable is not defined"), both at create
+            # time and via patch on an existing cluster. Root cause: this
+            # ClusterClass's raw OpenAPI schema advertises "trust" but its
+            # reconciled `.status.variables` (what the webhook actually
+            # validates against) does NOT include it - i.e. builtin-
+            # generic-v3.6.0 doesn't have it wired into any patch here,
+            # despite the schema entry existing. No known working mechanism
+            # yet for this ClusterClass version/environment - see
+            # harbor_ca_cert_path in supervisor-bootstrap.sh for where the
+            # CA is saved once one is found.
             #
-            harbor_ca_cert_path="/home/ubuntu/harbor-ca.crt"
-            trust_variable_json="null"
-            if [ -s "${harbor_ca_cert_path}" ]; then
-              trust_variable_json=$(jq -n --rawfile ca "${harbor_ca_cert_path}" \
-                '{name: "trust", value: {additionalTrustedCAs: [{caCert: {content: $ca}}]}}')
-            fi
-            vks_json=$(jq -n --arg ns "${ns_name}" --arg storagename "${storage_class_k8s_name}" --argjson trust "${trust_variable_json}" \
+            vks_json=$(jq -n --arg ns "${ns_name}" --arg storagename "${storage_class_k8s_name}" \
               '{apiVersion: "cluster.x-k8s.io/v1beta2", kind: "Cluster",
                 metadata: {generateName: "vks-cluster-", namespace: $ns},
                 spec: {
@@ -1304,10 +1302,10 @@ else
                     version: "v1.35.5+vmware.1",
                     controlPlane: {replicas: 1},
                     workers: {machineDeployments: [{class: "node-pool", name: "node-pool-1", replicas: 1}]},
-                    variables: ([
+                    variables: [
                       {name: "vmClass", value: "best-effort-medium"},
                       {name: "storageClass", value: $storagename}
-                    ] + (if $trust == null then [] else [$trust] end))
+                    ]
                   }
                 }}')
             #
