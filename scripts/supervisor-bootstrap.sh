@@ -37,8 +37,30 @@ cl_json=$(jq -n --arg ds "${datastore_id}" --arg tp "${supervisor_cm_thumbprint}
   '{storage_backings: [{datastore_id: $ds, type: "DATASTORE"}], type: "SUBSCRIBED", version: "2",
     subscription_info: {authentication_method: "NONE", ssl_thumbprint: $tp, automatic_sync_enabled: "true", subscription_url: $url, on_demand: "true"},
     name: "content_library_supervisor"}')
+#
+# Idempotency check - same gap as the Supervisor enablement POST below
+# (confirmed live there, likely present here too on a re-run). No
+# name-filter query param on this endpoint, so list all libraries and
+# check by name individually, matching the exact pattern already used
+# in configure_vcfa.sh's own vCenter content-library lookups.
+#
 create_vcenter_api_session
-vcenter_api 3 3 POST "api/content/subscribed-library" "${cl_json}"
+vcenter_api 3 3 GET "api/content/library" ""
+existing_cl_id=""
+for cl_id in $(echo ${response_body} | jq -r '.[]'); do
+  create_vcenter_api_session
+  vcenter_api 3 3 GET "api/content/library/${cl_id}" ""
+  if [ "$(echo ${response_body} | jq -r '.name')" == "content_library_supervisor" ]; then
+    existing_cl_id="${cl_id}"
+    break
+  fi
+done
+if [ -n "${existing_cl_id}" ]; then
+  log_notify "content_library_supervisor already exists (${existing_cl_id}), skipping subscription"
+else
+  create_vcenter_api_session
+  vcenter_api 3 3 POST "api/content/subscribed-library" "${cl_json}"
+fi
 
 create_vcenter_api_session
 vcenter_api 3 3 GET "api/vcenter/cluster" ""
@@ -94,11 +116,29 @@ supervisor_json=$(jq -n \
       storage: {ephemeral_storage_policy: $storage_policy, image_storage_policy: $storage_policy}
     }
   }')
+#
+# Idempotency check - confirmed live this POST had none at all, 400ing
+# "A Supervisor with sup-admin-01 name already exists" on any re-run
+# once enabled. Reuses the exact same LIST-form GET (and .[0] field
+# names) the poll loop below already checks - list form returns 200
+# with an empty array if nothing's enabled yet, unlike the single-
+# resource GET (api/vcenter/namespace-management/clusters/{id}), which
+# 404s in that case and would trip vcenter_api's own hard exit-100 on
+# any non-2xx (it has no graceful "not found is fine" return path).
+#
 create_vcenter_api_session
-vcenter_api 3 3 POST "api/vcenter/namespace-management/supervisors/${cluster_id}?action=enable_on_compute_cluster" "${supervisor_json}"
-log_notify "Supervisor cluster enablement started"
-log_only "waiting 600 seconds"
-sleep 600
+vcenter_api 3 3 GET "api/vcenter/namespace-management/clusters" ""
+existing_config_status=$(echo ${response_body} | jq -c -r '.[0].config_status // empty')
+existing_k8s_status=$(echo ${response_body} | jq -c -r '.[0].kubernetes_status // empty')
+if [ "${existing_config_status}" == "RUNNING" ] && [ "${existing_k8s_status}" == "READY" ]; then
+  log_notify "Supervisor already enabled on cluster ${cluster_id} (config_status=${existing_config_status}, kubernetes_status=${existing_k8s_status}), skipping enable_on_compute_cluster"
+else
+  create_vcenter_api_session
+  vcenter_api 3 3 POST "api/vcenter/namespace-management/supervisors/${cluster_id}?action=enable_on_compute_cluster" "${supervisor_json}"
+  log_notify "Supervisor cluster enablement started"
+  log_only "waiting 600 seconds"
+  sleep 600
+fi
 
 retry_supervisor=121 ; pause_supervisor=60 ; attempt_supervisor=1
 while true ; do
