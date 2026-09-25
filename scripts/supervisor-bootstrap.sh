@@ -1311,6 +1311,28 @@ open('${rendered_values_file}', 'w').write(text)
       if [ -z "${harbor_namespace}" ]; then
         log_notify "ERROR: harbor namespace (svc-harbor-*) not found - skipping DNS registration for ${harbor_hostname}"
       else
+        #
+        # Harbor generates its own self-signed root ("Harbor CA", confirmed
+        # live 2026-09-25 via the harbor-ca-key-pair secret's ca.crt -
+        # subject and issuer both "CN = Harbor CA") - no external cert-
+        # manager/Vault issuer is involved despite the values template's
+        # tlsSecretLabels field. Guest VKS clusters do NOT trust this
+        # automatically (disproves this block's own prior comment below,
+        # which claimed a "managed-by: vmware-vRegistry" auto-propagation
+        # mechanism handled it - live testing on org-1's vks-cluster-p6fn8,
+        # created well after this point in the run, showed
+        # "x509: certificate signed by unknown authority" pulling from
+        # Harbor). Persisted to a well-known file here (separate process
+        # from configure_vcfa.sh, which is what actually creates VKS
+        # clusters and needs this content for each one's
+        # trust.additionalTrustedCAs ClusterClass variable).
+        #
+        harbor_ca_cert_path="/home/ubuntu/harbor-ca.crt"
+        if [ ! -s "${harbor_ca_cert_path}" ]; then
+          kubectl get secret -n "${harbor_namespace}" harbor-ca-key-pair -o jsonpath='{.data.ca\.crt}' | base64 -d > "${harbor_ca_cert_path}"
+          log_notify "Saved Harbor's self-signed CA to ${harbor_ca_cert_path} for VKS clusters' trust.additionalTrustedCAs"
+        fi
+
         harbor_ip=""
         for attempt_harbor_ip in $(seq 1 12); do
           harbor_ip="$(kubectl get svc -n "${harbor_namespace}" harbor-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)"
@@ -1347,14 +1369,13 @@ open('${rendered_values_file}', 'w').write(text)
           # BIND delegation to Avi's dns-vs even though it was already
           # confirmed live to resolve correctly end-to-end once settled.
           # harbor_admin_password was already derived above, alongside
-          # this same entry's other secrets. Confirmed live: images
-          # pushed here pull successfully (no trust.additionalTrustedCAs
-          # ClusterClass variable needed) on any VKS cluster created
-          # AFTER Harbor's own activation - VMware's own "managed-by:
-          # vmware-vRegistry" mechanism (see the values template)
-          # propagates Harbor's self-signed CA into new clusters'
-          # trust stores automatically, just not retroactively into
-          # clusters that already existed beforehand.
+          # this same entry's other secrets. This push itself only needs
+          # --dest-tls-verify=false (skopeo talking directly to Harbor,
+          # not through a VKS guest cluster's own trust store) - the
+          # earlier claim here that guest clusters trust Harbor's CA
+          # automatically was disproven live 2026-09-25 (see
+          # harbor_ca_cert_path above) and is fixed in configure_vcfa.sh's
+          # VKS cluster creation instead.
           harbor_images_json="$(echo ${item} | jq -c '.images // []')"
           if [ "${harbor_images_json}" != "[]" ]; then
             if ! command -v skopeo >/dev/null 2>&1; then

@@ -1275,7 +1275,26 @@ else
           if [ -n "${existing_vks}" ] && [ "${existing_vks}" != "null" ]; then
             log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster for ${org_name} already exists (${existing_vks}), skipping creation" "${log_file}" "" ""
           else
-            vks_json=$(jq -n --arg ns "${ns_name}" --arg storagename "${storage_class_k8s_name}" \
+            #
+            # Harbor's self-signed CA (confirmed live 2026-09-25, subject/
+            # issuer both "CN = Harbor CA") is NOT trusted by guest VKS
+            # clusters automatically - supervisor-bootstrap.sh (which runs
+            # well before this script in vcf_bootstrap.sh's phase order)
+            # persists it to this well-known path once Harbor is enabled.
+            # builtin-generic-v3.6.0's own ClusterClass schema (confirmed
+            # live via `k get clusterclass ... -o yaml`) exposes a "trust"
+            # variable with additionalTrustedCAs[].caCert.content taking
+            # the raw PEM directly - no secret pre-creation needed. Only
+            # added when the file exists, so environments without Harbor
+            # enabled keep the original behavior.
+            #
+            harbor_ca_cert_path="/home/ubuntu/harbor-ca.crt"
+            trust_variable_json="null"
+            if [ -s "${harbor_ca_cert_path}" ]; then
+              trust_variable_json=$(jq -n --rawfile ca "${harbor_ca_cert_path}" \
+                '{name: "trust", value: {additionalTrustedCAs: [{caCert: {content: $ca}}]}}')
+            fi
+            vks_json=$(jq -n --arg ns "${ns_name}" --arg storagename "${storage_class_k8s_name}" --argjson trust "${trust_variable_json}" \
               '{apiVersion: "cluster.x-k8s.io/v1beta2", kind: "Cluster",
                 metadata: {generateName: "vks-cluster-", namespace: $ns},
                 spec: {
@@ -1285,10 +1304,10 @@ else
                     version: "v1.35.5+vmware.1",
                     controlPlane: {replicas: 1},
                     workers: {machineDeployments: [{class: "node-pool", name: "node-pool-1", replicas: 1}]},
-                    variables: [
+                    variables: ([
                       {name: "vmClass", value: "best-effort-medium"},
                       {name: "storageClass", value: $storagename}
-                    ]
+                    ] + (if $trust == null then [] else [$trust] end))
                   }
                 }}')
             #
