@@ -1320,6 +1320,17 @@ open('${rendered_values_file}', 'w').write(text)
         if [ -z "${harbor_ip}" ]; then
           log_notify "ERROR: harbor-nginx Service in ${harbor_namespace} has no LoadBalancer IP after waiting - skipping DNS registration for ${harbor_hostname}"
         else
+          #
+          # ip_avi is never a bash/variables.sh export - confirmed live
+          # this was always empty here, making avi_login's own curl POST
+          # go to https:///login (no host at all), failing fast and
+          # consistently with "csrftoken is undefined after login" every
+          # run. avi-bootstrap.sh only ever computes this itself, locally
+          # (ip_avi=$(echo ${ips_avi} | jq -r '.[0]')) - since every phase
+          # script is its own separate process, that never carries over
+          # here. Same derivation, reused verbatim.
+          #
+          ip_avi=$(echo ${ips_avi} | jq -r '.[0]')
           avi_login
           avi_api 3 3 GET "" "api/virtualservice?name=dns-vs"
           dns_vs_uuid=$(echo ${response_body} | jq -c -r '.results[0].uuid')
