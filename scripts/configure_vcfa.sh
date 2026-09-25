@@ -39,6 +39,15 @@ touch "${log_file}"
 resultFile="/home/ubuntu/configure_vcfa.done"
 slack_webhook=""
 #
+# Fixed constant, not a per-deployment value - never exported by
+# bash/variables.sh (confirmed live 2026-09-24: ${yaml_folder} below
+# was referencing a variable that flat-out doesn't exist anywhere in
+# userdata.py, resolving empty). gw-setup.sh.tpl's own comment
+# documents this same directory name ("/home/ubuntu/yaml-files/") for
+# the demo-yaml rendering this project ported from.
+#
+yaml_folder="yaml-files"
+#
 # The per-cluster vSAN storage policy vSphere auto-generates is named
 # after the vCenter CLUSTER ("${basename_sddc}-cluster"), not the
 # Supervisor object's own name (supervisor_cluster_name, "sup-admin-01"

@@ -1172,12 +1172,17 @@ else
       # Secrets are generated here, not authored in the CR - they're
       # meaningless random strings with no reason to be memorable or
       # CR-visible. storageClass reuses this project's own deterministic
-      # naming convention (matches bash/variables.sh's own
-      # cluster_name="${basename_sddc}-cluster") rather than deriving it
-      # via VCFA's regionStoragePolicies API (VCFA org provisioning runs
-      # much later in this script, and Harbor's PVCs are a direct
-      # Supervisor-level StorageClass reference, unrelated to VCFA).
-      harbor_storage_class="${cluster_name}-vsan-storage-policy"
+      # cluster-naming convention ("${basename_sddc}-cluster", same
+      # pattern as VC_CLUSTER in vcenter-bootstrap.sh and the cluster_id
+      # lookups in nsx-bootstrap.sh) rather than deriving it via VCFA's
+      # regionStoragePolicies API (VCFA org provisioning runs much later
+      # in this script, and Harbor's PVCs are a direct Supervisor-level
+      # StorageClass reference, unrelated to VCFA). Confirmed live
+      # (2026-09-24) this previously referenced a bare ${cluster_name}
+      # that was never actually assigned anywhere in this script nor
+      # exported by bash/variables.sh - resolved to empty, silently
+      # producing "-vsan-storage-policy" instead.
+      harbor_storage_class="${basename_sddc}-cluster-vsan-storage-policy"
       harbor_admin_password="${generic_password}"
       harbor_secret_key=$(echo -n "${generic_password}harbor-secretkey" | md5sum | cut -c1-16)
       harbor_database_password=$(echo -n "${generic_password}harbor-database" | md5sum | cut -c1-16)
