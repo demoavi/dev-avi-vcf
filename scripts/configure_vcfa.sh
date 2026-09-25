@@ -259,6 +259,29 @@ do
     # ("Provider Gateway test-ui must be backed by a shared Gateway
     # Connection") did not reproduce here.
     #
+    # Poll to REALIZED before moving on - confirmed live (2026-09-25)
+    # the ipSpaceAssociations step further below can 403 "Provider
+    # Gateway ... not found" even though this same POST already
+    # returned success and the gateway shows up in a plain GET list -
+    # the deeper single-object lookup used internally to validate an
+    # association apparently isn't guaranteed ready the instant the
+    # list reflects it. Every other resource in this script (regions,
+    # content libraries, VKS clusters) already polls to a real terminal
+    # status instead of trusting the initial POST response - this was
+    # the one exception.
+    #
+    for attempt_pgw in $(seq 1 12); do
+      vcfa_api GET "cloudapi/v1/providerGateways" ""
+      pgw_status=$(echo ${response_body} | jq -c -r --arg arg "${pgw_name}" '.values[] | select(.name == $arg) | .status')
+      if [ "${pgw_status}" == "REALIZED" ]; then
+        break
+      fi
+      sleep 10
+    done
+    if [ "${pgw_status}" != "REALIZED" ]; then
+      log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: provider gateway ${pgw_name} not REALIZED after waiting (status=${pgw_status:-unknown}), aborting" "${log_file}" "${slack_webhook}" "${google_webhook}"
+      exit 100
+    fi
   fi
 done < <(echo "${vcf_a_provider_gws}" | jq -c -r .[])
 
