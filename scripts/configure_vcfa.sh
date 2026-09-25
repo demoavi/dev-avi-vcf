@@ -1277,35 +1277,41 @@ else
           else
             #
             # Harbor's self-signed CA is NOT trusted by guest VKS clusters
-            # automatically. Tried wiring it in via this ClusterClass's own
-            # "trust" variable (additionalTrustedCAs) - REVERTED, confirmed
-            # live 2026-09-25 this is rejected outright by the
-            # "capi.mutating.tanzukubernetescluster.run.tanzu.vmware.com"
-            # admission webhook ("variable is not defined"), both at create
-            # time and via patch on an existing cluster. Root cause: this
-            # ClusterClass's raw OpenAPI schema advertises "trust" but its
-            # reconciled `.status.variables` (what the webhook actually
-            # validates against) does NOT include it - i.e. builtin-
-            # generic-v3.6.0 doesn't have it wired into any patch here,
-            # despite the schema entry existing. No known working mechanism
-            # yet for this ClusterClass version/environment - see
-            # harbor_ca_cert_path in supervisor-bootstrap.sh for where the
-            # CA is saved once one is found.
+            # automatically. A bare top-level "trust" variable is rejected
+            # by the capi.mutating.tanzukubernetescluster.run.tanzu.vmware.com
+            # admission webhook ("variable is not defined") - confirmed live
+            # 2026-09-25 "trust" is not actually a top-level ClusterClass
+            # variable at all, just a field NESTED inside the "osConfiguration"
+            # variable (alongside systemProxy/tuned) - it only ever appeared
+            # in the raw schema dump because that dump includes every nested
+            # property, not just top-level variable names (which live in
+            # `.status.variables` - osConfiguration is there, a bare "trust"
+            # never was). Confirmed working via `--dry-run=server` with
+            # {name: "osConfiguration", value: {trust: {...}}}. builtin-
+            # generic-v3.6.0 itself has no trust-capable patches wired in and
+            # gets silently upgraded to v3.7.0 by the webhook when this is
+            # used, hence classRef below targets v3.7.0 directly.
             #
-            vks_json=$(jq -n --arg ns "${ns_name}" --arg storagename "${storage_class_k8s_name}" \
+            harbor_ca_cert_path="/home/ubuntu/harbor-ca.crt"
+            os_configuration_json="null"
+            if [ -s "${harbor_ca_cert_path}" ]; then
+              os_configuration_json=$(jq -n --rawfile ca "${harbor_ca_cert_path}" \
+                '{name: "osConfiguration", value: {trust: {additionalTrustedCAs: [{caCert: {content: $ca}}]}}}')
+            fi
+            vks_json=$(jq -n --arg ns "${ns_name}" --arg storagename "${storage_class_k8s_name}" --argjson osconfig "${os_configuration_json}" \
               '{apiVersion: "cluster.x-k8s.io/v1beta2", kind: "Cluster",
                 metadata: {generateName: "vks-cluster-", namespace: $ns},
                 spec: {
                   clusterNetwork: {serviceDomain: "cluster.local", pods: {cidrBlocks: ["192.168.156.0/20"]}, services: {cidrBlocks: ["10.96.0.0/12"]}},
                   topology: {
-                    classRef: {name: "builtin-generic-v3.6.0", namespace: "vmware-system-vks-public"},
+                    classRef: {name: "builtin-generic-v3.7.0", namespace: "vmware-system-vks-public"},
                     version: "v1.35.5+vmware.1",
                     controlPlane: {replicas: 1},
                     workers: {machineDeployments: [{class: "node-pool", name: "node-pool-1", replicas: 1}]},
-                    variables: [
+                    variables: ([
                       {name: "vmClass", value: "best-effort-medium"},
                       {name: "storageClass", value: $storagename}
-                    ]
+                    ] + (if $osconfig == null then [] else [$osconfig] end))
                   }
                 }}')
             #

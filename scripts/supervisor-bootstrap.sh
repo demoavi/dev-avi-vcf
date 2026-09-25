@@ -1325,7 +1325,7 @@ open('${rendered_values_file}', 'w').write(text)
         # Harbor). Persisted to a well-known file here (separate process
         # from configure_vcfa.sh, which is what actually creates VKS
         # clusters and needs this content for each one's
-        # trust.additionalTrustedCAs ClusterClass variable).
+        # osConfiguration.trust.additionalTrustedCAs ClusterClass variable).
         #
         harbor_ca_cert_path="/home/ubuntu/harbor-ca.crt"
         if [ ! -s "${harbor_ca_cert_path}" ]; then
