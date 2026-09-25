@@ -958,18 +958,33 @@ body = {'supervisor_service': '${SUPERVISOR_SERVICE}', 'version': '${VERSION}', 
 print(json.dumps(body))
 " > /tmp/cluster_svc_enable_body.json
 
-HTTP_CODE=$(curl -sk -o /tmp/cluster_svc_enable_response.json -w "%{http_code}" \
-    -X POST "${VC_HOST}/api/vcenter/namespace-management/clusters/${CLUSTER_ID}/supervisor-services" \
-    -H "vmware-api-session-id: ${SESSION_ID}" -H "Content-Type: application/json" \
-    --data-binary @/tmp/cluster_svc_enable_body.json)
+# Retry - confirmed live this can 500 with "signature verification
+# result not found for Supervisor Service ... on Supervisor ..." right
+# after registration, since vCenter/WCP's own async compatibility/
+# signature check for the just-registered service version hasn't
+# caught up yet. Same class of "backend needs a moment" race as
+# several other fixes in this project (Avi controller discovery, VCF
+# instance refresh, region network-stack checks) - safe to retry since
+# nothing here is destructive, just re-POSTing the same enable request.
+ENABLE_RETRY=6
+for enable_attempt in $(seq 1 ${ENABLE_RETRY}); do
+    HTTP_CODE=$(curl -sk -o /tmp/cluster_svc_enable_response.json -w "%{http_code}" \
+        -X POST "${VC_HOST}/api/vcenter/namespace-management/clusters/${CLUSTER_ID}/supervisor-services" \
+        -H "vmware-api-session-id: ${SESSION_ID}" -H "Content-Type: application/json" \
+        --data-binary @/tmp/cluster_svc_enable_body.json)
+    if [ "$HTTP_CODE" == "204" ]; then
+        break
+    fi
+    if [ "${enable_attempt}" == "${ENABLE_RETRY}" ]; then
+        echo "Error: failed to enable Supervisor Service on cluster (HTTP ${HTTP_CODE}) after ${ENABLE_RETRY} attempts:" >&2
+        cat /tmp/cluster_svc_enable_response.json >&2
+        rm -f /tmp/cluster_svc_enable_body.json /tmp/cluster_svc_enable_response.json
+        exit 1
+    fi
+    echo "  attempt ${enable_attempt}/${ENABLE_RETRY}: HTTP ${HTTP_CODE}, retrying in 15s..." >&2
+    sleep 15
+done
 rm -f /tmp/cluster_svc_enable_body.json
-
-if [ "$HTTP_CODE" != "204" ]; then
-    echo "Error: failed to enable Supervisor Service on cluster (HTTP ${HTTP_CODE}):" >&2
-    cat /tmp/cluster_svc_enable_response.json >&2
-    rm -f /tmp/cluster_svc_enable_response.json
-    exit 1
-fi
 rm -f /tmp/cluster_svc_enable_response.json
 
 echo "Waiting for '${SUPERVISOR_SERVICE}' to reconcile on '${SELECTED_CLUSTER_NAME}'..." >&2
