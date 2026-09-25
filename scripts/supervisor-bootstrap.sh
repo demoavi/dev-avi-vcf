@@ -130,9 +130,11 @@ create_vcenter_api_session
 vcenter_api 3 3 GET "api/vcenter/namespace-management/clusters" ""
 existing_config_status=$(echo ${response_body} | jq -c -r '.[0].config_status // empty')
 existing_k8s_status=$(echo ${response_body} | jq -c -r '.[0].kubernetes_status // empty')
+supervisor_freshly_enabled=false
 if [ "${existing_config_status}" == "RUNNING" ] && [ "${existing_k8s_status}" == "READY" ]; then
   log_notify "Supervisor already enabled on cluster ${cluster_id} (config_status=${existing_config_status}, kubernetes_status=${existing_k8s_status}), skipping enable_on_compute_cluster"
 else
+  supervisor_freshly_enabled=true
   create_vcenter_api_session
   vcenter_api 3 3 POST "api/vcenter/namespace-management/supervisors/${cluster_id}?action=enable_on_compute_cluster" "${supervisor_json}"
   log_notify "Supervisor cluster enablement started"
@@ -168,9 +170,16 @@ done
 # live, both cleared on a later retry with no config change) - a plain
 # fixed wait here is simpler and cheaper than teaching every enable-on-
 # cluster call its own retry-on-500 logic for what's a one-time startup
-# race, not a recurring condition.
-log_only "waiting 300 more seconds for the Supervisor's own backend (appplatform-operator) to settle before registering/enabling any Supervisor Services"
-sleep 300
+# race, not a recurring condition. Only actually a race right after a
+# FRESH enable_on_compute_cluster - skip it entirely on a re-run against
+# an already-enabled Supervisor (confirmed RUNNING/READY, likely for a
+# while), since the backend has long since settled by then.
+if [ "${supervisor_freshly_enabled}" == "true" ]; then
+  log_only "waiting 300 more seconds for the Supervisor's own backend (appplatform-operator) to settle before registering/enabling any Supervisor Services"
+  sleep 300
+else
+  log_only "Supervisor was already enabled (not freshly enabled this run), skipping the 300s backend-settle wait"
+fi
 
 create_vcenter_api_session
 vcenter_api 3 3 GET "api/vcenter/namespace-management/clusters" ""
