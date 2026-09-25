@@ -141,7 +141,19 @@ fi
 # created on OUR nested vCenter instead, reusing the same GOVC_* pattern as
 # the port-group section earlier in this script.
 #
+#
+# /home/ubuntu/avi is also created earlier by gw's own cloud-init
+# runcmd (root context, no sudo -u ubuntu wrapper) - confirmed live
+# this leaves it root-owned with default 755 perms, so this script's
+# own `mkdir -p` below is a no-op on an already-existing directory
+# (doesn't touch ownership) and the later `cat > .../traffic_gen_client.sh`
+# write fails "Permission denied" as ubuntu. chown defensively here so
+# this script self-heals regardless of what state cloud-init left the
+# directory in, matching the same sudo pattern vault-pki-bootstrap.sh
+# already uses for other root-owned paths.
+#
 mkdir -p /home/ubuntu/avi
+sudo chown ubuntu:ubuntu /home/ubuntu/avi
 export GOVC_URL="${basename_sddc}-vc01.${domain}"
 export GOVC_USERNAME="administrator@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)"
 export GOVC_PASSWORD="${generic_password}"
