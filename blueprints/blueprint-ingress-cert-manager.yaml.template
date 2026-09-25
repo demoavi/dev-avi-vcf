@@ -1,5 +1,16 @@
 formatVersion: 1
 inputs:
+  namespace:
+    type: string
+    title: Namespace
+    description: |
+      <h4>Namespace</h4> <p>Provide existing namespace name which is used as deployment target</p>
+    $data: /data/namespaces?projectId={{project}}
+  vm_image_id:
+    title: VM image ID
+    type: string
+    description: the ID of the VM image for building the virtual machine
+    $data: /data/namespaceclass-vmimages
   target_port:
     type: integer
     title: Target Port
@@ -52,7 +63,7 @@ resources:
   CCI_Supervisor_Namespace_1:
     type: CCI.Supervisor.Namespace
     properties:
-      name: ----------TO_BE_REPLACED----------
+      name: ${input.namespace}
       existing: true
   Username_Secret:
     type: CCI.Supervisor.Resource
@@ -81,7 +92,7 @@ resources:
             vm-lb-selector: ${env.deploymentName}-lb
         spec:
           className: best-effort-small
-          imageName: ----------TO_BE_REPLACED----------
+          imageName: ${input.vm_image_id}
           storageClass: sddc01-cluster-vsan-storage-policy-latebinding
           powerState: PoweredOn
           bootstrap:
@@ -117,7 +128,7 @@ resources:
             vm-lb-selector: ${env.deploymentName}-lb
         spec:
           className: best-effort-small
-          imageName: ----------TO_BE_REPLACED----------
+          imageName: ${input.vm_image_id}
           storageClass: sddc01-cluster-vsan-storage-policy-latebinding
           powerState: PoweredOn
           bootstrap:
