@@ -593,14 +593,22 @@ do
     # harbor_registry_fqdn stays shared/global
     # ("harbor.${avi_subdomain}.${domain}") since Harbor is a single
     # shared Supervisor Service instance, not per-org - only the routing
-    # domain needs to be unique. Output goes to its own per-org subfolder
-    # (/home/ubuntu/${yaml_folder}/${org_name}/) rather than the shared
-    # base folder, so each org's differently-rendered files don't
-    # overwrite each other.
+    # domain needs to be unique. Output goes to org's own account's home
+    # dir (/home/${org_name}/${yaml_folder}/) rather than a shared
+    # ubuntu-owned folder, so each org's differently-rendered files don't
+    # overwrite each other AND the org's own SSH login (see
+    # gw-accounts.sh, which always runs before this script and guarantees
+    # /home/${org_name} already exists - gw_accounts_secret is required)
+    # can reach them directly. ubuntu has no traverse/write access into
+    # another user's home dir by default, so create+own it as ubuntu
+    # first (sudo bypasses the permission check to get there at all),
+    # render exactly as before, then hand real ownership to the org at
+    # the end below.
     #
     if [ -d /home/ubuntu/dev-avi-vcf/yamls ]; then
-      org_yaml_folder="/home/ubuntu/${yaml_folder}/${org_name}"
-      mkdir -p "${org_yaml_folder}"
+      org_yaml_folder="/home/${org_name}/${yaml_folder}"
+      sudo mkdir -p "${org_yaml_folder}"
+      sudo chown ubuntu:ubuntu "${org_yaml_folder}"
       org_full_domain="${org_name}-vks.${domain}"
       harbor_registry_fqdn="harbor.${avi_subdomain}.${domain}"
       for yaml_src in /home/ubuntu/dev-avi-vcf/yamls/*.yaml; do
@@ -652,7 +660,7 @@ do
         # the file or of any document's own kind.
         yq -i '(.. | select(has("containers")) | .containers[], .. | select(has("initContainers")) | .initContainers[] | select(.image != null)).image |= sub("^.*/", "'"${harbor_registry_fqdn}"'/registry/")' "$yaml_dst"
       done
-      chown -R ubuntu:ubuntu "${org_yaml_folder}"
+      sudo chown -R "${org_name}:${org_name}" "${org_yaml_folder}"
     fi
 
     #
@@ -1174,17 +1182,23 @@ else
       if [ -n "${ns_name}" ] && [ "${vault_integration_enabled}" == "true" ]; then
         bash /home/ubuntu/supervisor/auth_supervisor_custer.sh >/dev/null 2>&1
 
-        secret_kind="$(yq '.kind' ${org_yaml_folder}/secret_vault.yaml)"
-        secret_name="$(yq '.metadata.name' ${org_yaml_folder}/secret_vault.yaml)"
-        issuer_kind="$(yq '.kind' ${org_yaml_folder}/vault_issuer.yaml)"
+        # org_yaml_folder is owned by ${org_name} now (handed off at the
+        # end of the rendering loop above), not ubuntu - these reads need
+        # sudo. The /tmp/*.yaml copies below are ubuntu-owned as usual,
+        # so the yq -i edits on those don't need it.
+        secret_kind="$(sudo yq '.kind' ${org_yaml_folder}/secret_vault.yaml)"
+        secret_name="$(sudo yq '.metadata.name' ${org_yaml_folder}/secret_vault.yaml)"
+        issuer_kind="$(sudo yq '.kind' ${org_yaml_folder}/vault_issuer.yaml)"
         if [ "${secret_kind}" != "Secret" ] || [ "${secret_name}" != "cert-manager-vault-token" ] || [ "${issuer_kind}" != "Issuer" ]; then
           log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: secret_vault.yaml/vault_issuer.yaml have unexpected kind/name (secret_kind=${secret_kind}, secret_name=${secret_name}, issuer_kind=${issuer_kind}), skipping vault bootstrap for ${org_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
         else
-          cp ${org_yaml_folder}/secret_vault.yaml "/tmp/${org_name}-secret_vault.yaml"
+          sudo cp ${org_yaml_folder}/secret_vault.yaml "/tmp/${org_name}-secret_vault.yaml"
+          sudo chown ubuntu:ubuntu "/tmp/${org_name}-secret_vault.yaml"
           yq -i ".metadata.namespace = \"${ns_name}\"" "/tmp/${org_name}-secret_vault.yaml"
           yq -i ".data.token = \"$(echo -n $(jq -c -r .root_token ${vault_secret_file_path}) | base64)\"" "/tmp/${org_name}-secret_vault.yaml"
 
-          cp ${org_yaml_folder}/vault_issuer.yaml "/tmp/${org_name}-vault_issuer.yaml"
+          sudo cp ${org_yaml_folder}/vault_issuer.yaml "/tmp/${org_name}-vault_issuer.yaml"
+          sudo chown ubuntu:ubuntu "/tmp/${org_name}-vault_issuer.yaml"
           yq -i ".metadata.namespace = \"${ns_name}\"" "/tmp/${org_name}-vault_issuer.yaml"
           yq -i ".spec.vault.server = \"https://${ip_gw}:8200\"" "/tmp/${org_name}-vault_issuer.yaml"
           yq -i ".spec.vault.path = \"${vault_pki_intermediate_name}/sign/${vault_pki_intermediate_role_name}\"" "/tmp/${org_name}-vault_issuer.yaml"

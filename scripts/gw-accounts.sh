@@ -16,11 +16,6 @@ source "${script_dir}/functions.sh"
 vcd_login
 log_notify "gw-accounts.sh started"
 
-if [ -z "${gw_accounts_secret}" ]; then
-  log_notify "gw_accounts_secret not set, skipping per-org account creation"
-  exit 0
-fi
-
 if ! grep -qE '^\s*PasswordAuthentication\s+yes\s*$' /etc/ssh/sshd_config; then
   if grep -qE '^\s*#?\s*PasswordAuthentication\s' /etc/ssh/sshd_config; then
     sudo sed -i -E 's/^\s*#?\s*PasswordAuthentication\s+.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
