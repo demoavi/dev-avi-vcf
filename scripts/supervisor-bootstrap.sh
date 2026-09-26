@@ -1378,9 +1378,12 @@ open('${rendered_values_file}', 'w').write(text)
           # VKS cluster creation instead.
           harbor_images_json="$(echo ${item} | jq -c '.images // []')"
           if [ "${harbor_images_json}" != "[]" ]; then
-            # skopeo is installed at gw boot via variables.json's
-            # apt_packages (gw-setup.sh.tpl) - this check only guards
-            # against that install having failed/been skipped.
+            # Also installed at gw boot via variables.json's apt_packages
+            # (gw-setup.sh.tpl) - kept here too as a no-op-if-present
+            # recovery mechanism in case that boot-time install failed.
+            if ! command -v skopeo >/dev/null 2>&1; then
+              sudo apt-get install -y skopeo || log_notify "ERROR: apt-get install skopeo failed, skipping harbor image preload"
+            fi
             if command -v skopeo >/dev/null 2>&1; then
               harbor_registry_project="registry"
               project_check_code=$(curl -sk -o /dev/null -w "%{http_code}" -u "admin:${harbor_admin_password}" \
