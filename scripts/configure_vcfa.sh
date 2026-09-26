@@ -1523,6 +1523,24 @@ else
               fi
               rm -f "${ssl_key}" "${ssl_crt}"
             fi
+
+            #
+            # Hand this same admin kubeconfig to the org's own account
+            # (see gw-accounts.sh) so its SSH login has a fully-ready
+            # `kubectl` against its own VKS cluster with no extra
+            # context-selection step. It's a plain client-cert kubeconfig
+            # (not a Pinniped/OIDC exec plugin), so a static copy works
+            # standalone. Unconditional overwrite on every run - stable
+            # content across reruns for the same cluster, no idempotency
+            # check needed.
+            #
+            org_kube_dir="/home/${org_name}/.kube"
+            sudo mkdir -p "${org_kube_dir}"
+            sudo cp "${vks_kubeconfig}" "${org_kube_dir}/config"
+            sudo chown -R "${org_name}:${org_name}" "${org_kube_dir}"
+            sudo chmod 700 "${org_kube_dir}"
+            sudo chmod 600 "${org_kube_dir}/config"
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: kubeconfig for VKS cluster ${vks_name} copied to /home/${org_name}/.kube/config" "${log_file}" "" ""
           fi
           rm -f "${vks_kubeconfig}"
           break
