@@ -51,9 +51,11 @@ fi
 # thin and each phase independently testable/re-runnable. Order matters
 # and follows the original monolith's own sequence exactly (each phase's
 # comments above document its own real dependencies on the ones before
-# it), with two exceptions made deliberately: vault-pki-bootstrap.sh now
-# runs first (it has zero dependency on the SDDC build pipeline and only
-# needs to finish before configure_vcfa.sh at the very end); and vSAN
+# it), with three exceptions made deliberately: gw-accounts.sh now runs
+# first of all (it has zero dependency on anything else in this loop -
+# purely local Linux account setup on gw itself); vault-pki-bootstrap.sh
+# runs right after it (it has zero dependency on the SDDC build pipeline
+# and only needs to finish before configure_vcfa.sh at the very end); and vSAN
 # health alarm silencing moved into vcenter-bootstrap.sh (see that
 # script's own comment) rather than staying in its original, much later
 # position. Demo Gateway/Ingress/workload yaml rendering also used to run
@@ -69,7 +71,7 @@ fi
 # past a failed phase would just fail more confusingly, several phases
 # later, with a much less obvious root cause.
 #
-for phase in vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap configure_vcfa; do
+for phase in gw-accounts vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap configure_vcfa; do
   bash "${script_dir}/${phase}.sh" "${jsonFile}"
   phase_exit=$?
   if [ ${phase_exit} -ne 0 ]; then
