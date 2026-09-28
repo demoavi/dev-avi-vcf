@@ -127,7 +127,15 @@ do
   #
   # ESXi customization (merged from esxi_customization.sh.template) - govc
   # here talks directly to the ESXi host's own management API, not VCD.
+  # A standalone ESXi endpoint has no datacenter/cluster/resource-pool of
+  # its own, so any of those left exported from the sddc branch's
+  # power-cycle step above (pointed at the underlying/external vCenter)
+  # must be cleared first - confirmed live they otherwise make govc fail
+  # outright ("datacenter 'X' not found") instead of being silently
+  # ignored. Harmless no-op for the vApp use case, where these are never
+  # set in the first place.
   #
+  unset GOVC_DATACENTER GOVC_DATASTORE GOVC_CLUSTER GOVC_RESOURCE_POOL
   export GOVC_URL="${ip_esxi}"
   export GOVC_USERNAME=root
   export GOVC_PASSWORD=$(jq -c -r .generic_password $jsonFile)
@@ -175,3 +183,57 @@ done
 # project already uses elsewhere for cross-script state, e.g.
 # /tmp/token_vcfi.json).
 echo "${hostSpecs}" > /tmp/hostSpecs.json
+
+#
+# sddc use case only: eject each ESXi host's kickstart ISO from its
+# CD-ROM device and delete it from the datastore, now that the kickstart
+# install has completed - ported verbatim from the reference project's
+# own sddc.sh (lines ~483-486). vApp use case has no equivalent step:
+# its kickstart ISOs are served over HTTP from gw (see gw-setup.sh.tpl),
+# never inserted as a per-VM CD-ROM device at all, so there's nothing to
+# eject/clean up there.
+#
+# iso_location and folder are both expected as plain bash variables from
+# bash/variables.sh, not derived here - matching the reference project's
+# own convention (commit 7fdc1378dbf2a3749ddfa7e172158801d5f200b3 moved
+# iso_location="/tmp/esxi" out of sddc.sh's own function body and into
+# bash/variables.sh, right alongside the vsphere_underlay_* exports).
+# folder is the vSphere VM Folder these ESXi VMs live in on the
+# underlying/external vCenter - bash/variables.sh's own bare "folder"
+# name (sourced from .vsphere_underlay.folder), deliberately not
+# prefixed vsphere_underlay_* like the GOVC_* vars above, matching
+# upstream exactly (see that project's own bash/variables.sh, which
+# doesn't rename this one either).
+#
+if [ "${deployment_kind}" == "sddc" ]; then
+  export GOVC_URL="${vsphere_underlay_vcsa}"
+  export GOVC_USERNAME="${vsphere_underlay_username}"
+  export GOVC_PASSWORD="${vsphere_underlay_password}"
+  export GOVC_DATACENTER="${vsphere_underlay_datacenter}"
+  export GOVC_DATASTORE="${vsphere_underlay_datastore}"
+  export GOVC_CLUSTER="${vsphere_underlay_cluster}"
+  export GOVC_RESOURCE_POOL="${vsphere_underlay_cluster}/Resources"
+  export GOVC_INSECURE=true
+
+  for esxi in $(seq 1 $(echo ${ips_esxi} | jq -c -r '. | length'))
+  do
+    group=$(( (esxi-1)/4 ))
+    if [[ ${group} -eq 0 ]] ; then
+      name_esxi="${basename_sddc}-mgmt-esx0${esxi}"
+    else
+      pos_in_group=$(( esxi - group*4 ))
+      name_esxi="${basename_sddc}-wld0${group}-esx0${pos_in_group}"
+    fi
+
+    cdrom_name=$(govc device.ls -vm "${folder}/${name_esxi}" -json | jq -r --arg arg "VirtualCdrom" '.devices[] | select( .type == $arg).name')
+    govc device.cdrom.eject -vm "${folder}/${name_esxi}" -device "${cdrom_name}" nested-vcf/$(basename ${iso_location}-${esxi}.iso) > /dev/null
+    sleep 10
+    govc device.cdrom.eject -vm "${folder}/${name_esxi}" -device "${cdrom_name}" nested-vcf/$(basename ${iso_location}-${esxi}.iso) > /dev/null
+    govc datastore.rm nested-vcf/$(basename ${iso_location}-${esxi}.iso) > /dev/null
+  done
+
+  # Once every per-host ISO is gone, the now-empty nested-vcf folder
+  # itself is removed too - one-shot, not per-host, still under the same
+  # GOVC_* session exported above.
+  govc datastore.rm nested-vcf > /dev/null
+fi
