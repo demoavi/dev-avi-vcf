@@ -945,16 +945,44 @@ do
     fi
 
     #
-    # Assign a user to the VCF-A org - optional, deliberately left
-    # commented out here: the original script hardcoded a real username
-    # AND plaintext password directly in the file. Never commit real
-    # credentials to a script - source both from this project's own
-    # secrets handling (e.g. the same generic_password/vault mechanism
-    # used elsewhere) if you need this step.
+    # Assign a user to the VCF-A org - one local "Organization
+    # Administrator" per org, username=org_name, same VMware1!-bookended
+    # password as every other per-org account (gw SSH, vCenter SSO, Avi,
+    # NSX - see gw-accounts.sh's own comment for why this exact shape is
+    # required). VCFA allows at most 1 local user per org ("A maximum of
+    # 1 local users are allowed per organization", confirmed live
+    # 2026-09-28), so existence is checked first via a tenant-scoped GET
+    # (unfiltered - a max-1-user org makes filtering unnecessary) rather
+    # than attempting creation unconditionally and treating that error as
+    # a real failure.
     #
-    # user_json=$(jq -n --arg u "${org_admin_username}" --arg p "${org_admin_password}" --arg roleid "${org_admin_role_id}" \
-    #   '{username: $u, password: $p, roleEntityRefs: [{id: $roleid, name: "Organization Administrator"}], providerType: "LOCAL"}')
-    # vcfa_api POST "cloudapi/1.0.0/users" "${user_json}"
+    # "Organization Administrator" is a TENANT-scoped role, not a
+    # provider one - confirmed live it's completely invisible on a plain
+    # (provider-context) GET cloudapi/1.0.0/roles call, only appearing
+    # once the same request carries the tenant-context header below. Its
+    # role_id is looked up fresh per org rather than hardcoded, since
+    # VCFA mints a distinct role URN per org for this same role name -
+    # confirmed live two different orgs got two different IDs for the
+    # identically-named role.
+    #
+    tenant_ctx_header="x-vmware-vcloud-tenant-context: ${org_uuid}"
+    vcfa_api GET "cloudapi/1.0.0/users" "" 2 5 "${tenant_ctx_header}"
+    existing_org_user=$(echo ${response_body} | jq -c -r --arg arg "${org_name}" '.values[]? | select(.username == $arg) | .username')
+    if [ -n "${existing_org_user}" ]; then
+      log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VCF-A org user ${org_name} already exists, skipping creation" "${log_file}" "" ""
+    else
+      vcfa_api GET "cloudapi/1.0.0/roles" "" 2 5 "${tenant_ctx_header}"
+      org_admin_role_id=$(echo ${response_body} | jq -c -r '.values[] | select(.name == "Organization Administrator") | .id')
+      if [ -z "${org_admin_role_id}" ] || [ "${org_admin_role_id}" == "null" ]; then
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: Organization Administrator role not found for ${org_name}, skipping VCF-A org user creation" "${log_file}" "${slack_webhook}" "${google_webhook}"
+      else
+        org_password="VMware1!$(echo -n "${gw_accounts_secret}${org_name}" | sha256sum | cut -c1-4)VMware1!"
+        user_json=$(jq -n --arg u "${org_name}" --arg p "${org_password}" --arg roleid "${org_admin_role_id}" \
+          '{username: $u, password: $p, roleEntityRefs: [{id: $roleid, name: "Organization Administrator"}], providerType: "LOCAL"}')
+        vcfa_api POST "cloudapi/1.0.0/users" "${user_json}" 2 5 "${tenant_ctx_header}"
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VCF-A org user ${org_name} created (Organization Administrator)" "${log_file}" "" ""
+      fi
+    fi
   fi
 done < <(echo "${vcf_a_organizations}" | jq -c -r .[])
 

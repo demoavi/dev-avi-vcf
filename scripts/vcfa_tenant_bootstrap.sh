@@ -826,9 +826,11 @@ fi
 # field is dropped entirely - this was its only remaining consumer).
 #
 # Password for ALL THREE account types below is deliberately the SAME
-# derivation as gw-accounts.sh's own Linux accounts (sha256(gw_accounts_
-# secret + org_name), truncated) - one login/password per org across gw
-# SSH, Avi, vCenter SSO, and NSX alike, all independent of generic_password.
+# derivation as gw-accounts.sh's own Linux accounts ("VMware1!" + 4 hex
+# chars from sha256(gw_accounts_secret + org_name) + "VMware1!", 20 chars
+# total - see that script's own comment for why this exact shape) - one
+# login/password per org across gw SSH, Avi, vCenter SSO, and NSX alike,
+# all independent of generic_password.
 #
 sso_domain="$(jq -c -r .sddc.vcenter.ssoDomain "${jsonFile}")"
 export GOVC_URL="${basename_sddc}-vc01.${domain}"
@@ -863,7 +865,14 @@ else
   do
     if [ -n "$item" ] && [ "$item" != "null" ]; then
       org_name=$(echo ${item} | jq -c -r '.name')
-      org_password=$(echo -n "${gw_accounts_secret}${org_name}" | sha256sum | cut -c1-24)
+      # Must stay byte-for-byte identical to gw-accounts.sh's own
+      # derivation of the same formula (see that script's comment for
+      # why it's this exact shape - VMware1! prefix/suffix bookending a
+      # 4-hex-char segment, confirmed live 2026-09-28 as the only length/
+      # character-class combination that satisfies vCenter's undocumented
+      # 20-char password-length MAXIMUM, VCFA's own minimum-complexity
+      # policy, and NSX's, all at once).
+      org_password="VMware1!$(echo -n "${gw_accounts_secret}${org_name}" | sha256sum | cut -c1-4)VMware1!"
 
       #
       # vCenter SSO account - re-synced (not just created-once) every run,

@@ -339,16 +339,27 @@ vcfa_login() {
   fi
 }
 vcfa_api() {
-  # $1 method, $2 endpoint (relative to /), $3 data, $4 retries, $5 pause
-  # - re-logs in once per call on a 401, since provider tokens have a
-  # limited TTL and this script's total runtime (region/ipSpace/
-  # providerGateway/org/vDC/networking, several with poll loops) can
-  # comfortably outlast it. Result lands in response_body/response_code.
-  local method="$1" endpoint="$2" data="$3" retry="${4:-2}" pause="${5:-5}" attempt=0
+  # $1 method, $2 endpoint (relative to /), $3 data, $4 retries, $5 pause,
+  # $6 optional extra header (e.g. "x-vmware-vcloud-tenant-context: <org
+  # uuid>" - scopes the same provider token to a specific org, needed for
+  # tenant-scoped resources like the "Organization Administrator" role and
+  # per-org local users, both confirmed live invisible/rejected on a plain
+  # provider-context call) - re-logs in once per call on a 401, since
+  # provider tokens have a limited TTL and this script's total runtime
+  # (region/ipSpace/providerGateway/org/vDC/networking, several with poll
+  # loops) can comfortably outlast it. Result lands in response_body/
+  # response_code.
+  local method="$1" endpoint="$2" data="$3" retry="${4:-2}" pause="${5:-5}" extra_header="${6:-}" attempt=0
   while true; do
-    response=$(curl -sk -X "${method}" --write-out "\n%{http_code}" \
-      -H "$ACCEPT" -H "$CONTENT_TYPE" -H "Authorization: Bearer ${vcfa_token}" \
-      -d "${data}" "${VCFA_HOST}/${endpoint}")
+    if [ -n "${extra_header}" ]; then
+      response=$(curl -sk -X "${method}" --write-out "\n%{http_code}" \
+        -H "$ACCEPT" -H "$CONTENT_TYPE" -H "Authorization: Bearer ${vcfa_token}" -H "${extra_header}" \
+        -d "${data}" "${VCFA_HOST}/${endpoint}")
+    else
+      response=$(curl -sk -X "${method}" --write-out "\n%{http_code}" \
+        -H "$ACCEPT" -H "$CONTENT_TYPE" -H "Authorization: Bearer ${vcfa_token}" \
+        -d "${data}" "${VCFA_HOST}/${endpoint}")
+    fi
     response_body=$(sed '$ d' <<< "$response")
     response_code=$(tail -n1 <<< "$response")
     if [[ ${response_code} == 2[0-9][0-9] ]]; then

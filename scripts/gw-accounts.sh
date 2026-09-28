@@ -2,10 +2,26 @@
 #
 # Per-VCF-A-org Linux accounts on gw, one per org in vcf_a_organizations
 # (org-1, org-2, ...). SSH login, password-based - each org's password is
-# sha256(gw_accounts_secret + org_name), truncated, deliberately
-# independent of generic_password (a different secret entirely, so
-# rotating one never affects the other). Deterministic and reproducible
-# elsewhere from the same two inputs - no separate secret store needed.
+# "VMware1!<4 hex chars from sha256(gw_accounts_secret + org_name)>
+# VMware1!" (20 chars total), deliberately independent of generic_password
+# (a different secret entirely, so rotating one never affects the other).
+# Deterministic and reproducible elsewhere from the same two inputs - no
+# separate secret store needed. The VMware1! prefix/suffix bookending a
+# short hash segment (not a longer raw hash) is required, not cosmetic -
+# confirmed live 2026-09-28 against the sddc reference environment that
+# vCenter SSO's own password-strength check has an undocumented 20-
+# character MAXIMUM length (21+ is rejected outright, "Password strength
+# check" constraint violation, regardless of character-class mix), and
+# VCFA's own local-user password policy separately requires at least one
+# uppercase/lowercase/digit/special character - a raw hex string (no
+# uppercase, no special char) fails VCFA's check, while a longer prefixed
+# hex string fails vCenter's length cap. This exact 20-char shape is the
+# only one confirmed live to satisfy vCenter, NSX, and VCFA simultaneously
+# - see vcfa_tenant_bootstrap.sh's and vcfa_provider_bootstrap.sh's own
+# copies of this same derivation, which must stay byte-for-byte identical
+# to this one (same login/password across gw SSH, vCenter SSO, Avi,
+# NSX, and the VCF-A org user, all for the same org).
+#
 # Runs first in vcf_bootstrap.sh's phase loop since it has no dependency
 # on anything else in the pipeline.
 #
@@ -39,7 +55,7 @@ do
   # pre-hash with openssl passwd. Re-set every run so a rotated
   # gw_accounts_secret (or a manual re-run) always syncs the password,
   # not just at account-creation time.
-  org_password=$(echo -n "${gw_accounts_secret}${org_name}" | sha256sum | cut -c1-24)
+  org_password="VMware1!$(echo -n "${gw_accounts_secret}${org_name}" | sha256sum | cut -c1-4)VMware1!"
   echo "${org_name}:${org_password}" | sudo chpasswd
 done < <(echo "${vcf_a_organizations}" | jq -c -r .[])
 
