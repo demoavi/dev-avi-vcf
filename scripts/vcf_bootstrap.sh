@@ -51,14 +51,16 @@ fi
 # thin and each phase independently testable/re-runnable. Order matters
 # and follows the original monolith's own sequence exactly (each phase's
 # comments above document its own real dependencies on the ones before
-# it), with three exceptions made deliberately: gw-accounts.sh now runs
+# it), with four exceptions made deliberately: gw-accounts.sh now runs
 # first of all (it has zero dependency on anything else in this loop -
 # purely local Linux account setup on gw itself); vault-pki-bootstrap.sh
 # runs right after it (it has zero dependency on the SDDC build pipeline
-# and only needs to finish before configure_vcfa.sh at the very end); and vSAN
+# and only needs to finish before configure_vcfa.sh at the very end); vSAN
 # health alarm silencing moved into vcenter-bootstrap.sh (see that
 # script's own comment) rather than staying in its original, much later
-# position. Demo Gateway/Ingress/workload yaml rendering also used to run
+# position; and avi-accounts.sh runs last of all, after configure_vcfa.sh,
+# since it needs each org's Avi tenant (auto-created by configure_vcfa.sh's
+# PROVIDER_MANAGED Avi enablement) to already exist. Demo Gateway/Ingress/workload yaml rendering also used to run
 # here as its own first-phase script (vks-yaml-rendering.sh) but has
 # since moved into configure_vcfa.sh's own per-org loop - the per-Kind
 # hostnames it renders have to be unique PER ORG (Avi is one shared,
@@ -71,7 +73,7 @@ fi
 # past a failed phase would just fail more confusingly, several phases
 # later, with a much less obvious root cause.
 #
-for phase in gw-accounts vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap configure_vcfa; do
+for phase in gw-accounts vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap configure_vcfa avi-accounts; do
   bash "${script_dir}/${phase}.sh" "${jsonFile}"
   phase_exit=$?
   if [ ${phase_exit} -ne 0 ]; then
