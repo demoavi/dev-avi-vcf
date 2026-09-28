@@ -98,3 +98,32 @@ expect eof
 VSAN_EXPECT_EOF
 unset VC_ROOT_PASSWORD VC_SSO_USER VC_HOST VC_DC VC_CLUSTER
 log_notify "vSAN health alarm silencing applied on ${basename_sddc}-vc01.${domain}"
+
+#
+# Read-only SSO account, for anyone needing vCenter visibility without
+# write access. readonly_password is deliberately its own CR field, not
+# derived from generic_password, so it can be shared/rotated
+# independently. Confirmed live 2026-09-28 against the sddc reference
+# environment: govc sso.user.create errors loudly ("Another user or
+# group already exists...") on a re-run, so existence is checked first
+# via sso.user.ls; govc permissions.set is naturally idempotent (safe
+# to re-run unconditionally, no such guard needed) - reuses the same
+# GOVC_* env vars exported at the top of this script.
+#
+readonly_sso_domain="$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)"
+if govc sso.user.ls 2>/dev/null | awk '{print $1}' | grep -qx "${readonly_username}"; then
+  log_notify "SSO user ${readonly_username}@${readonly_sso_domain} already exists, skipping creation"
+else
+  user_error=$(govc sso.user.create -p "${readonly_password}" "${readonly_username}" 2>&1)
+  if [ $? -ne 0 ]; then
+    log_notify "ERROR: govc sso.user.create ${readonly_username} failed: ${user_error}"
+  else
+    log_notify "SSO user ${readonly_username}@${readonly_sso_domain} created"
+  fi
+fi
+perm_error=$(govc permissions.set -principal "${readonly_username}@${readonly_sso_domain}" -role ReadOnly -propagate=true / 2>&1)
+if [ $? -ne 0 ]; then
+  log_notify "ERROR: govc permissions.set ${readonly_username}@${readonly_sso_domain} failed: ${perm_error}"
+else
+  log_notify "ReadOnly role granted to ${readonly_username}@${readonly_sso_domain} at vCenter root"
+fi
