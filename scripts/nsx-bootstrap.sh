@@ -389,33 +389,3 @@ do
   nsx_set_object "policy/api/v1/infra/segments/${seg_name}" PUT "${seg_data}"
 done < <(echo ${nsx_segments_overlay} | jq -c -r '.[]')
 
-#
-# Read-only NSX Manager local user, for anyone needing NSX visibility
-# without write access. No @ssoDomain suffix here (unlike vCenter's SSO
-# account in vcenter-bootstrap.sh) - this is a plain NSX Manager node-
-# local account, same readonly_username/readonly_password as that one
-# but a completely separate account on a separate system. Confirmed
-# live 2026-09-28 against the sddc reference environment:
-# POST node/users?action=create_user with no account_type specified
-# creates a "guest"-type account, which NSX auto-assigns the built-in
-# "auditor" (read-only) role to via aaa/role-bindings - no separate
-# role-binding step needed, and login/write-denied both verified live.
-# password must be set in this same create call, not via a later
-# reset_password action - that path (tried first) marks the account
-# PASSWORD_EXPIRED/password_reset_required, blocking normal login
-# until a self-service change, since it's meant for an admin resetting
-# someone else's forgotten password, not for provisioning a usable
-# service account. Re-creating an existing user 409s with a clear
-# "User 'X' already exists" error, so existence is checked via
-# node/users list first.
-#
-nsx_get_object "api/v1/node/users"
-existing_readonly_user=$(echo ${response_body} | jq -c -r --arg arg "${readonly_username}" '.results[]? | select(.username == $arg) | .username')
-if [ -n "${existing_readonly_user}" ]; then
-  log_notify "NSX node user ${readonly_username} already exists, skipping creation"
-else
-  nsx_set_object "api/v1/node/users?action=create_user" POST \
-    "$(jq -n --arg u "${readonly_username}" --arg p "${readonly_password}" '{username: $u, full_name: $u, password: $p}')"
-  log_notify "NSX node user ${readonly_username} created with auditor (read-only) role"
-fi
-

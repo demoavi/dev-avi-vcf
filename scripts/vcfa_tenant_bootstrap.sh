@@ -799,28 +799,36 @@ else
 fi
 
 #
-# Per-org accounts (vCenter SSO + Avi tenant-admin) - the last thing this
-# script does, since both depend on resources created earlier in the
-# pipeline: each org's Supervisor Namespace (namespace-provisioning loop
-# above, this script) and Avi tenant (auto-created by
-# vcfa_provider_bootstrap.sh's own PROVIDER_MANAGED Avi enablement, which
-# runs before this script). Folds in what used to be the standalone
-# scripts/avi-accounts.sh phase (same "one account per VCF-A org" concept,
-# and this is exactly where its tenant-existence dependency is already
-# guaranteed without a separate poll/ordering step) and replaces
-# vcenter-bootstrap.sh's old single shared "readonly" SSO account.
+# Per-org accounts (vCenter SSO + Avi tenant-admin + NSX Manager node
+# user) - the last thing this script does, since all three depend on
+# resources created earlier in the pipeline: each org's Supervisor
+# Namespace (namespace-provisioning loop above, this script) and Avi
+# tenant (auto-created by vcfa_provider_bootstrap.sh's own
+# PROVIDER_MANAGED Avi enablement, which runs before this script). Folds
+# in what used to be the standalone scripts/avi-accounts.sh phase (same
+# "one account per VCF-A org" concept, and this is exactly where its
+# tenant-existence dependency is already guaranteed without a separate
+# poll/ordering step), replaces vcenter-bootstrap.sh's old single shared
+# "readonly" SSO account, and replaces nsx-bootstrap.sh's old single
+# shared "readonly" NSX node user the same way.
 #
-# That single shared account is gone because it doesn't scope the way its
-# name implies: confirmed live 2026-09-28 against the sddc reference
+# Both old shared accounts are gone because neither scoped the way their
+# name implied: confirmed live 2026-09-28 against the sddc reference
 # environment that a vCenter-root ReadOnly grant, even propagated, makes
 # every org's namespace VMs/pods visible to that one account - there's no
-# way to give it visibility into just one org's namespace. Per-org accounts
-# below fix that by scoping each one to its own namespace only.
+# way to give it visibility into just one org's namespace. Per-org
+# accounts below fix that by scoping each vCenter one to its own
+# namespace only. The NSX account has no equivalent per-project scoping
+# available (its node-user roles aren't project-scoped) - it stays a
+# plain org-named account with the built-in "auditor" role, same
+# visibility as the shared account it replaces, just one per org now
+# instead of one shared readonly_username/readonly_password pair (that CR
+# field is dropped entirely - this was its only remaining consumer).
 #
-# Password for BOTH account types below is deliberately the SAME
+# Password for ALL THREE account types below is deliberately the SAME
 # derivation as gw-accounts.sh's own Linux accounts (sha256(gw_accounts_
 # secret + org_name), truncated) - one login/password per org across gw
-# SSH, Avi, and vCenter SSO alike, all independent of generic_password.
+# SSH, Avi, vCenter SSO, and NSX alike, all independent of generic_password.
 #
 sso_domain="$(jq -c -r .sddc.vcenter.ssoDomain "${jsonFile}")"
 export GOVC_URL="${basename_sddc}-vc01.${domain}"
@@ -956,6 +964,31 @@ else
             log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: Avi user ${org_name} created (Tenant-Admin, tenant ${org_name})" "${log_file}" "" ""
           fi
         fi
+      fi
+
+      #
+      # NSX Manager per-org node-local account - ported from the now-
+      # removed shared "readonly" account section of nsx-bootstrap.sh
+      # (lines 391-420 there), same account/password as the vCenter SSO
+      # and Avi accounts above (org_name/org_password, both already
+      # derived earlier in this loop) instead of the old readonly_username/
+      # readonly_password CR fields (now dropped entirely - this was
+      # their only remaining consumer). No @ssoDomain suffix - this is a
+      # plain NSX Manager node-local account, a completely separate
+      # system from vCenter SSO. Still the built-in "auditor" (read-only)
+      # role for every org, not scoped to that org's own NSX Project/VPC -
+      # NSX's node-user roles aren't project-scoped the way the vCenter
+      # namespace grants above are, so this is read access to the whole
+      # NSX Manager, same as the account it replaces.
+      #
+      nsx_get_object "api/v1/node/users"
+      existing_nsx_user=$(echo ${response_body} | jq -c -r --arg arg "${org_name}" '.results[]? | select(.username == $arg) | .username')
+      if [ -n "${existing_nsx_user}" ]; then
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: NSX node user ${org_name} already exists, skipping creation" "${log_file}" "" ""
+      else
+        nsx_set_object "api/v1/node/users?action=create_user" POST \
+          "$(jq -n --arg u "${org_name}" --arg p "${org_password}" '{username: $u, full_name: $u, password: $p}')"
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: NSX node user ${org_name} created with auditor (read-only) role" "${log_file}" "" ""
       fi
     fi
   done < <(echo "${vcf_a_organizations}" | jq -c -r .[])
