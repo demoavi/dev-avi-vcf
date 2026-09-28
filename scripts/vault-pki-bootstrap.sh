@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Vault + cert-manager PKI bootstrap (root/intermediate CA) - optional, gated on any org needing namespace.vault_integration. Runs first, before the SDDC build pipeline, since it has no dependency on any of it; must only complete before configure_vcfa.sh, which reads its root token.
+# Vault + cert-manager PKI bootstrap (root/intermediate CA) - optional, gated on any org needing namespace.vault_integration. Runs first, before the SDDC build pipeline, since it has no dependency on any of it; must only complete before vcfa_tenant_bootstrap.sh, which reads its root token.
 #
 jsonFile="${1}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,8 +12,8 @@ log_notify "vault-pki-bootstrap.sh started"
 #
 # Vault + cert-manager PKI bootstrap - ported from the reference project's
 # own cloud-init (templates/userdata_external-gw-trunk.yaml.template), NOT
-# from configure_vcfa.sh (that script assumes Vault is already up and only
-# reads its root token/TLS cert). Deliberately done here in vcf_bootstrap.sh
+# from vcfa_tenant_bootstrap.sh (that script assumes Vault is already up and
+# only reads its root token/TLS cert). Deliberately done here in vcf_bootstrap.sh
 # instead of gw's own cloud-init:
 #   - gating is trivial here (vcf_a_organizations is already a plain bash
 #     variable by this point) - doing it in cloud-init would mean computing
@@ -39,8 +39,8 @@ log_notify "vault-pki-bootstrap.sh started"
 # (see vcf_bootstrap.sh's own top comment), so every operation below that
 # touches /opt/vault, /etc/vault.d, or systemd needs an explicit sudo that
 # the reference never needed. Confirmed elsewhere in this project (see
-# configure_vcfa.sh's own "sudo cat /opt/vault/tls/tls.crt") that this
-# user has passwordless sudo. Where the target itself is root-owned,
+# vcfa_tenant_bootstrap.sh's own "sudo cat /opt/vault/tls/tls.crt") that
+# this user has passwordless sudo. Where the target itself is root-owned,
 # "sudo tee file" is used instead of "cmd > file" or "sudo cmd > file" -
 # a plain ">" redirect is opened by the CURRENT (unprivileged) shell
 # before the command ever runs, so sudo on the command itself doesn't

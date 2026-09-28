@@ -42,7 +42,7 @@ cl_json=$(jq -n --arg ds "${datastore_id}" --arg tp "${supervisor_cm_thumbprint}
 # (confirmed live there, likely present here too on a re-run). No
 # name-filter query param on this endpoint, so list all libraries and
 # check by name individually, matching the exact pattern already used
-# in configure_vcfa.sh's own vCenter content-library lookups.
+# in vcfa_tenant_bootstrap.sh's own vCenter content-library lookups.
 #
 create_vcenter_api_session
 vcenter_api 3 3 GET "api/content/library" ""
@@ -1323,7 +1323,7 @@ open('${rendered_values_file}', 'w').write(text)
         # created well after this point in the run, showed
         # "x509: certificate signed by unknown authority" pulling from
         # Harbor). Persisted to a well-known file here (separate process
-        # from configure_vcfa.sh, which is what actually creates VKS
+        # from vcfa_tenant_bootstrap.sh, which is what actually creates VKS
         # clusters and needs this content for each one's
         # osConfiguration.trust.additionalTrustedCAs ClusterClass variable).
         #
@@ -1374,8 +1374,8 @@ open('${rendered_values_file}', 'w').write(text)
           # not through a VKS guest cluster's own trust store) - the
           # earlier claim here that guest clusters trust Harbor's CA
           # automatically was disproven live 2026-09-25 (see
-          # harbor_ca_cert_path above) and is fixed in configure_vcfa.sh's
-          # VKS cluster creation instead.
+          # harbor_ca_cert_path above) and is fixed in
+          # vcfa_tenant_bootstrap.sh's VKS cluster creation instead.
           harbor_images_json="$(echo ${item} | jq -c '.images // []')"
           if [ "${harbor_images_json}" != "[]" ]; then
             # Also installed at gw boot via variables.json's apt_packages

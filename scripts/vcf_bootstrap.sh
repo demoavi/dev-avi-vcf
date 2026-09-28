@@ -51,21 +51,30 @@ fi
 # thin and each phase independently testable/re-runnable. Order matters
 # and follows the original monolith's own sequence exactly (each phase's
 # comments above document its own real dependencies on the ones before
-# it), with four exceptions made deliberately: gw-accounts.sh now runs
+# it), with three exceptions made deliberately: gw-accounts.sh now runs
 # first of all (it has zero dependency on anything else in this loop -
 # purely local Linux account setup on gw itself); vault-pki-bootstrap.sh
 # runs right after it (it has zero dependency on the SDDC build pipeline
-# and only needs to finish before configure_vcfa.sh at the very end); vSAN
-# health alarm silencing moved into vcenter-bootstrap.sh (see that
-# script's own comment) rather than staying in its original, much later
-# position; and avi-accounts.sh runs last of all, after configure_vcfa.sh,
-# since it needs each org's Avi tenant (auto-created by configure_vcfa.sh's
-# PROVIDER_MANAGED Avi enablement) to already exist. Demo Gateway/Ingress/workload yaml rendering also used to run
-# here as its own first-phase script (vks-yaml-rendering.sh) but has
-# since moved into configure_vcfa.sh's own per-org loop - the per-Kind
-# hostnames it renders have to be unique PER ORG (Avi is one shared,
-# provider-managed controller), so it needs org_name in scope, which only
-# configure_vcfa.sh's loop has.
+# and only needs to finish before vcfa_tenant_bootstrap.sh, which reads
+# its root token); and vSAN health alarm silencing moved into
+# vcenter-bootstrap.sh (see that script's own comment) rather than staying
+# in its original, much later position. Demo Gateway/Ingress/workload yaml
+# rendering also used to run here as its own first-phase script
+# (vks-yaml-rendering.sh) but has since moved into
+# vcfa_provider_bootstrap.sh's own per-org loop - the per-Kind hostnames
+# it renders have to be unique PER ORG (Avi is one shared, provider-
+# managed controller), so it needs org_name in scope, which only that
+# script's loop has. Per-org Avi tenant-admin accounts (former
+# avi-accounts.sh) and the vCenter per-org SSO account/namespace-visibility
+# scoping (former "readonly" SSO account section of vcenter-bootstrap.sh)
+# have both moved into vcfa_tenant_bootstrap.sh's own final per-org loop
+# instead - both need each org's Avi tenant/namespace to already exist,
+# which only that script (not vcfa_provider_bootstrap.sh) can guarantee
+# without a separate existence-poll as their own phase. The two VCFA
+# scripts were themselves one single configure_vcfa.sh until 2026-09-28 -
+# split along this same provider-portal/org-portal line once it grew past
+# 1800 lines (see vcfa_provider_bootstrap.sh's own header for the split
+# rationale and cross-script variable dependencies).
 #
 # Each call aborts the whole pipeline on a non-zero exit - a later phase
 # almost always assumes an earlier one actually succeeded (e.g. NSX/Avi
@@ -73,7 +82,7 @@ fi
 # past a failed phase would just fail more confusingly, several phases
 # later, with a much less obvious root cause.
 #
-for phase in gw-accounts vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap configure_vcfa avi-accounts; do
+for phase in gw-accounts vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap; do
   bash "${script_dir}/${phase}.sh" "${jsonFile}"
   phase_exit=$?
   if [ ${phase_exit} -ne 0 ]; then

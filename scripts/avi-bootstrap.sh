@@ -289,11 +289,11 @@ avi_api 2 2 PATCH "${cloud_update_json}" "api/cloud/${cloud_uuid}"
 # particular, harbor.${avi_subdomain}.${domain}, since that stays shared/
 # global rather than per-org), PLUS two entries per org actually
 # configured: "${org_name}.${domain}" (org-1.vcf9.lab, ...) - resolved by
-# that org's blueprints (configure_vcfa.sh's blueprint-rendering step
-# substitutes avi_subdomain with the org's own name for exactly this
+# that org's blueprints (vcfa_tenant_bootstrap.sh's blueprint-rendering
+# step substitutes avi_subdomain with the org's own name for exactly this
 # reason) - and "${org_name}-vks.${domain}" (org-1-vks.vcf9.lab, ...) -
-# resolved by that org's demo-yaml rendering (configure_vcfa.sh's own
-# per-org loop). Both are needed per org, not just one, since they're two
+# resolved by that org's demo-yaml rendering (vcfa_provider_bootstrap.sh's
+# own per-org loop). Both are needed per org, not just one, since they're two
 # different consumers with two different naming conventions. Without a
 # matching DNS service domain for each, Avi's internal DNS/IPAM has
 # nothing authoritative to resolve those hostnames against.
