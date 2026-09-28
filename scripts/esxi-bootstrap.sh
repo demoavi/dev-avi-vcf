@@ -6,7 +6,14 @@ jsonFile="${1}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
-vcd_login
+# sddc use case has no VCD at all - vcd_login (and everything it sets:
+# vcd_host/vcd_auth_token/vcd_api_version/gw_vm_href) only makes sense
+# for the vApp use case. log_notify below tolerates gw_vm_href being
+# unset either way (its VCD-metadata-posting branch is gated on it),
+# so skipping this is safe for sddc.
+if [ "${deployment_kind}" == "vApp" ]; then
+  vcd_login
+fi
 log_notify "esxi-bootstrap.sh started"
 
 #
@@ -14,6 +21,29 @@ log_notify "esxi-bootstrap.sh started"
 #
 echo '------------------------------------------------------------'
 echo "Cloud Builder JSON file creation"
+
+#
+# sddc use case's power-cycle (below) talks to the underlying/external
+# vCenter directly via govc, not VCD - these vars are constant for the
+# whole run (one external vCenter, not one per ESXi host), so exported
+# once here rather than per-host. Names match the reference project's
+# own vsphere_underlay_* convention (bash/variables.sh, commit
+# 7ee6094408ed7281fdc8c2990a65b30747611a1f) so no renaming is needed if/
+# when the sddc use case gets its own CRD/operator rendering these into
+# variables.sh - until then they're simply unset and this whole branch
+# is unreachable, since deployment_kind only ever resolves to "sddc" via
+# functions.sh's fallback default, never set explicitly by anything yet.
+#
+if [ "${deployment_kind}" == "sddc" ]; then
+  export GOVC_URL="${vsphere_underlay_vcsa}"
+  export GOVC_USERNAME="${vsphere_underlay_username}"
+  export GOVC_PASSWORD="${vsphere_underlay_password}"
+  export GOVC_DATACENTER="${vsphere_underlay_datacenter}"
+  export GOVC_DATASTORE="${vsphere_underlay_datastore}"
+  export GOVC_CLUSTER="${vsphere_underlay_cluster}"
+  export GOVC_RESOURCE_POOL="${vsphere_underlay_cluster}/Resources"
+  export GOVC_INSECURE=true
+fi
 
 hostSpecs="[]"
 for esxi in $(seq 1 $(echo ${ips_esxi} | jq -c -r '. | length'))
@@ -27,8 +57,14 @@ do
   fi
   ip_esxi="$(echo ${ips_esxi} | jq -r .[$(expr ${esxi} - 1)])"
 
-  if ! vcd_wait_vm_powered_on "${name_esxi}"; then
-    echo "ERROR: ${name_esxi} never reached POWERED_ON in VCD, skipping this host"
+  # vApp use case: VM already exists in VCD (created by the operator) -
+  # wait for VCD's own POWERED_ON status. sddc use case: VM already
+  # exists directly on the underlying/external vCenter instead - wait
+  # for govc's own poweredOn state there.
+  wait_powered_on_fn="vcd_wait_vm_powered_on"
+  [ "${deployment_kind}" == "sddc" ] && wait_powered_on_fn="govc_wait_vm_powered_on"
+  if ! "${wait_powered_on_fn}" "${name_esxi}"; then
+    echo "ERROR: ${name_esxi} never reached powered-on state, skipping this host"
     continue
   fi
 
@@ -49,19 +85,28 @@ do
   hostSpecs=$(echo ${hostSpecs} | jq '. += ['${hostSpec}']')
 
   #
-  # Power-cycle this host via VCD now that we know it's genuinely up
-  # (thumbprint just captured above) - a clean reboot after the kickstart
-  # install, same as the original vCenter-based flow's govc vm.power
-  # cycle, just against VCD instead of govc.
+  # Power-cycle this host now that we know it's genuinely up (thumbprint
+  # just captured above) - a clean reboot after the kickstart install.
+  # vApp use case does this via VCD's own REST API (govc has no session
+  # that can power-cycle a VM inside a VCD-managed vApp from the
+  # outside); sddc use case's ESXi VMs live directly on the underlying/
+  # external vCenter instead, so the original vCenter-based reference
+  # flow's own govc vm.power cycle applies unchanged there.
   #
-  vm_href=$(vcd_find_vm_href "${name_esxi}")
-  curl -sk -X POST "${vm_href}/power/action/powerOff" \
-    -H "Authorization: Bearer ${vcd_auth_token}" \
-    -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
-  sleep 30
-  curl -sk -X POST "${vm_href}/power/action/powerOn" \
-    -H "Authorization: Bearer ${vcd_auth_token}" \
-    -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
+  if [ "${deployment_kind}" == "vApp" ]; then
+    vm_href=$(vcd_find_vm_href "${name_esxi}")
+    curl -sk -X POST "${vm_href}/power/action/powerOff" \
+      -H "Authorization: Bearer ${vcd_auth_token}" \
+      -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
+    sleep 30
+    curl -sk -X POST "${vm_href}/power/action/powerOn" \
+      -H "Authorization: Bearer ${vcd_auth_token}" \
+      -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
+  elif [ "${deployment_kind}" == "sddc" ]; then
+    govc vm.power -s "${name_esxi}"
+    sleep 30
+    govc vm.power -on "${name_esxi}"
+  fi
 
   count=1
   until $(curl --output /dev/null --silent --head -k https://${ip_esxi})

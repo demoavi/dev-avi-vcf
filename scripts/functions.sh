@@ -10,19 +10,21 @@
 # must stay self-contained wherever they end up deployed/run, so they are
 # deliberately left untouched).
 #
-# deployment_kind distinguishes vApp-use-case from SDDC-use-case runs in
-# log_notify's own gchat messages (both eventually post to the same
-# space) - NOT hardcoded here: the two use cases are meant to eventually
-# share this same vcf_bootstrap.sh/functions.sh, driven by two SEPARATE
-# operators (each with its own CRD/kopf watch - the vApp operator here in
-# epc-vapp, an equivalent one for the sddc CRD elsewhere), so this file
-# can't assume which one produced the JSON it's reading. Once each
-# operator renders its own deployment JSON with a "deployment_kind" field
-# (CR kind "vApp-avi-vcf" or "sddc" respectively) and bash/variables.sh
-# exports it, this picks that up automatically. Until that CR/variables.sh
-# plumbing exists, falls back to "vApp" (this repo's only real, working
-# path today) rather than an empty/broken tag.
-: "${deployment_kind:=vApp}"
+# deployment_kind distinguishes vApp-use-case from SDDC-use-case runs -
+# used by log_notify's own gchat messages (both eventually post to the
+# same space) and by esxi-bootstrap.sh's own VCD-vs-govc power-cycle
+# branch. NOT hardcoded here: the two use cases share this same
+# vcf_bootstrap.sh/functions.sh, driven by two SEPARATE operators (each
+# with its own CRD/kopf watch - the vApp operator here in epc-vapp, an
+# equivalent one for the sddc CRD elsewhere). epc-vapp's own userdata.py
+# always renders "deployment_kind": "vApp" into both bash/variables.sh
+# and the deployment JSON, so this file never actually falls back to the
+# default below for a real vApp run - the default exists purely for the
+# sddc use case, which (as of 2026-09-28) has no equivalent
+# CRD/variables.sh rendering of its own yet, so it can never set this
+# explicitly and needs the correct value by default rather than an
+# empty/broken tag.
+: "${deployment_kind:=sddc}"
 
 # This org has far more VMs (other users' labs) than fit in one page - a
 # single unpaginated page silently drops results past its page size and
@@ -88,6 +90,28 @@ vcd_wait_vm_powered_on() {
     fi
     if [ ${attempt} -eq ${retry} ]; then
       echo "ERROR: ${target_name} not POWERED_ON in VCD after ${attempt} attempts of ${pause} seconds (last status='${status:-not found}')"
+      return 1
+    fi
+    sleep ${pause}
+    ((attempt++))
+  done
+}
+
+# sddc use case's own equivalent of vcd_wait_vm_powered_on - same retry/
+# pause budget, but against the underlying/external vCenter directly via
+# govc (GOVC_* already exported by the caller) rather than VCD's query
+# API, since sddc's ESXi VMs live there instead of inside a VCD-managed
+# vApp.
+govc_wait_vm_powered_on() {
+  local target_name="$1"
+  local retry=180 pause=20 attempt=1
+  while true; do
+    local power_state=$(govc vm.info -json "${target_name}" 2>/dev/null | jq -r '.virtualMachines[0].runtime.powerState // empty')
+    if [ "${power_state}" == "poweredOn" ]; then
+      return 0
+    fi
+    if [ ${attempt} -eq ${retry} ]; then
+      echo "ERROR: ${target_name} not poweredOn in vCenter after ${attempt} attempts of ${pause} seconds (last state='${power_state:-not found}')"
       return 1
     fi
     sleep ${pause}
