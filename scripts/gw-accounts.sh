@@ -51,6 +51,18 @@ do
     sudo useradd -m -s /bin/bash "${org_name}"
     log_notify "created account ${org_name}"
   fi
+  # useradd -m's default home-dir mode has no "other" traversal at all -
+  # confirmed live 2026-09-29 this silently breaks every later script
+  # that writes into this org's home dir as ubuntu (e.g.
+  # vcfa_provider_bootstrap.sh's demo-yaml rendering into
+  # /home/${org_name}/yaml-files/): chowning/creating the SUBDIRECTORY as
+  # ubuntu isn't enough, Unix requires execute/traverse permission on
+  # EVERY ancestor directory, and /home/${org_name} itself still blocked
+  # it regardless. o+x only grants traverse (not listing/read) of the
+  # home dir itself - its contents stay only as readable as their own
+  # individual permissions allow. Re-applied every run (not just at
+  # creation) in case an already-existing account predates this fix.
+  sudo chmod o+x "/home/${org_name}"
   # chpasswd hashes this itself (system default scheme) - no need to
   # pre-hash with openssl passwd. Re-set every run so a rotated
   # gw_accounts_secret (or a manual re-run) always syncs the password,

@@ -906,16 +906,31 @@ do
             # and fail loudly rather than creating a wrong one.
             #
             log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no avi controller registered in VCFA for region ${region_ref_name} yet, waiting for VCFA's own auto-discovery" "${log_file}" "" ""
-            for attempt_avi_reg in $(seq 1 12); do
-              sleep 10
+            #
+            # A single vcfInfraEndpoints refresh (already done once at the
+            # very top of this script) isn't reliably enough on its own -
+            # confirmed live 2026-09-29: a real run sat with an empty Avi
+            # Controller connection in VCFA even after that refresh plus
+            # 12x10s of passive re-polling, and only started showing up
+            # once a user manually re-triggered "Sync Instance" on the VCF
+            # Instance connection in the VCFA UI (the same refresh action)
+            # a second time. So each retry round here re-issues that same
+            # refresh instead of just re-polling the same stale state.
+            #
+            for attempt_avi_reg in 1 2 3; do
+              if [ -n "${vcf_infra_endpoint_id}" ] && [ "${vcf_infra_endpoint_id}" != "null" ]; then
+                vcfa_api POST "cloudapi/1.0.0/vcfInfraEndpoints/${vcf_infra_endpoint_id}/refresh" ""
+              fi
+              sleep 60
               vcfa_api GET "cloudapi/v1/loadBalancer/aviControllers?filter=regionRef.id==${region_id}" ""
               avi_controller_id=$(echo ${response_body} | jq -c -r --arg arg "${region_id}" '.values[] | select(.regionRef.id == $arg) | .id' | head -1)
               if [ -n "${avi_controller_id}" ]; then
                 break
               fi
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: avi controller for region ${region_ref_name} still not registered after refresh attempt ${attempt_avi_reg}/3" "${log_file}" "" ""
             done
             if [ -z "${avi_controller_id}" ]; then
-              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: avi controller for region ${region_ref_name} never appeared in VCFA after waiting, aborting" "${log_file}" "${slack_webhook}" "${google_webhook}"
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: avi controller for region ${region_ref_name} never appeared in VCFA after 3 refresh attempts, aborting" "${log_file}" "${slack_webhook}" "${google_webhook}"
               exit 100
             fi
           fi
