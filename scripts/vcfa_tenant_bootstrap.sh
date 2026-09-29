@@ -840,6 +840,12 @@ export GOVC_INSECURE=true
 export GOVC_PERSIST_SESSION=false
 unset GOVC_CLUSTER
 
+# ip_avi is never a persisted bash/variables.sh export (confirmed live
+# 2026-09-29: it was empty here, causing avi_login to fail outright with
+# "Avi csrftoken is undefined after login") - every script that needs it
+# derives it locally from the plural ips_avi array instead, same as
+# avi-bootstrap.sh's own identical line.
+ip_avi=$(echo ${ips_avi} | jq -r '.[0]')
 avi_login
 avi_api 3 3 GET "" "api/role?name=Tenant-Admin"
 tenant_admin_role_ref=$(echo ${response_body} | jq -c -r '.results[0].url')
