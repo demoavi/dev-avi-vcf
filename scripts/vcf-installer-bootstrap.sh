@@ -7,7 +7,21 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 templates_dir="${script_dir}/../templates"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
-vcd_login
+# The staging depot values below are vcf_installer_-prefixed in variables.sh
+# for both use cases. A vApp gw built before userdata.py adopted the prefix
+# still has them unprefixed (variables.sh is only rendered at gw boot) -
+# accept those too, prefixed winning if both are set.
+for depot_var in lcm_depot_host lcm_depot_metadata_dir lcm_depot_vcenter_upgrade_info_dir vvs_host vvs_lcm_bundle_path vvs_interop_bundle_path vvs_vlcm_interop_vcg_bundle_path vsan_hcl_host packages_host
+do
+  prefixed_var="vcf_installer_${depot_var}"
+  printf -v "${prefixed_var}" '%s' "${!prefixed_var:-${!depot_var}}"
+done
+# vcd_login (and gw_vm_href/vcd_auth_token/vcd_api_version it sets) only exists for
+# the vApp use case: the sddc use case has no VCD. log_notify tolerates
+# gw_vm_href being unset (its VCD-metadata branch is gated on it).
+if [ "${deployment_kind}" == "vApp" ]; then
+  vcd_login
+fi
 log_notify "vcf-installer-bootstrap.sh started"
 
 # hostSpecs is built by esxi-bootstrap.sh (its own separate process) and
@@ -136,13 +150,13 @@ export VCF_INSTALLER_IP="${ip_vcf_installer}"
 # remote-shell quoting all at once (the same class of problem jq -n --arg
 # already solves for the gchat messages above).
 lcm_patch_b64=$(printf '%s\n%s\n%s\n%s\n' \
-  "lcm.depot.adapter.host=${lcm_depot_host}" \
-  "lcm.depot.adapter.remote.vcfMetadataDir=${lcm_depot_metadata_dir}" \
-  "lcm.depot.adapter.vCenterUpgradeInfoDir=${lcm_depot_vcenter_upgrade_info_dir}" \
+  "lcm.depot.adapter.host=${vcf_installer_lcm_depot_host}" \
+  "lcm.depot.adapter.remote.vcfMetadataDir=${vcf_installer_lcm_depot_metadata_dir}" \
+  "lcm.depot.adapter.vCenterUpgradeInfoDir=${vcf_installer_lcm_depot_vcenter_upgrade_info_dir}" \
   "lcm.access_token.broadcom.authorization.server.url=${vcf_installer_bearer_url}" \
   | base64 -w0)
 dm_override_json=$(printf '{"publicDepotHost":"%s","authorizationServer":"%s","publicVvsHost":"%s","publicVvsVcfLcmBundlePath":"%s","publicVvsVcfInteropBundlePath":"%s","publicVvsVlcmInteropVcgBundlePath":"%s","publicVsanHclHost":"%s","publicPackagesHost":"%s"}' \
-  "${lcm_depot_host}" "${vcf_installer_bearer_url}" "${vvs_host}" "${vvs_lcm_bundle_path}" "${vvs_interop_bundle_path}" "${vvs_vlcm_interop_vcg_bundle_path}" "${vsan_hcl_host}" "${packages_host}")
+  "${vcf_installer_lcm_depot_host}" "${vcf_installer_bearer_url}" "${vcf_installer_vvs_host}" "${vcf_installer_vvs_lcm_bundle_path}" "${vcf_installer_vvs_interop_bundle_path}" "${vcf_installer_vvs_vlcm_interop_vcg_bundle_path}" "${vcf_installer_vsan_hcl_host}" "${vcf_installer_packages_host}")
 dm_patch_b64=$(printf 'lcm.depot.service.online.config.override=%s\n' "${dm_override_json}" | base64 -w0)
 export VCF_LCM_PATCH_B64="${lcm_patch_b64}"
 export VCF_DM_PATCH_B64="${dm_patch_b64}"
@@ -234,55 +248,85 @@ fi
 # back the same way. gw_vm_href was already resolved up top (log_notify
 # needs it too).
 #
-curl -sk -X POST "${gw_vm_href}/metadata" \
-  -H "Authorization: Bearer ${vcd_auth_token}" \
-  -H "Accept: application/*+xml;version=${vcd_api_version}" \
-  -H "Content-Type: application/vnd.vmware.vcloud.metadata+xml" \
-  --data "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Metadata xmlns=\"http://www.vmware.com/vcloud/v1.5\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><MetadataEntry><Key>vcfi_machineId</Key><TypedValue xsi:type=\"MetadataStringValue\"><Value>${vcfi_machineId}</Value></TypedValue></MetadataEntry></Metadata>" > /dev/null
-
-log_notify "VCF-I: posted machineId to VCD metadata, waiting for the operator to relay the activation code"
-retry_activation=60 ; pause_activation=30 ; attempt_activation=1
-while true; do
-  # Confirm the machineId write actually landed - a single unretried POST
-  # can be silently dropped by VCD's optimistic-locking on concurrent VM
-  # metadata writes (seen empirically: "Row was updated or deleted by
-  # another transaction"), which would otherwise strand this loop for the
-  # full retry budget waiting on an activation code the operator has
-  # nothing to relay. Re-post it here (folded into the existing poll
-  # interval, no extra delay) if it's ever missing.
-  posted_machine_id=$(curl -sk "${gw_vm_href}/metadata/vcfi_machineId" \
+if [ "${deployment_kind}" == "vApp" ]; then
+  curl -sk -X POST "${gw_vm_href}/metadata" \
     -H "Authorization: Bearer ${vcd_auth_token}" \
     -H "Accept: application/*+xml;version=${vcd_api_version}" \
-    | grep -oP '(?<=<Value>).*?(?=</Value>)')
-  if [ -z "${posted_machine_id}" ]; then
-    log_only "VCF-I: vcfi_machineId missing from VCD metadata, re-posting"
-    curl -sk -X POST "${gw_vm_href}/metadata" \
+    -H "Content-Type: application/vnd.vmware.vcloud.metadata+xml" \
+    --data "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Metadata xmlns=\"http://www.vmware.com/vcloud/v1.5\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><MetadataEntry><Key>vcfi_machineId</Key><TypedValue xsi:type=\"MetadataStringValue\"><Value>${vcfi_machineId}</Value></TypedValue></MetadataEntry></Metadata>" > /dev/null
+
+  log_notify "VCF-I: posted machineId to VCD metadata, waiting for the operator to relay the activation code"
+  retry_activation=60 ; pause_activation=30 ; attempt_activation=1
+  while true; do
+    # Confirm the machineId write actually landed - a single unretried POST
+    # can be silently dropped by VCD's optimistic-locking on concurrent VM
+    # metadata writes (seen empirically: "Row was updated or deleted by
+    # another transaction"), which would otherwise strand this loop for the
+    # full retry budget waiting on an activation code the operator has
+    # nothing to relay. Re-post it here (folded into the existing poll
+    # interval, no extra delay) if it's ever missing.
+    posted_machine_id=$(curl -sk "${gw_vm_href}/metadata/vcfi_machineId" \
       -H "Authorization: Bearer ${vcd_auth_token}" \
       -H "Accept: application/*+xml;version=${vcd_api_version}" \
-      -H "Content-Type: application/vnd.vmware.vcloud.metadata+xml" \
-      --data "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Metadata xmlns=\"http://www.vmware.com/vcloud/v1.5\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><MetadataEntry><Key>vcfi_machineId</Key><TypedValue xsi:type=\"MetadataStringValue\"><Value>${vcfi_machineId}</Value></TypedValue></MetadataEntry></Metadata>" > /dev/null
-  fi
-  vcfi_activation_code=$(curl -sk "${gw_vm_href}/metadata/vcfi_activation_code" \
-    -H "Authorization: Bearer ${vcd_auth_token}" \
-    -H "Accept: application/*+xml;version=${vcd_api_version}" \
-    | grep -oP '(?<=<Value>).*?(?=</Value>)')
-  if [ -n "${vcfi_activation_code}" ]; then
-    log_notify "VCF-I: received activation code via VCD metadata relay"
-    break
-  fi
-  if [ ${attempt_activation} -eq ${retry_activation} ]; then
-    log_notify "VCF-I: activation code not relayed after ${attempt_activation} attempts of ${pause_activation} seconds"
+      | grep -oP '(?<=<Value>).*?(?=</Value>)')
+    if [ -z "${posted_machine_id}" ]; then
+      log_only "VCF-I: vcfi_machineId missing from VCD metadata, re-posting"
+      curl -sk -X POST "${gw_vm_href}/metadata" \
+        -H "Authorization: Bearer ${vcd_auth_token}" \
+        -H "Accept: application/*+xml;version=${vcd_api_version}" \
+        -H "Content-Type: application/vnd.vmware.vcloud.metadata+xml" \
+        --data "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Metadata xmlns=\"http://www.vmware.com/vcloud/v1.5\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><MetadataEntry><Key>vcfi_machineId</Key><TypedValue xsi:type=\"MetadataStringValue\"><Value>${vcfi_machineId}</Value></TypedValue></MetadataEntry></Metadata>" > /dev/null
+    fi
+    vcfi_activation_code=$(curl -sk "${gw_vm_href}/metadata/vcfi_activation_code" \
+      -H "Authorization: Bearer ${vcd_auth_token}" \
+      -H "Accept: application/*+xml;version=${vcd_api_version}" \
+      | grep -oP '(?<=<Value>).*?(?=</Value>)')
+    if [ -n "${vcfi_activation_code}" ]; then
+      log_notify "VCF-I: received activation code via VCD metadata relay"
+      break
+    fi
+    if [ ${attempt_activation} -eq ${retry_activation} ]; then
+      log_notify "VCF-I: activation code not relayed after ${attempt_activation} attempts of ${pause_activation} seconds"
+      exit 100
+    fi
+    sleep ${pause_activation}
+    ((attempt_activation++))
+  done
+else
+  # sddc use case: no VCD to relay through, and gw can reach the license
+  # service directly - same direct exchange as the reference project's
+  # vcfi.sh: client-credentials bearer token, then the machineId exchanged
+  # for an activation code.
+  sleep 3
+  vcfi_access_token=$(curl -s --request POST \
+    --url "${vcf_installer_bearer_url}" \
+    --header 'content-type: application/x-www-form-urlencoded' \
+    --data client_id="${vcf_installer_client_id}" \
+    --data client_secret="${vcf_installer_client_secret}" \
+    --data grant_type=client_credentials | jq -c -r '.access_token')
+  if [ -z "${vcfi_access_token}" ] || [ "${vcfi_access_token}" == "null" ]; then
+    log_notify "VCF-I: vcfi_access_token is undefined or null"
     exit 100
   fi
-  sleep ${pause_activation}
-  ((attempt_activation++))
-done
+  sleep 3
+  vcfi_activation_code=$(curl -s --request POST \
+    --url "${vcf_installer_token_url}/${vcf_installer_tenant_id}/${vcf_installer_token_url_suffix}" \
+    --header 'authorization: Bearer '${vcfi_access_token}'' \
+    --header 'content-type: application/json' \
+    --data '{"id": "'${vcfi_machineId}'", "name": "test123456"}' | jq -c -r '.activation_code')
+  if [ -z "${vcfi_activation_code}" ] || [ "${vcfi_activation_code}" == "null" ]; then
+    log_notify "VCF-I: vcfi_activation_code is undefined or null"
+    exit 100
+  fi
+  log_notify "VCF-I: obtained activation code directly from the license service"
+  sleep 3
+fi
 sddc_manager_api 3 2 PUT '{"vmwareAccount" : {"downloadActivationCode" : "'${vcfi_activation_code}'"}}' "${ip_vcf_installer}" v1/system/settings/depot $(jq -c -r .accessToken /tmp/token_vcfi.json)
 
 #
 # check that the depot bundle has been populated
 #
-retry_bundle=60 ; pause_bundle=10 ; attempt_bundle=1
+retry_bundle=90 ; pause_bundle=10 ; attempt_bundle=1
 while true
 do
   sddc_manager_api 3 2 GET '' "${ip_vcf_installer}" v1/bundles $(jq -c -r .accessToken /tmp/token_vcfi.json)
@@ -303,13 +347,15 @@ done
 # The machineId/activation code relayed through VCD VM metadata have done
 # their job - clear them now rather than leaving an activation secret
 # sitting on the VM indefinitely.
-curl -sk -X DELETE "${gw_vm_href}/metadata/vcfi_machineId" \
-  -H "Authorization: Bearer ${vcd_auth_token}" \
-  -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
-curl -sk -X DELETE "${gw_vm_href}/metadata/vcfi_activation_code" \
-  -H "Authorization: Bearer ${vcd_auth_token}" \
-  -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
-log_only "VCF-I: cleared machineId/activation code from VCD metadata"
+if [ "${deployment_kind}" == "vApp" ]; then
+  curl -sk -X DELETE "${gw_vm_href}/metadata/vcfi_machineId" \
+    -H "Authorization: Bearer ${vcd_auth_token}" \
+    -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
+  curl -sk -X DELETE "${gw_vm_href}/metadata/vcfi_activation_code" \
+    -H "Authorization: Bearer ${vcd_auth_token}" \
+    -H "Accept: application/*+xml;version=${vcd_api_version}" > /dev/null
+  log_only "VCF-I: cleared machineId/activation code from VCD metadata"
+fi
 
 sddc_manager_api 3 2 GET '' "${ip_vcf_installer}" v1/bundles $(jq -c -r .accessToken /tmp/token_vcfi.json)
 depots_ids=$(echo ${response_body} | jq --arg arg "${vcf_version}" '[.elements[] | select ((.components[0].imageType == "INSTALL") and (.version | startswith($arg))) | .id]')
