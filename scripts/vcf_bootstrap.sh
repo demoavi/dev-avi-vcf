@@ -53,7 +53,9 @@ fi
 # comments above document its own real dependencies on the ones before
 # it), with three exceptions made deliberately: gw-accounts.sh now runs
 # first of all (it has zero dependency on anything else in this loop -
-# purely local Linux account setup on gw itself); vault-pki-bootstrap.sh
+# purely local Linux account setup on gw itself), immediately followed by
+# gw-org-api.sh (vApp only, opt-in: the org-assignment API that hands out
+# the accounts gw-accounts.sh just created); vault-pki-bootstrap.sh
 # runs right after it (it has zero dependency on the SDDC build pipeline
 # and only needs to finish before vcfa_tenant_bootstrap.sh, which reads
 # its root token); and vSAN health alarm silencing moved into
@@ -82,7 +84,7 @@ fi
 # past a failed phase would just fail more confusingly, several phases
 # later, with a much less obvious root cause.
 #
-for phase in gw-accounts vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap; do
+for phase in gw-accounts gw-org-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap; do
   bash "${script_dir}/${phase}.sh" "${jsonFile}"
   phase_exit=$?
   if [ ${phase_exit} -ne 0 ]; then
