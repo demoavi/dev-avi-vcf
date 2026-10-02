@@ -70,10 +70,10 @@ resources:
           bootstrap:
             vAppConfig:
               properties:
-                - key: guestinfo.labweb.latency_active
+                - key: guestinfo.labweb.latency_mode
                   value:
-                    value: hold
-                - key: guestinfo.labweb.latency_to_ms
+                    value: constant
+                - key: guestinfo.labweb.latency_const_ms
                   value:
                     value: '100'
                 - key: guestinfo.labweb.latency_sched_start
