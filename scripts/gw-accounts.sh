@@ -125,7 +125,7 @@ fi
 # than a made-up address.
 wg_org_tunnel_prefix="10.8.0"
 wg_gw_tunnel_address="${wg_org_tunnel_prefix}.254/24"
-wg_allowed_ips="192.168.0.0/16, 172.16.0.0/16"
+wg_allowed_ips="192.168.0.0/16, 172.16.0.0/17"
 wg_endpoint_port="51820"
 org_tunnel_number() {
   local digits n
