@@ -91,11 +91,11 @@ do
 done < <(echo "${vcf_a_organizations}" | jq -r '.[].name')
 # Extra fields returned with every POST /org: the FQDNs the student logs in
 # to (same names gw's own DNS zone serves - see gw-setup.sh.tpl: -vc01,
-# -nsx01 (the NSX VIP), -auto-vip, and the first Avi controller) and the
+# -nsx01 (the NSX VIP), -auto-vip, and -avi, the Avi cluster VIP) and the
 # vCenter SSO domain. All derived, nothing configured.
 sso_domain=$(jq -c -r '.sddc.vcenter.ssoDomain // empty' "${jsonFile}")
 info_json=$(jq -n -c \
-  --arg avi "${basename_sddc}${basename_avi_ctrl}1.${domain}" \
+  --arg avi "${basename_sddc}-avi.${domain}" \
   --arg nsx "${basename_sddc}-nsx01.${domain}" \
   --arg vc "${basename_sddc}-vc01.${domain}" \
   --arg auto "${basename_sddc}-auto-vip.${domain}" \
