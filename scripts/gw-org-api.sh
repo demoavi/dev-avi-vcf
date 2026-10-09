@@ -95,19 +95,21 @@ done < <(echo "${vcf_a_organizations}" | jq -r '.[].name')
 # DNS zone (-vc01, -nsx01, the NSX VIP; -avi, the Avi cluster VIP;
 # -auto-vip, VCF Automation), built from the same basename_sddc/domain, so
 # nothing is hardcoded and a bookmark can't point at a name the zone doesn't
-# serve. One line per service: <label>|<hostname without domain>.
+# serve. One line per service: <label>|<hostname without domain>[|<path>]. A path may contain
+# {org_name}, which the server replaces by the org it assigns on each POST /org (the VCF Automation
+# tenant URL is per org); it is kept as a literal placeholder in the config.
 sso_domain=$(jq -c -r '.sddc.vcenter.ssoDomain // empty' "${jsonFile}")
 info_json=$(jq -n -c --arg sso "${sso_domain}" '{sso_domain: $sso}')
 bookmarks_json="[]"
-while IFS='|' read -r bookmark_name bookmark_host
+while IFS='|' read -r bookmark_name bookmark_host bookmark_path
 do
   [ -n "${bookmark_name}" ] || continue
-  bookmarks_json=$(jq -c --arg n "${bookmark_name}" --arg u "https://${bookmark_host}.${domain}" '. += [{name: $n, url: $u}]' <<< "${bookmarks_json}")
+  bookmarks_json=$(jq -c --arg n "${bookmark_name}" --arg u "https://${bookmark_host}.${domain}${bookmark_path}" '. += [{name: $n, url: $u}]' <<< "${bookmarks_json}")
 done <<BOOKMARKS
 vCenter|${basename_sddc}-vc01
 NSX|${basename_sddc}-nsx01
 Avi|${basename_sddc}-avi
-VCF Automation|${basename_sddc}-auto-vip
+VCF Automation|${basename_sddc}-auto-vip|/tenant/{org_name}/
 BOOKMARKS
 new_conf=$(API_USER="${org_api_username}" API_PW="${org_api_password}" jq -n -c \
   --argjson orgs "${orgs_json}" --argjson port "${org_api_port}" --argjson info "${info_json}" --argjson bookmarks "${bookmarks_json}" \

@@ -6,7 +6,9 @@
                   "bookmarks": [{"name": "vCenter", "url": "https://..."}, ...]}
                  where the info fields are the config's "info" object (e.g.
                  the SSO domain) and bookmarks the config's "bookmarks" list
-                 (the services' URLs) - both the same for every org.
+                 (the services' URLs) - the same for every org, except that a
+                 bookmark url may contain "{org_name}", which is replaced by the
+                 org just assigned (URL-encoded), e.g. .../tenant/{org_name}/.
                  Assigns the lowest-numbered unassigned org and removes it
                  from /orgs; 409 {"error": "no org available"} if none left
 
@@ -36,6 +38,7 @@ import ssl
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else "/etc/gw-org-api/config.json"
@@ -65,6 +68,13 @@ def available_orgs(cfg):
         if os.path.isdir(home) and not os.path.exists(assigned_path(cfg, org["name"])):
             out.append(org)
     return out
+
+
+def bookmarks_for(cfg, org_name):
+    """The config's bookmarks with "{org_name}" in their url replaced by the
+    org that was just assigned."""
+    quoted = urllib.parse.quote(org_name, safe="")
+    return [{**b, "url": b["url"].replace("{org_name}", quoted)} for b in cfg.get("bookmarks", [])]
 
 
 def claim_next(cfg, client_ip):
@@ -143,7 +153,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": "no org available"})
             sys.stderr.write(f"assigned {org['name']} to {self.client_address[0]}\n")
             return self._send(200, {"org_name": org["name"], "org_password": org["password"],
-                                    **cfg.get("info", {}), "bookmarks": cfg.get("bookmarks", [])})
+                                    **cfg.get("info", {}), "bookmarks": bookmarks_for(cfg, org["name"])})
         return self._send(404, {"error": "not found"})
 
     def do_GET(self):
