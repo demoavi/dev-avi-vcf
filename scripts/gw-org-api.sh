@@ -75,7 +75,7 @@ if ! sudo test -s "${conf_dir}/cert.pem" || ! sudo test -s "${conf_dir}/key.pem"
   fi
 fi
 
-# Config: credentials, port, the info fields below, and every org that has an account on this gw
+# Config: credentials, port, the info fields and bookmarks below, and every org that has an account on this gw
 # with the password gw-accounts.sh gave it (same formula). The password never
 # appears in a command line: jq reads it from the environment, sudo tee from
 # stdin. Root-only 600. Re-read by the server on every request.
@@ -89,22 +89,30 @@ do
   org_password="VMware1!$(echo -n "${gw_accounts_secret}${org_name}" | sha256sum | cut -c1-4)VMware1!"
   orgs_json=$(ORG_PW="${org_password}" jq -c --arg n "${org_name}" '. += [{"name": $n, "password": env.ORG_PW}]' <<< "${orgs_json}")
 done < <(echo "${vcf_a_organizations}" | jq -r '.[].name')
-# Extra fields returned with every POST /org: the FQDNs the student logs in
-# to (same names gw's own DNS zone serves - see gw-setup.sh.tpl: -vc01,
-# -nsx01 (the NSX VIP), -auto-vip, and -avi, the Avi cluster VIP) and the
-# vCenter SSO domain. All derived, nothing configured.
+# Extra fields returned with every POST /org: the vCenter SSO domain
+# (info) and the bookmarks - one {name, url} per service the student logs
+# in to. The hostnames are the very records gw-setup.sh.tpl puts in the gw's
+# DNS zone (-vc01, -nsx01, the NSX VIP; -avi, the Avi cluster VIP;
+# -auto-vip, VCF Automation), built from the same basename_sddc/domain, so
+# nothing is hardcoded and a bookmark can't point at a name the zone doesn't
+# serve. One line per service: <label>|<hostname without domain>.
 sso_domain=$(jq -c -r '.sddc.vcenter.ssoDomain // empty' "${jsonFile}")
-info_json=$(jq -n -c \
-  --arg avi "${basename_sddc}-avi.${domain}" \
-  --arg nsx "${basename_sddc}-nsx01.${domain}" \
-  --arg vc "${basename_sddc}-vc01.${domain}" \
-  --arg auto "${basename_sddc}-auto-vip.${domain}" \
-  --arg sso "${sso_domain}" \
-  '{avi_fqdn: $avi, nsx_fqdn: $nsx, vcenter_fqdn: $vc, vcf_automation_fqdn: $auto, sso_domain: $sso}')
+info_json=$(jq -n -c --arg sso "${sso_domain}" '{sso_domain: $sso}')
+bookmarks_json="[]"
+while IFS='|' read -r bookmark_name bookmark_host
+do
+  [ -n "${bookmark_name}" ] || continue
+  bookmarks_json=$(jq -c --arg n "${bookmark_name}" --arg u "https://${bookmark_host}.${domain}" '. += [{name: $n, url: $u}]' <<< "${bookmarks_json}")
+done <<BOOKMARKS
+vCenter|${basename_sddc}-vc01
+NSX|${basename_sddc}-nsx01
+Avi|${basename_sddc}-avi
+VCF Automation|${basename_sddc}-auto-vip
+BOOKMARKS
 new_conf=$(API_USER="${org_api_username}" API_PW="${org_api_password}" jq -n -c \
-  --argjson orgs "${orgs_json}" --argjson port "${org_api_port}" --argjson info "${info_json}" \
+  --argjson orgs "${orgs_json}" --argjson port "${org_api_port}" --argjson info "${info_json}" --argjson bookmarks "${bookmarks_json}" \
   --arg cert "${conf_dir}/cert.pem" --arg key "${conf_dir}/key.pem" \
-  '{username: env.API_USER, password: env.API_PW, port: $port, cert: $cert, key: $key, home_base: "/home", info: $info, orgs: $orgs}')
+  '{username: env.API_USER, password: env.API_PW, port: $port, cert: $cert, key: $key, home_base: "/home", info: $info, bookmarks: $bookmarks, orgs: $orgs}')
 if [ -z "${new_conf}" ]; then
   log_notify "ERROR: gw-org-api: config rendering failed (is org_api_port '${org_api_port}' a number?), skipping"
   exit 0

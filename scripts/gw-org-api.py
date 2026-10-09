@@ -2,9 +2,11 @@
 """Org-assignment API served from the gw (vApp use case only).
 
   GET  /orgs  -> {"orgs": ["org-2", "org-3", ...]}   unassigned orgs
-  POST /org   -> {"org_name": "org-1", "org_password": "...", <info fields>}
-                 where the info fields are the config's "info" object
-                 (service FQDNs and SSO domain, same for every org).
+  POST /org   -> {"org_name": "org-1", "org_password": "...", <info fields>,
+                  "bookmarks": [{"name": "vCenter", "url": "https://..."}, ...]}
+                 where the info fields are the config's "info" object (e.g.
+                 the SSO domain) and bookmarks the config's "bookmarks" list
+                 (the services' URLs) - both the same for every org.
                  Assigns the lowest-numbered unassigned org and removes it
                  from /orgs; 409 {"error": "no org available"} if none left
 
@@ -14,7 +16,8 @@ a later GET /orgs no longer lists it); there is deliberately no release.
 
 Everything it needs is in one root-only JSON config, re-read per request:
   {"username", "password", "port", "cert", "key", "home_base",
-   "info": {...}, "orgs": [{"name", "password"}, ...]}
+   "info": {...}, "bookmarks": [{"name", "url"}, ...],
+   "orgs": [{"name", "password"}, ...]}
 rendered by gw-org-api.sh (which owns the org list/password derivation - the
 same formula as gw-accounts.sh - so none of that is duplicated here).
 
@@ -140,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": "no org available"})
             sys.stderr.write(f"assigned {org['name']} to {self.client_address[0]}\n")
             return self._send(200, {"org_name": org["name"], "org_password": org["password"],
-                                    **cfg.get("info", {})})
+                                    **cfg.get("info", {}), "bookmarks": cfg.get("bookmarks", [])})
         return self._send(404, {"error": "not found"})
 
     def do_GET(self):
