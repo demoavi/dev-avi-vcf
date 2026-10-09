@@ -1432,4 +1432,132 @@ open('${rendered_values_file}', 'w').write(text)
   done < <(echo "${supervisor_services}" | jq -c -r .[])
 fi
 
+#
+# check_supervisor_services.sh - hourly health check of every Supervisor
+# Service installed on the Supervisor cluster(s): anything whose
+# config_status (the vCenter UI's "Configured" column) isn't CONFIGURED
+# is reported to Google Chat. Settings go into a separate 600 .conf (not a
+# sed-rendered template like enable_supervisor_service.sh above) since the
+# webhook URL contains '&', which sed would treat as "the matched text".
+# The services are read from vCenter on every run (nothing hardcoded), so
+# services enabled later are monitored automatically.
+#
+cat > /home/ubuntu/supervisor/check_supervisor_services.sh <<'CHECK_SUPERVISOR_SERVICES_EOF'
+#!/bin/bash
+#
+# Run hourly from ubuntu's crontab (installed by supervisor-bootstrap.sh).
+# Lists the Supervisor Services of every Supervisor-enabled cluster
+# (GET api/vcenter/namespace-management/clusters/<id>/supervisor-services)
+# and alerts on Google Chat when any is not CONFIGURED, or when vCenter
+# can't be queried at all. Quiet when healthy (log file only).
+#
+# Alerting rules: a problem must be seen on CONFIRM_CHECKS consecutive runs
+# (an install/upgrade passes through CONFIGURING for a while), is then
+# re-sent when the set of bad services changes or every REALERT_SECONDS if
+# unchanged, and a single "recovered" message follows once all are back.
+#
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${script_dir}/check_supervisor_services.conf"
+log_file="${script_dir}/check_supervisor_services.log"
+state_file="${script_dir}/check_supervisor_services.state"
+CONFIRM_CHECKS=2
+REALERT_SECONDS=21600
+
+exec 9> "${script_dir}/.check_supervisor_services.lock"
+flock -n 9 || exit 0
+
+log() {
+  echo "$(date '+%Y-%m-%d,%H:%M:%S'), $1" >> "${log_file}"
+}
+notify() {
+  log "$1"
+  if [ -n "${GOOGLE_WEBHOOK}" ]; then
+    curl -s -m 20 -X POST -H 'Content-Type: application/json' \
+      --data "$(jq -n --arg text "$(date '+%Y-%m-%d,%H:%M:%S'), ${MESSAGE_PREFIX}: $1" '{text: $text}')" \
+      "${GOOGLE_WEBHOOK}" >/dev/null 2>&1
+  fi
+}
+if [ -f "${log_file}" ]; then
+  tail -n 1000 "${log_file}" > "${log_file}.tmp" && mv "${log_file}.tmp" "${log_file}"
+fi
+
+problem_keys=""   # "<cluster>: <service>=<status>" - what the alert dedup compares
+problem_text=""   # same lines, plus vCenter's own reason when it gives one
+total=0
+token=$(curl -sk -m 30 -u "${VC_USERNAME}:${VC_PASSWORD}" -X POST "${VC_HOST}/api/session" | tr -d '"')
+api() {
+  curl -sk -m 30 -H "vmware-api-session-id: ${token}" "${VC_HOST}/api/vcenter/namespace-management/$1"
+}
+add_problem() {
+  problem_keys+="$1"$'\n'
+  problem_text+="${2:-$1}"$'\n'
+}
+if [ ${#token} -ne 32 ]; then
+  add_problem "vCenter ${VC_HOST}: cannot create an API session"
+else
+  clusters=$(api clusters)
+  if ! jq -e 'type == "array"' >/dev/null 2>&1 <<< "${clusters}"; then
+    add_problem "vCenter ${VC_HOST}: unexpected answer listing the Supervisor clusters"
+  elif [ "$(jq 'length' <<< "${clusters}")" -eq 0 ]; then
+    add_problem "no Supervisor-enabled cluster found on ${VC_HOST}"
+  else
+    while IFS=$'\t' read -r cluster_id cluster_name
+    do
+      services=$(api "clusters/${cluster_id}/supervisor-services")
+      if ! jq -e 'type == "array"' >/dev/null 2>&1 <<< "${services}"; then
+        add_problem "${cluster_name}: unexpected answer listing the Supervisor Services"
+        continue
+      fi
+      total=$((total + $(jq 'length' <<< "${services}")))
+      while IFS=$'\t' read -r service status
+      do
+        [ -n "${service}" ] || continue
+        reason=$(api "clusters/${cluster_id}/supervisor-services/${service}" \
+          | jq -r '(([.messages[]? | select(.severity == "ERROR")] + [.messages[]?]) | first | .details.default_message) // empty' 2>/dev/null)
+        add_problem "${cluster_name}: ${service}=${status}" "${cluster_name}: ${service}=${status}${reason:+ (${reason})}"
+      done < <(jq -r '.[] | select(.config_status != "CONFIGURED") | [.supervisor_service, (.config_status // "UNKNOWN")] | @tsv' <<< "${services}")
+    done < <(jq -r '.[] | [.cluster, .cluster_name] | @tsv' <<< "${clusters}")
+  fi
+fi
+
+streak=$(jq -r '.streak // 0' "${state_file}" 2>/dev/null || echo 0)
+alerted=$(jq -r '.alerted // false' "${state_file}" 2>/dev/null || echo false)
+last_alert=$(jq -r '.last_alert // 0' "${state_file}" 2>/dev/null || echo 0)
+last_keys=$(jq -r '.last_keys // ""' "${state_file}" 2>/dev/null || echo "")
+now=$(date +%s)
+
+if [ -z "${problem_keys}" ]; then
+  log "OK: ${total} Supervisor Service(s), all CONFIGURED"
+  if [ "${alerted}" == "true" ]; then
+    notify "Supervisor Services recovered: ${total} Supervisor Service(s), all CONFIGURED"
+  fi
+  streak=0; alerted=false; last_keys=""
+else
+  streak=$((streak + 1))
+  keys=$(sort <<< "${problem_keys}")
+  log "PROBLEM (check ${streak}): $(echo "${problem_text}" | sed '/^$/d' | paste -sd ';' -)"
+  if [ "${streak}" -ge "${CONFIRM_CHECKS}" ] && { [ "${alerted}" != "true" ] || [ "${keys}" != "${last_keys}" ] || [ $((now - last_alert)) -ge "${REALERT_SECONDS}" ]; }; then
+    notify "ERROR: Supervisor Services not healthy (expected CONFIGURED): $(echo "${problem_text}" | sed '/^$/d' | paste -sd ';' - | sed 's/;/; /g')"
+    alerted=true; last_alert=${now}; last_keys="${keys}"
+  fi
+fi
+jq -n --argjson streak "${streak}" --argjson alerted "${alerted}" --argjson last_alert "${last_alert}" --arg last_keys "${last_keys}" \
+  '{streak: $streak, alerted: $alerted, last_alert: $last_alert, last_keys: $last_keys}' > "${state_file}.tmp" && mv "${state_file}.tmp" "${state_file}"
+CHECK_SUPERVISOR_SERVICES_EOF
+{
+  printf 'VC_HOST=%q\n' "https://${vcsa_fqdn}"
+  printf 'VC_USERNAME=%q\n' "${vsphere_nested_username}@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)"
+  printf 'VC_PASSWORD=%q\n' "${generic_password}"
+  printf 'GOOGLE_WEBHOOK=%q\n' "${google_webhook}"
+  printf 'MESSAGE_PREFIX=%q\n' "nested-${basename_sddc} (${deployment_kind})"
+} > /home/ubuntu/supervisor/check_supervisor_services.conf
+chmod 600 /home/ubuntu/supervisor/check_supervisor_services.conf
+chmod 700 /home/ubuntu/supervisor/check_supervisor_services.sh
+# Hourly, idempotent (an existing entry is replaced, other entries kept -
+# e.g. avi-bootstrap.sh's traffic generator). Also run once right now so a
+# broken login/API path shows up in the log immediately.
+(crontab -l 2>/dev/null | grep -v 'check_supervisor_services.sh'; echo "0 * * * * /home/ubuntu/supervisor/check_supervisor_services.sh >/dev/null 2>&1") | crontab -
+/home/ubuntu/supervisor/check_supervisor_services.sh
+log_notify "Supervisor Services monitor installed: /home/ubuntu/supervisor/check_supervisor_services.sh runs hourly (log: check_supervisor_services.log)"
+
 log_notify "Supervisor cluster ready, auth helper scripts written to /home/ubuntu/supervisor/"
