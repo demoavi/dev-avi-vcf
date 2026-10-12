@@ -106,7 +106,7 @@ do
   [ -n "${bookmark_name}" ] || continue
   bookmarks_json=$(jq -c --arg n "${bookmark_name}" --arg u "https://${bookmark_host}.${domain}${bookmark_path}" '. += [{name: $n, url: $u}]' <<< "${bookmarks_json}")
 done <<BOOKMARKS
-vCenter|${basename_sddc}-vc01
+vCenter|${basename_sddc}-vc01|/ui/
 NSX|${basename_sddc}-nsx01
 Avi|${basename_sddc}-avi
 VCF Automation|${basename_sddc}-auto-vip|/tenant/{org_name}/
