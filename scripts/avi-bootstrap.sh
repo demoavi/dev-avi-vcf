@@ -565,3 +565,33 @@ else
   fi
 fi
 
+
+#
+# WAF policies: two copies of the default System-WAF-Policy, identical to it except for the name and the mode -
+# System-WAF-Policy-Detection (WAF_MODE_DETECTION_ONLY) and System-WAF-Policy-Enforcement
+# (WAF_MODE_ENFORCEMENT). Runs last, after the optional upgrade (which restarts the controller), hence the new
+# login. A copy is made the way the controller's own UI does it: read the default policy, drop what the
+# controller assigns itself (uuid, url, _last_modified, created_by), set name and mode, and POST that to
+# api/macro as {model_name: wafpolicy, data: ...}. A copy that already exists is left alone, so a re-run is safe.
+#
+# clone_waf_policy <new name> <mode>
+clone_waf_policy() {
+  local new_name=$1 new_mode=$2
+  avi_api 2 2 GET "" "api/wafpolicy?name=${new_name}"
+  if [ "$(echo ${response_body} | jq -c -r '.count')" -gt 0 ]; then
+    log_only "WAF policy ${new_name} already exists, skipping"
+    return 0
+  fi
+  avi_api 2 2 GET "" "api/wafpolicy?name=System-WAF-Policy"
+  if [ "$(echo ${response_body} | jq -c -r '.count')" -eq 0 ]; then
+    log_notify "ERROR: default WAF policy System-WAF-Policy not found on the Avi ctrl, cannot create ${new_name}"
+    exit 100
+  fi
+  waf_policy_json=$(echo ${response_body} | jq -c --arg n "${new_name}" --arg m "${new_mode}" '.results[0] | del(.uuid, .url, ._last_modified, .created_by) | .name = $n | .mode = $m')
+  avi_api 2 2 POST "$(jq -n -c --argjson d "${waf_policy_json}" '{model_name: "wafpolicy", data: $d}')" api/macro
+  log_only "WAF policy ${new_name} created (${new_mode})"
+}
+avi_login
+clone_waf_policy "System-WAF-Policy-Detection" "WAF_MODE_DETECTION_ONLY"
+clone_waf_policy "System-WAF-Policy-Enforcement" "WAF_MODE_ENFORCEMENT"
+log_notify "WAF policies System-WAF-Policy-Detection and System-WAF-Policy-Enforcement configured"
