@@ -1,0 +1,16 @@
+---
+apiVersion: ako.vmware.com/v1alpha2
+kind: L7Rule
+metadata:
+  name: l7-rule-waf-detection
+  namespace: default
+spec:
+  wafPolicy:
+    kind: AviRef
+    name: System-WAF-Policy-Detection
+  analyticsPolicy:
+    fullClientLogs:
+      enabled: true
+      throttle: HIGH
+      duration: 0
+    logAllHeaders: true
