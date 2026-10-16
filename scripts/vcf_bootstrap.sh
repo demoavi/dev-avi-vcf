@@ -84,7 +84,7 @@ fi
 # past a failed phase would just fail more confusingly, several phases
 # later, with a much less obvious root cause.
 #
-for phase in gw-accounts gw-org-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc k8s-bootstrap supervisor-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap; do
+for phase in gw-accounts gw-org-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc k8s-bootstrap git-bootstrap supervisor-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap; do
   bash "${script_dir}/${phase}.sh" "${jsonFile}"
   phase_exit=$?
   if [ ${phase_exit} -ne 0 ]; then

@@ -100,6 +100,9 @@ done < <(echo "${vcf_a_organizations}" | jq -r '.[].name')
 # tenant URL is per org); it is kept as a literal placeholder in the config.
 sso_domain=$(jq -c -r '.sddc.vcenter.ssoDomain // empty' "${jsonFile}")
 info_json=$(jq -n -c --arg sso "${sso_domain}" '{sso_domain: $sso}')
+# Git (spec.sddc.git.enabled): straight to the org's own repo, git.<avi subdomain>.<domain>/<org>/<repo>
+git_bookmark=""
+[ "${git_enabled}" == "true" ] && git_bookmark="Git|${git_fqdn_prefix}.${avi_subdomain}|/{org_name}/${git_repo_name}"
 bookmarks_json="[]"
 while IFS='|' read -r bookmark_name bookmark_host bookmark_path
 do
@@ -110,11 +113,12 @@ vCenter|${basename_sddc}-vc01|/ui/
 NSX|${basename_sddc}-nsx01
 Avi|${basename_sddc}-avi
 VCF Automation|${basename_sddc}-auto-vip|/tenant/{org_name}/
+${git_bookmark}
 BOOKMARKS
 new_conf=$(API_USER="${org_api_username}" API_PW="${org_api_password}" jq -n -c \
   --argjson orgs "${orgs_json}" --argjson port "${org_api_port}" --argjson info "${info_json}" --argjson bookmarks "${bookmarks_json}" \
-  --arg cert "${conf_dir}/cert.pem" --arg key "${conf_dir}/key.pem" \
-  '{username: env.API_USER, password: env.API_PW, port: $port, cert: $cert, key: $key, home_base: "/home", info: $info, bookmarks: $bookmarks, orgs: $orgs}')
+  --arg cert "${conf_dir}/cert.pem" --arg key "${conf_dir}/key.pem" --arg ca "${conf_dir}/vault-root-ca.pem" \
+  '{username: env.API_USER, password: env.API_PW, port: $port, cert: $cert, key: $key, home_base: "/home", info: $info, bookmarks: $bookmarks, certificates: [{name: "vault-root-ca", file: $ca}], orgs: $orgs}')
 if [ -z "${new_conf}" ]; then
   log_notify "ERROR: gw-org-api: config rendering failed (is org_api_port '${org_api_port}' a number?), skipping"
   exit 0

@@ -29,8 +29,17 @@
 #     values built from this deployment's Avi controller/cloud/segments (the same values the nested-vsphere
 #     project's deploy_k8s.sh templated). The chart creates the GatewayClass avi-lb.
 #
-# Idempotent: an existing VM, an initialised control plane, a joined node, an installed CNI/CRDs/AKO is left alone;
-# a cluster whose nodes are all Ready and whose AKO pod is Ready is not touched at all.
+#   - platform services every Helm release on this cluster can rely on: local-path-provisioner (default StorageClass,
+#     local node storage), cert-manager (Gateway API support on: a Gateway annotated cert-manager.io/cluster-issuer
+#     gets its TLS Secret issued and renewed) and a ClusterIssuer backed by the gw's Vault PKI (pki_int), logging in
+#     with an AppRole (policy: sign with one dedicated PKI role only; no token that would expire and silently stop the
+#     renewals). The dedicated role (k8s_vault_pki_role) copies the existing one's settings except require_cn=false:
+#     cert-manager's Gateway shim asks for certificates with DNS names only, and Vault refuses those unless the role
+#     does not require a common name (the existing role, used by the org flows, is left untouched). The issuer is skipped, with a warning, when Vault is not running on gw.
+#
+# Idempotent: an existing VM, an initialised control plane, a joined node, an installed CNI/CRDs/AKO/platform piece
+# is left alone; a cluster whose nodes are all Ready, whose AKO pod is Ready and whose platform pieces are in place
+# is not touched at all.
 # NON-FATAL: vcf_bootstrap.sh aborts the whole pipeline when a phase exits non-zero, and nothing later depends on
 # this cluster, so every failure here is logged (log_notify ERROR) and the script exits 0.
 #
@@ -65,13 +74,28 @@ node_ssh() { local ip=$1; shift; ssh "${ssh_opts[@]}" "${k8s_ssh_user}@${ip}" "$
 kc() { kubectl --kubeconfig "${kubeconfig}" "$@"; }
 helm_k() { helm --kubeconfig "${kubeconfig}" "$@"; }
 
+# Vault on gw (the PKI behind the cluster's certificates): running and its init file readable (root only, hence sudo)
+vault_available="false"
+if systemctl is-active --quiet vault 2> /dev/null && sudo test -r "${vault_secret_file_path}" 2> /dev/null; then
+  vault_available="true"
+fi
+
+# the platform pieces installed below: default StorageClass, cert-manager (webhook up) and, with Vault, a Ready ClusterIssuer
+platform_ready() {
+  kc get storageclass local-path > /dev/null 2>&1 || return 1
+  kc -n "${k8s_cert_manager_namespace}" wait --for=condition=Available deployment/cert-manager-webhook --timeout=5s > /dev/null 2>&1 || return 1
+  if [ "${vault_available}" = "true" ]; then
+    kc wait --for=condition=Ready "clusterissuer/${k8s_cluster_issuer}" --timeout=5s > /dev/null 2>&1 || return 1
+  fi
+}
+
 #
-# Already built? (kubeconfig answers, every node is Ready and AKO is installed)
+# Already built? (kubeconfig answers, every node is Ready, AKO and the platform pieces are in place)
 #
 if [ -s "${kubeconfig}" ]; then
   ready_nodes=$(kc get nodes --no-headers 2>/dev/null | awk '$2 == "Ready"' | wc -l)
-  if [ "${ready_nodes}" -ge "${total_nodes}" ] && kc -n "${k8s_ako_namespace}" wait --for=condition=Ready pod/ako-0 --timeout=5s > /dev/null 2>&1; then
-    log_notify "Kubernetes cluster ${k8s_cluster_name} already has ${ready_nodes} Ready nodes and a running AKO, nothing to do (kubeconfig: ${kubeconfig})"
+  if [ "${ready_nodes}" -ge "${total_nodes}" ] && kc -n "${k8s_ako_namespace}" wait --for=condition=Ready pod/ako-0 --timeout=5s > /dev/null 2>&1 && platform_ready; then
+    log_notify "Kubernetes cluster ${k8s_cluster_name} already has ${ready_nodes} Ready nodes, a running AKO and its platform services, nothing to do (kubeconfig: ${kubeconfig})"
     exit 0
   fi
 fi
@@ -331,6 +355,17 @@ while true; do
 done
 
 #
+# Local storage: local-path-provisioner, made the default StorageClass (a PVC without storageClassName works).
+#
+if ! kc get storageclass local-path > /dev/null 2>&1; then
+  log_notify "Installing local-path-provisioner ${k8s_local_path_version} (default StorageClass)"
+  kc apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${k8s_local_path_version}/deploy/local-path-storage.yaml" \
+    > "${k8s_dir}/local-path-install.log" 2>&1 || k8s_fail "installing local-path-provisioner failed (log: ${k8s_dir}/local-path-install.log)"
+  kc patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' >> "${k8s_dir}/local-path-install.log" 2>&1 \
+    || k8s_fail "making local-path the default StorageClass failed (log: ${k8s_dir}/local-path-install.log)"
+fi
+
+#
 # Gateway API CRDs (upstream, standard channel). Required before AKO: with GatewayAPI on, its chart renders a
 # GatewayClass of gateway.networking.k8s.io, and HTTPRoute is in that group too. Server-side apply: the CRDs are big.
 #
@@ -338,6 +373,75 @@ if ! kc get crd gateways.gateway.networking.k8s.io > /dev/null 2>&1; then
   log_notify "Installing the Gateway API CRDs ${k8s_gateway_api_version}"
   kc apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${k8s_gateway_api_version}/standard-install.yaml" \
     > "${k8s_dir}/gateway-api-install.log" 2>&1 || k8s_fail "installing the Gateway API CRDs failed (log: ${k8s_dir}/gateway-api-install.log)"
+fi
+
+#
+# cert-manager, after the Gateway API CRDs (its Gateway shim only starts if they exist when the controller starts),
+# with Gateway API support on: an annotated Gateway gets its certificate Secret issued and renewed by it.
+#
+if ! kc -n "${k8s_cert_manager_namespace}" get deployment cert-manager > /dev/null 2>&1; then
+  log_notify "Installing cert-manager ${k8s_cert_manager_version} (Gateway API support on)"
+  helm_k install cert-manager oci://quay.io/jetstack/charts/cert-manager --version "${k8s_cert_manager_version}" \
+    --namespace "${k8s_cert_manager_namespace}" --create-namespace --set crds.enabled=true \
+    --set config.apiVersion=controller.config.cert-manager.io/v1alpha1 --set config.kind=ControllerConfiguration \
+    --set config.gatewayAPI.enabled=true --wait --timeout 10m > "${k8s_dir}/cert-manager-install.log" 2>&1 \
+    || k8s_fail "helm install of cert-manager failed (log: ${k8s_dir}/cert-manager-install.log)"
+fi
+
+#
+# ClusterIssuer on the gw's Vault PKI. The root token is read here the way vcfa_tenant_bootstrap.sh does and only used
+# to set up the AppRole; neither it nor the secret id is ever printed or put on a command line. The AppRole's policy
+# allows signing with ${vault_pki_intermediate_name}/sign/${k8s_vault_pki_role} and nothing else; its
+# secret id never expires, the tokens it logs in with are short-lived (cert-manager logs in again whenever it needs one).
+#
+if [ "${vault_available}" != "true" ]; then
+  log_notify "WARNING: k8s-bootstrap: Vault is not running on gw, no ClusterIssuer ${k8s_cluster_issuer} (Gateways cannot get certificates from Vault)"
+elif ! kc get clusterissuer "${k8s_cluster_issuer}" > /dev/null 2>&1 || ! kc -n "${k8s_cert_manager_namespace}" get secret cert-manager-vault-approle > /dev/null 2>&1; then
+  log_notify "Creating the Vault AppRole ${k8s_vault_approle} and the ClusterIssuer ${k8s_cluster_issuer}"
+  vault_setup_result=$( {
+    export VAULT_ADDR="https://127.0.0.1:8200"
+    VAULT_TOKEN="$(sudo cat "${vault_secret_file_path}" | jq -r '.root_token')"
+    export VAULT_TOKEN
+    set -e -o pipefail
+    vault auth list -tls-skip-verify -format=json | jq -e 'has("approle/")' > /dev/null || vault auth enable -tls-skip-verify approle > /dev/null
+    vault write -tls-skip-verify "${vault_pki_intermediate_name}/roles/${k8s_vault_pki_role}" \
+      issuer_ref="$(vault read -tls-skip-verify -field=default ${vault_pki_intermediate_name}/config/issuers)" \
+      allowed_domains="${domain}" allow_subdomains=true max_ttl="${vault_pki_intermediate_role_max_ttl}" require_cn=false > /dev/null
+    vault policy write -tls-skip-verify "${k8s_vault_policy}" - > /dev/null <<POLICY_EOF
+path "${vault_pki_intermediate_name}/sign/${k8s_vault_pki_role}" {
+  capabilities = ["create", "update"]
+}
+POLICY_EOF
+    vault write -tls-skip-verify "auth/approle/role/${k8s_vault_approle}" token_policies="${k8s_vault_policy}" token_ttl=1h token_max_ttl=4h secret_id_ttl=0 token_no_default_policy=true > /dev/null
+    vault read -tls-skip-verify -field=role_id "auth/approle/role/${k8s_vault_approle}/role-id" > "${k8s_dir}/.vault-role-id"
+    ( umask 077; vault write -tls-skip-verify -f -field=secret_id "auth/approle/role/${k8s_vault_approle}/secret-id" > "${k8s_dir}/.vault-secret-id" )
+    echo ok
+  } 2> "${k8s_dir}/vault-approle.log" )
+  [ "${vault_setup_result}" = "ok" ] || { rm -f "${k8s_dir}/.vault-role-id" "${k8s_dir}/.vault-secret-id"; k8s_fail "setting up the Vault AppRole failed (log: ${k8s_dir}/vault-approle.log)"; }
+  vault_role_id="$(cat "${k8s_dir}/.vault-role-id")"
+  vault_ca_bundle="$(sudo cat /opt/vault/tls/tls.crt | base64 -w0)"
+  ( kc -n "${k8s_cert_manager_namespace}" create secret generic cert-manager-vault-approle --from-file=secretId="${k8s_dir}/.vault-secret-id" --dry-run=client -o yaml | kc apply -f - ) > "${k8s_dir}/clusterissuer.log" 2>&1
+  rm -f "${k8s_dir}/.vault-role-id" "${k8s_dir}/.vault-secret-id"
+  kc apply -f - >> "${k8s_dir}/clusterissuer.log" 2>&1 <<ISSUER_EOF || k8s_fail "creating the ClusterIssuer ${k8s_cluster_issuer} failed (log: ${k8s_dir}/clusterissuer.log)"
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ${k8s_cluster_issuer}
+spec:
+  vault:
+    server: https://${ip_gw}:8200
+    path: ${vault_pki_intermediate_name}/sign/${k8s_vault_pki_role}
+    caBundle: ${vault_ca_bundle}
+    auth:
+      appRole:
+        path: approle
+        roleId: ${vault_role_id}
+        secretRef:
+          name: cert-manager-vault-approle
+          key: secretId
+ISSUER_EOF
+  kc wait --for=condition=Ready "clusterissuer/${k8s_cluster_issuer}" --timeout=180s > /dev/null 2>&1 \
+    || k8s_fail "the ClusterIssuer ${k8s_cluster_issuer} is not Ready (kubectl --kubeconfig ${kubeconfig} describe clusterissuer ${k8s_cluster_issuer})"
 fi
 
 #
@@ -378,4 +482,4 @@ if ! kc -n "${k8s_ako_namespace}" wait --for=condition=Ready pod/ako-0 --timeout
   k8s_fail "AKO ${k8s_ako_version} is installed but pod ako-0 is not Ready (${ako_last_error:-no error in its log}; kubectl --kubeconfig ${kubeconfig} -n ${k8s_ako_namespace} logs ako-0)"
 fi
 
-log_notify "Kubernetes ${k8s_version} cluster ${k8s_cluster_name} ready: ${ready_nodes} nodes ($(for vm_name in ${node_names}; do printf '%s=%s ' "${vm_name}" "${node_ips[${vm_name}]}"; done)), CNI Antrea ${k8s_antrea_version} (NodePortLocal), Gateway API ${k8s_gateway_api_version}, AKO ${k8s_ako_version} (GatewayClass avi-lb), kubeconfig ${kubeconfig}"
+log_notify "Kubernetes ${k8s_version} cluster ${k8s_cluster_name} ready: ${ready_nodes} nodes ($(for vm_name in ${node_names}; do printf '%s=%s ' "${vm_name}" "${node_ips[${vm_name}]}"; done)), CNI Antrea ${k8s_antrea_version} (NodePortLocal), Gateway API ${k8s_gateway_api_version}, AKO ${k8s_ako_version} (GatewayClass avi-lb), local-path StorageClass, cert-manager ${k8s_cert_manager_version}$([ "${vault_available}" = "true" ] && echo " + ClusterIssuer ${k8s_cluster_issuer}"), kubeconfig ${kubeconfig}"

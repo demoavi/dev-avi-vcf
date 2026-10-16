@@ -46,8 +46,18 @@ log_notify "vault-pki-bootstrap.sh started"
 # before the command ever runs, so sudo on the command itself doesn't
 # help; tee's own file-writing happens inside the (sudo'd) tee process
 # instead, which does work.
-if echo "${vcf_a_organizations}" | jq -e 'any(.[]; .namespace.vault_integration.enabled == true)' > /dev/null 2>&1; then
-  log_notify "at least one org needs vault_integration, bootstrapping Vault"
+# Vault is also needed by the shared k8s cluster (spec.sddc.k8s.enabled): its cert-manager ClusterIssuer signs
+# with this PKI (k8s-bootstrap.sh). In that case alone a failure here is logged and the pipeline goes on (the
+# block below runs under set -e and would otherwise abort every deployment that never used Vault before).
+vault_for_orgs="false"
+echo "${vcf_a_organizations}" | jq -e 'any(.[]; .namespace.vault_integration.enabled == true)' > /dev/null 2>&1 && vault_for_orgs="true"
+if [ "${vault_for_orgs}" == "true" ] || [ "${k8s_enabled}" == "true" ]; then
+  if [ "${vault_for_orgs}" == "true" ]; then
+    log_notify "at least one org needs vault_integration, bootstrapping Vault"
+  else
+    log_notify "the k8s cluster needs Vault for its certificates, bootstrapping Vault (a failure is not fatal here)"
+    trap 'log_notify "ERROR: Vault bootstrap failed (needed by the k8s cluster only), continuing without it"; exit 0' ERR
+  fi
   # Fail fast: none of the vault CLI calls below check their own exit
   # status, so without this a failure (e.g. an empty vault_pki_* var)
   # would silently fall through to the final "Vault bootstrap complete"
@@ -137,7 +147,17 @@ CERT_CONF_EOF
   vault write -tls-skip-verify -format=json ${vault_pki_name}/root/sign-intermediate issuer_ref="${vault_pki_cert_issuer_name}" csr=@${vault_pki_intermediate_cert_path} format=pem_bundle ttl="${vault_pki_intermediate_max_lease_ttl}" | jq -r '.data.certificate' | tee ${vault_pki_intermediate_cert_path_signed}
   vault write -tls-skip-verify ${vault_pki_intermediate_name}/intermediate/set-signed certificate=@${vault_pki_intermediate_cert_path_signed}
   vault write -tls-skip-verify ${vault_pki_intermediate_name}/roles/${vault_pki_intermediate_role_name} issuer_ref="$(vault read -tls-skip-verify -field=default ${vault_pki_intermediate_name}/config/issuers)" allowed_domains="${domain}" allow_subdomains=${vault_pki_intermediate_role_allow_subdomains} max_ttl="${vault_pki_intermediate_role_max_ttl}"
+  # The root CA's public certificate for the org API (gw-org-api.py returns it in the "certificates" list as vault-root-ca;
+  # the desktop adds it to its trust store). Vault serves it without authentication. Never fatal: only a convenience for clients.
+  if curl -sk -m 10 "https://127.0.0.1:8200/v1/${vault_pki_name}/ca/pem" | grep -q "BEGIN CERTIFICATE" \
+     && sudo mkdir -p /etc/gw-org-api \
+     && curl -sk -m 10 "https://127.0.0.1:8200/v1/${vault_pki_name}/ca/pem" | sudo tee /etc/gw-org-api/vault-root-ca.pem > /dev/null \
+     && sudo chmod 644 /etc/gw-org-api/vault-root-ca.pem; then
+    log_notify "Vault root CA published for the org API (/etc/gw-org-api/vault-root-ca.pem)"
+  else
+    log_notify "WARNING: could not publish the Vault root CA for the org API"
+  fi
   log_notify "Vault bootstrap complete"
 else
-  log_notify "no org needs vault_integration, skipping Vault bootstrap"
+  log_notify "no org needs vault_integration and the k8s cluster is not enabled, skipping Vault bootstrap"
 fi

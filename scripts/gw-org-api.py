@@ -3,8 +3,11 @@
 
   GET  /orgs  -> {"orgs": ["org-2", "org-3", ...]}   unassigned orgs
   POST /org   -> {"org_name": "org-1", "org_password": "...", <info fields>,
-                  "bookmarks": [{"name": "vCenter", "url": "https://..."}, ...]}
-                 where the info fields are the config's "info" object (e.g.
+                  "bookmarks": [{"name": "vCenter", "url": "https://..."}, ...],
+                  "certificates": [{"name": "vault-root-ca", "pem": "-----BEGIN CERTIFICATE-----\n..."}, ...]}
+                 where certificates are the CA certificates the client should add to its trust store (e.g. the Vault
+                 root CA that signs the lab's certificates; an empty list when there are none, e.g. no Vault on the
+                 gw) and the info fields are the config's "info" object (e.g.
                  the SSO domain) and bookmarks the config's "bookmarks" list
                  (the services' URLs) - the same for every org, except that a
                  bookmark url may contain "{org_name}", which is replaced by the
@@ -17,8 +20,8 @@ HTTPS only (self-signed cert), HTTP basic auth on every request. An org is
 a later GET /orgs no longer lists it); there is deliberately no release.
 
 Everything it needs is in one root-only JSON config, re-read per request:
-  {"username", "password", "port", "cert", "key", "home_base",
-   "info": {...}, "bookmarks": [{"name", "url"}, ...],
+  {"username", "password", "port", "cert", "key", "home_base", 
+   "info": {...}, "bookmarks": [{"name", "url"}, ...], "certificates": [{"name", "file"}, ...],
    "orgs": [{"name", "password"}, ...]}
 rendered by gw-org-api.sh (which owns the org list/password derivation - the
 same formula as gw-accounts.sh - so none of that is duplicated here).
@@ -75,6 +78,31 @@ def bookmarks_for(cfg, org_name):
     org that was just assigned."""
     quoted = urllib.parse.quote(org_name, safe="")
     return [{**b, "url": b["url"].replace("{org_name}", quoted)} for b in cfg.get("bookmarks", [])]
+
+
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def certificates_for(cfg):
+    """The CA certificates to hand out, [{"name", "pem"}, ...], from the config's "certificates" list of
+    {"name", "file"}. Each file is read per request: e.g. the Vault root CA only appears once vault-pki-bootstrap.sh has
+    run - after the config was rendered - and a gw without Vault never has one, so an entry whose file is missing is
+    skipped, as is a file that is not a certificate or that holds any private-key material, and a name that is not a
+    plain file-name-safe slug (clients use it as file name and trust-store nickname). Public certificates only: the
+    client adds them to its trust store so browsers and tools accept the lab's certificates."""
+    out = []
+    for entry in cfg.get("certificates", []):
+        name, path = entry.get("name", ""), entry.get("file", "")
+        if not NAME_RE.fullmatch(name) or not path:
+            continue
+        try:
+            with open(path) as f:
+                pem = f.read().strip()
+        except OSError:
+            continue
+        if "BEGIN CERTIFICATE" in pem and "PRIVATE KEY" not in pem:
+            out.append({"name": name, "pem": pem + "\n"})
+    return out
 
 
 def claim_next(cfg, client_ip):
@@ -153,7 +181,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": "no org available"})
             sys.stderr.write(f"assigned {org['name']} to {self.client_address[0]}\n")
             return self._send(200, {"org_name": org["name"], "org_password": org["password"],
-                                    **cfg.get("info", {}), "bookmarks": bookmarks_for(cfg, org["name"])})
+                                    **cfg.get("info", {}), "bookmarks": bookmarks_for(cfg, org["name"]),
+                                    "certificates": certificates_for(cfg)})
         return self._send(404, {"error": "not found"})
 
     def do_GET(self):
