@@ -84,10 +84,22 @@ resources:
                   - kind: Secret
                     group: ''
                     name: ${env.deploymentName}-cert
+  AVI_ROUTE_BACKEND_CRD:
+    type: CCI.Supervisor.Resource
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: ako.vmware.com/v1alpha1
+        kind: RouteBackendExtension
+        metadata:
+          name: ${env.deploymentName}-backend-crd
+        spec:
+          lbAlgorithm: LB_ALGORITHM_ROUND_ROBIN
   AVI_HTTPROUTE:
     type: CCI.Supervisor.Resource
     dependsOn:
       - AVI_GATEWAY
+      - AVI_ROUTE_BACKEND_CRD
     properties:
       context: ${resource.Namespace.id}
       manifest:
@@ -109,6 +121,12 @@ resources:
               backendRefs:
                 - name: ${env.deploymentName}-lb
                   port: 80
+                  filters:
+                    - type: ExtensionRef
+                      extensionRef:
+                        group: ako.vmware.com
+                        kind: RouteBackendExtension
+                        name: ${env.deploymentName}-backend-crd
   CERT_REQUEST:
     type: CCI.Supervisor.Resource
     properties:
