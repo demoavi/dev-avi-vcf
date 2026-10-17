@@ -1,17 +1,17 @@
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  name: my-http-app-v1
+  name: http-route-1
 spec:
   parentRefs:
-    - name: gw-multiple-listeners
+    - name: gw-1
   rules:
     - filters:
         - type: ExtensionRef
           extensionRef:
             group: ako.vmware.com
             kind: L7Rule
-            name: l7-rule-waf-enforcement
+            name: l7-rule-waf-detection
       matches:
         - path:
             type: PathPrefix
