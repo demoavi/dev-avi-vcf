@@ -21,6 +21,15 @@
 #     shared organization, so nothing lists another org; a final check logs in as the first org and verifies it
 #     cannot see the second one's repo or user.
 #
+# Offline-first: the chart (git_chart_file, a .tgz) and the Gitea image (git_image_file, <name>_<tag>.tar) come from the
+# gw-tools ISO. supervisor-bootstrap.sh - which runs before this phase - pushes the image to Harbor
+# (<harbor>/<git_harbor_project>/<name>:<tag>); the Gitea pods then pull it from there (chart value image.fullOverride),
+# after the cluster's nodes were made to trust Harbor's self-signed CA (/home/ubuntu/harbor-ca.crt, saved by
+# supervisor-bootstrap.sh). Anything missing falls back to the Internet with a warning: no chart file -> the chart
+# repo (git_helm_repo_url), image not in Harbor / no CA / a node cannot be set up -> the upstream image.
+# Test knobs (not used in a deployment): GIT_HARBOR_HOST (a registry host[:port] to use instead of Harbor's FQDN) and
+# HARBOR_CA_CERT_PATH.
+#
 # Idempotent (existing release, users and repos are left alone; passwords of existing users are re-set to the derived
 # value). NON-FATAL like k8s-bootstrap.sh: every failure is logged (log_notify ERROR) and the script exits 0.
 #
@@ -62,14 +71,61 @@ kc get clusterissuer "${k8s_cluster_issuer}" > /dev/null 2>&1 && tls_enabled="tr
 git_scheme="https"; [ "${tls_enabled}" == "true" ] || git_scheme="http"
 
 #
+# Where the Gitea image comes from: Harbor if it has it, else upstream. <name>_<tag>.tar -> <name>:<tag>.
+#
+image_base="$(basename "${git_image_file}" .tar.gz)"; image_base="$(basename "${image_base}" .tar)"
+image_name="${image_base%%_*}"; image_tag="${image_base#*_}"
+harbor_host="${GIT_HARBOR_HOST:-harbor.${avi_subdomain}.${domain}}"
+harbor_ca_file="${HARBOR_CA_CERT_PATH:-/home/ubuntu/harbor-ca.crt}"
+harbor_image=""
+harbor_why=""
+if [ "${image_name}" == "${image_base}" ]; then
+  harbor_why="git_image_file ${git_image_file} does not follow <name>_<tag>.tar"
+elif [ ! -s "${harbor_ca_file}" ]; then
+  harbor_why="no Harbor CA at ${harbor_ca_file} (Harbor not deployed on this gw?)"
+else
+  harbor_code=$(curl -s -m 15 --cacert "${harbor_ca_file}" -o /dev/null -w '%{http_code}' \
+    -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json' \
+    "https://${harbor_host}/v2/${git_harbor_project}/${image_name}/manifests/${image_tag}")
+  if [ "${harbor_code}" == "200" ]; then
+    harbor_image="${harbor_host}/${git_harbor_project}/${image_name}:${image_tag}"
+  else
+    harbor_why="${harbor_host}/${git_harbor_project}/${image_name}:${image_tag} is not there (HTTP ${harbor_code})"
+  fi
+fi
+
+# The nodes' containerd verifies Harbor's certificate against the system store: add Harbor's CA to every node (a no-op
+# when it is already there) and restart containerd (running pods are not affected).
+ssh_key="${k8s_dir}/id_ed25519"
+node_ssh() { local ip=$1; shift; ssh -i "${ssh_key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ConnectTimeout=8 -o LogLevel=ERROR "${k8s_ssh_user}@${ip}" "$@"; }
+if [ -n "${harbor_image}" ]; then
+  for node_ip in $(kc get nodes -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}'); do
+    if node_ssh "${node_ip}" "sudo cmp -s /usr/local/share/ca-certificates/harbor-ca.crt -" < "${harbor_ca_file}" > /dev/null 2>&1; then
+      continue
+    fi
+    if ! node_ssh "${node_ip}" "sudo tee /usr/local/share/ca-certificates/harbor-ca.crt > /dev/null && sudo update-ca-certificates > /dev/null 2>&1 && sudo systemctl restart containerd" < "${harbor_ca_file}" > /dev/null 2>&1; then
+      harbor_why="could not make node ${node_ip} trust Harbor's CA"
+      harbor_image=""
+      break
+    fi
+    log_only "node ${node_ip} now trusts Harbor's CA"
+  done
+fi
+if [ -n "${harbor_image}" ]; then
+  log_notify "Gitea image from Harbor: ${harbor_image}"
+else
+  log_notify "WARNING: git-bootstrap: Gitea image NOT from Harbor (${harbor_why}), the nodes will pull docker.gitea.com/gitea from the Internet"
+fi
+
+#
 # Gitea (helm). Values as a JSON file (helm reads JSON), root-only: it holds the admin password.
 #
 kc get namespace "${git_namespace}" > /dev/null 2>&1 || kc create namespace "${git_namespace}" > /dev/null || git_fail "unable to create namespace ${git_namespace}"
 values_file="${k8s_dir}/gitea-values.json"
 ( umask 077
   jq -n --arg fqdn "${git_fqdn}" --arg root "${git_scheme}://${git_fqdn}/" --arg size "${git_pvc_size}" \
-        --arg admin "${git_admin_user}" --arg pw "${generic_password}" --arg email "gitea@${domain}" \
-    '{image: {rootless: true},
+        --arg admin "${git_admin_user}" --arg pw "${generic_password}" --arg email "gitea@${domain}" --arg himg "${harbor_image}" \
+    '{image: ({rootless: true} + (if $himg != "" then {fullOverride: $himg} else {} end)),
       persistence: {enabled: true, size: $size},
       "postgresql-ha": {enabled: false}, postgresql: {enabled: false}, "valkey-cluster": {enabled: false}, valkey: {enabled: false},
       gitea: {
@@ -83,9 +139,18 @@ values_file="${k8s_dir}/gitea-values.json"
           service: {DISABLE_REGISTRATION: true, REQUIRE_SIGNIN_VIEW: true, DEFAULT_USER_VISIBILITY: "private", DEFAULT_ORG_VISIBILITY: "private"},
           "service.explore": {REQUIRE_SIGNIN_VIEW: true, DISABLE_USERS_PAGE: true, DISABLE_ORGANIZATIONS_PAGE: true},
           repository: {DEFAULT_PRIVATE: "private", FORCE_PRIVATE: true, DEFAULT_BRANCH: "main"}}}}' > "${values_file}" )
+chart_file="/home/ubuntu/${git_chart_file}"
+if [ -s "${chart_file}" ]; then
+  chart_args=("${chart_file}")
+  chart_source="${git_chart_file} from the gw-tools ISO"
+else
+  chart_args=(gitea --repo "${git_helm_repo_url}" --version "${git_chart_version}")
+  chart_source="${git_helm_repo_url} (no ${chart_file}: the Internet)"
+  log_notify "WARNING: git-bootstrap: ${chart_file} not found (was it added to the gw-tools Iso CR?), fetching the chart from ${git_helm_repo_url}"
+fi
 if ! helm_k status gitea -n "${git_namespace}" > /dev/null 2>&1; then
-  log_notify "Installing Gitea (chart ${git_chart_version}) in ${git_namespace}, ${git_pvc_size} on local-path, ${git_scheme}://${git_fqdn}"
-  helm_k install gitea gitea --repo "${git_helm_repo_url}" --version "${git_chart_version}" -f "${values_file}" \
+  log_notify "Installing Gitea (chart ${chart_source}) in ${git_namespace}, ${git_pvc_size} on local-path, ${git_scheme}://${git_fqdn}"
+  helm_k install gitea "${chart_args[@]}" -f "${values_file}" \
     --namespace "${git_namespace}" --wait --timeout 15m > "${k8s_dir}/gitea-install.log" 2>&1 \
     || { rm -f "${values_file}"; git_fail "helm install of Gitea failed (log: ${k8s_dir}/gitea-install.log)"; }
 fi

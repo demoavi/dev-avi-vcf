@@ -84,7 +84,10 @@ fi
 # past a failed phase would just fail more confusingly, several phases
 # later, with a much less obvious root cause.
 #
-for phase in gw-accounts gw-org-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc k8s-bootstrap git-bootstrap supervisor-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap; do
+# supervisor-bootstrap runs before k8s-bootstrap/git-bootstrap on purpose: it creates Harbor and pushes the ISO-delivered
+# images (Gitea's among them), which git-bootstrap then pulls from Harbor instead of the Internet. Nothing in the
+# Supervisor depends on the k8s cluster.
+for phase in gw-accounts gw-org-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap k8s-bootstrap git-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap; do
   bash "${script_dir}/${phase}.sh" "${jsonFile}"
   phase_exit=$?
   if [ ${phase_exit} -ne 0 ]; then

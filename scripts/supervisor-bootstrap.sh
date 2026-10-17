@@ -1402,9 +1402,16 @@ open('${rendered_values_file}', 'w').write(text)
                 fi
                 image_name="$(basename "${image_file}" .tar.gz)"
                 image_name="$(basename "${image_name}" .tar)"
+                # <name>_<tag>.tar(.gz) is pushed as <name>:<tag> (gitea_1.27.0-rootless.tar -> gitea:1.27.0-rootless): the
+                # first underscore splits, so an image name must not contain one. No underscore: :latest, as before.
+                image_tag="latest"
+                if [[ "${image_name}" == *_* ]]; then
+                  image_tag="${image_name#*_}"
+                  image_name="${image_name%%_*}"
+                fi
                 if skopeo copy --dest-tls-verify=false --dest-creds "admin:${harbor_admin_password}" \
-                    "oci-archive:${image_path}" "docker://${harbor_ip}/${harbor_registry_project}/${image_name}:latest"; then
-                  log_notify "Pushed ${image_file} to Harbor as ${harbor_registry_project}/${image_name}:latest (pull via ${harbor_hostname}/${harbor_registry_project}/${image_name}:latest)"
+                    "oci-archive:${image_path}" "docker://${harbor_ip}/${harbor_registry_project}/${image_name}:${image_tag}"; then
+                  log_notify "Pushed ${image_file} to Harbor as ${harbor_registry_project}/${image_name}:${image_tag} (pull via ${harbor_hostname}/${harbor_registry_project}/${image_name}:${image_tag})"
                 else
                   log_notify "ERROR: failed to push ${image_file} to Harbor"
                 fi
