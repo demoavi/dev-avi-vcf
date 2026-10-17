@@ -487,3 +487,16 @@ blueprint_api() {
   response_code=$(tail -n1 <<< "$response")
   [[ ${response_code} == 2[0-9][0-9] ]]
 }
+# find_org_manifest <folder> <kind> <metadata.name> - prints the path of the first single-document *.yaml file in
+# <folder> (not recursive) whose Kind and metadata.name match, so callers find a manifest by content and not by file
+# name. The folder can be owned by another user, hence sudo. Returns 1 if there is none.
+find_org_manifest() {
+  local f
+  for f in $(sudo find "$1" -maxdepth 1 -name '*.yaml' | sort); do
+    [ "$(sudo yq 'document_index' "$f" | tail -1)" == "0" ] || continue
+    if [ "$(sudo yq ".kind == \"$2\" and .metadata.name == \"$3\"" "$f")" == "true" ]; then
+      echo "$f"; return 0
+    fi
+  done
+  return 1
+}
