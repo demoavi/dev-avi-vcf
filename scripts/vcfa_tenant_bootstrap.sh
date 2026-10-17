@@ -312,18 +312,31 @@ else
         # end of the rendering loop in vcfa_provider_bootstrap.sh), not
         # ubuntu - these reads need sudo. The /tmp/*.yaml copies below are
         # ubuntu-owned as usual, so the yq -i edits on those don't need it.
-        secret_kind="$(sudo yq '.kind' ${org_yaml_folder}/secret_vault.yaml)"
-        secret_name="$(sudo yq '.metadata.name' ${org_yaml_folder}/secret_vault.yaml)"
-        issuer_kind="$(sudo yq '.kind' ${org_yaml_folder}/vault_issuer.yaml)"
-        if [ "${secret_kind}" != "Secret" ] || [ "${secret_name}" != "cert-manager-vault-token" ] || [ "${issuer_kind}" != "Issuer" ]; then
-          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: secret_vault.yaml/vault_issuer.yaml have unexpected kind/name (secret_kind=${secret_kind}, secret_name=${secret_name}, issuer_kind=${issuer_kind}), skipping vault bootstrap for ${org_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+        # The two manifests are found by CONTENT, not by file name (so they can be renamed or moved around in
+        # dev-avi-vcf/yamls/): a single-document file of Kind Secret named cert-manager-vault-token, and one of
+        # Kind Issuer named vault-issuer. Those two names are therefore a contract - the manifests carry a
+        # "do not change" comment.
+        find_org_manifest() {
+          local f
+          for f in $(sudo find "${org_yaml_folder}" -maxdepth 1 -name '*.yaml' | sort); do
+            [ "$(sudo yq 'document_index' "$f" | tail -1)" == "0" ] || continue
+            if [ "$(sudo yq ".kind == \"$1\" and .metadata.name == \"$2\"" "$f")" == "true" ]; then
+              echo "$f"; return 0
+            fi
+          done
+          return 1
+        }
+        vault_secret_file="$(find_org_manifest Secret cert-manager-vault-token)"
+        vault_issuer_file="$(find_org_manifest Issuer vault-issuer)"
+        if [ -z "${vault_secret_file}" ] || [ -z "${vault_issuer_file}" ]; then
+          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no manifest of Kind Secret named cert-manager-vault-token and/or Kind Issuer named vault-issuer found in ${org_yaml_folder} (secret file: '${vault_secret_file}', issuer file: '${vault_issuer_file}'), skipping vault bootstrap for ${org_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
         else
-          sudo cp ${org_yaml_folder}/secret_vault.yaml "/tmp/${org_name}-secret_vault.yaml"
+          sudo cp "${vault_secret_file}" "/tmp/${org_name}-secret_vault.yaml"
           sudo chown ubuntu:ubuntu "/tmp/${org_name}-secret_vault.yaml"
           yq -i ".metadata.namespace = \"${ns_name}\"" "/tmp/${org_name}-secret_vault.yaml"
           yq -i ".data.token = \"$(echo -n $(jq -c -r .root_token ${vault_secret_file_path}) | base64)\"" "/tmp/${org_name}-secret_vault.yaml"
 
-          sudo cp ${org_yaml_folder}/vault_issuer.yaml "/tmp/${org_name}-vault_issuer.yaml"
+          sudo cp "${vault_issuer_file}" "/tmp/${org_name}-vault_issuer.yaml"
           sudo chown ubuntu:ubuntu "/tmp/${org_name}-vault_issuer.yaml"
           yq -i ".metadata.namespace = \"${ns_name}\"" "/tmp/${org_name}-vault_issuer.yaml"
           yq -i ".spec.vault.server = \"https://${ip_gw}:8200\"" "/tmp/${org_name}-vault_issuer.yaml"
@@ -337,6 +350,10 @@ else
           kubectl_out=$( { kubectl apply -f "/tmp/${org_name}-secret_vault.yaml" && kubectl apply -f "/tmp/${org_name}-vault_issuer.yaml"; } 2>&1 )
           if [ $? -eq 0 ]; then
             log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: vault secret + issuer applied for ${org_name} in namespace ${ns_name}" "${log_file}" "" ""
+            # Only these two placeholder templates leave the org's yaml folder once applied (they are meaningless to
+            # the org user); only on success, so a failed apply can still be retried. vcfa_provider_bootstrap.sh
+            # copies them again on its next run.
+            sudo rm -f "${vault_secret_file}" "${vault_issuer_file}"
           else
             log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: vault secret/issuer apply FAILED for ${org_name} in namespace ${ns_name}, output: ${kubectl_out}" "${log_file}" "${slack_webhook}" "${google_webhook}"
           fi

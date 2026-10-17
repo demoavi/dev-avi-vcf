@@ -1,7 +1,7 @@
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
-  name: vault-issuer
+  name: vault-issuer # DO NOT CHANGE this name: vcfa_tenant_bootstrap.sh finds this manifest by Kind Issuer + this name (the file itself can be renamed)
   namespace: namespace
 spec:
   vault:
@@ -10,5 +10,5 @@ spec:
     caBundle: caBundle
     auth:
       tokenSecretRef:
-        name: cert-manager-vault-token
+        name: cert-manager-vault-token # must match the Secret (secret_vault.yaml)
         key: token
