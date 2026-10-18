@@ -87,7 +87,11 @@ fi
 # supervisor-bootstrap runs before k8s-bootstrap/git-bootstrap on purpose: it creates Harbor and pushes the ISO-delivered
 # images (Gitea's among them), which git-bootstrap then pulls from Harbor instead of the Internet. Nothing in the
 # Supervisor depends on the k8s cluster.
-for phase in gw-accounts gw-org-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap k8s-bootstrap git-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap; do
+# gw-blueprint-api (gw-local, both use cases) runs right after gw-org-api: it needs nothing from the SDDC build, and it
+# creates the HMAC secret and certificate the Supervisor side needs. supervisor-blueprint-watcher runs LAST: it needs the
+# org namespaces and their labels (vcfa_tenant_bootstrap) and the uploaded blueprints, so the watcher's first post already
+# finds them and fills the dropdown (the blueprint rewrite itself is gw-blueprint-api's runtime job, not a step).
+for phase in gw-accounts gw-org-api gw-blueprint-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap k8s-bootstrap git-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap supervisor-blueprint-watcher; do
   bash "${script_dir}/${phase}.sh" "${jsonFile}"
   phase_exit=$?
   if [ ${phase_exit} -ne 0 ]; then
