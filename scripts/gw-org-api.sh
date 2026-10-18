@@ -100,21 +100,38 @@ done < <(echo "${vcf_a_organizations}" | jq -r '.[].name')
 # tenant URL is per org); it is kept as a literal placeholder in the config.
 sso_domain=$(jq -c -r '.sddc.vcenter.ssoDomain // empty' "${jsonFile}")
 info_json=$(jq -n -c --arg sso "${sso_domain}" '{sso_domain: $sso}')
+# Every bookmark carries a type: "Infrastructure Components" (the SDDC consoles) or "Application Components" (what the
+# student uses on top: Git, Harbor, the Vault CA). The application ones are listed when they are CONFIGURED to be deployed
+# (same conditions as their own bootstrap scripts), not when they are up yet - this script runs first, and the student
+# desktop checks natively whether each one answers. Lines: <type>|<label>|<url>; a url may contain {org_name}
+# (see above).
+infra_type="Infrastructure Components"
+app_type="Application Components"
+bookmark_lines=""
+add_bookmark() { bookmark_lines="${bookmark_lines}${1}|${2}|${3}"$'\n'; }
+add_bookmark "${infra_type}" "vCenter" "https://${basename_sddc}-vc01.${domain}/ui/"
+add_bookmark "${infra_type}" "NSX" "https://${basename_sddc}-nsx01.${domain}"
+add_bookmark "${infra_type}" "Avi" "https://${basename_sddc}-avi.${domain}"
+add_bookmark "${infra_type}" "VCF Automation" "https://${basename_sddc}-auto-vip.${domain}/tenant/{org_name}/"
 # Git (spec.sddc.git.enabled): straight to the org's own repo, git.<avi subdomain>.<domain>/<org>/<repo>
-git_bookmark=""
-[ "${git_enabled}" == "true" ] && git_bookmark="Git|${git_fqdn_prefix}.${avi_subdomain}|/{org_name}/${git_repo_name}"
+[ "${git_enabled}" == "true" ] && add_bookmark "${app_type}" "Git server" "https://${git_fqdn_prefix}.${avi_subdomain}.${domain}/{org_name}/${git_repo_name}"
+# Harbor: deployed as a supervisor_services entry of type harbor (supervisor-bootstrap.sh)
+echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor")' >/dev/null 2>&1 \
+  && add_bookmark "${app_type}" "Harbor registry" "https://harbor.${avi_subdomain}.${domain}"
+# Vault (vault-pki-bootstrap.sh's own condition: an org with vault_integration, or the k8s cluster): by the gw's IP, same
+# derivation as the certificate's SAN above, Vault's listener port.
+vault_for_orgs="false"
+echo "${vcf_a_organizations}" | jq -e 'any(.[]; .namespace.vault_integration.enabled == true)' >/dev/null 2>&1 && vault_for_orgs="true"
+if [ "${vault_for_orgs}" == "true" ] || [ "${k8s_enabled}" == "true" ]; then
+  vault_ip=$(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1)
+  [ -n "${vault_ip}" ] && add_bookmark "${app_type}" "Private Certificate Authority (Vault)" "https://${vault_ip}:8200"
+fi
 bookmarks_json="[]"
-while IFS='|' read -r bookmark_name bookmark_host bookmark_path
+while IFS='|' read -r bookmark_type bookmark_name bookmark_url
 do
   [ -n "${bookmark_name}" ] || continue
-  bookmarks_json=$(jq -c --arg n "${bookmark_name}" --arg u "https://${bookmark_host}.${domain}${bookmark_path}" '. += [{name: $n, url: $u}]' <<< "${bookmarks_json}")
-done <<BOOKMARKS
-vCenter|${basename_sddc}-vc01|/ui/
-NSX|${basename_sddc}-nsx01
-Avi|${basename_sddc}-avi
-VCF Automation|${basename_sddc}-auto-vip|/tenant/{org_name}/
-${git_bookmark}
-BOOKMARKS
+  bookmarks_json=$(jq -c --arg t "${bookmark_type}" --arg n "${bookmark_name}" --arg u "${bookmark_url}" '. += [{name: $n, url: $u, type: $t}]' <<< "${bookmarks_json}")
+done <<< "${bookmark_lines}"
 new_conf=$(API_USER="${org_api_username}" API_PW="${org_api_password}" jq -n -c \
   --argjson orgs "${orgs_json}" --argjson port "${org_api_port}" --argjson info "${info_json}" --argjson bookmarks "${bookmarks_json}" \
   --arg cert "${conf_dir}/cert.pem" --arg key "${conf_dir}/key.pem" --arg ca "${conf_dir}/vault-root-ca.pem" \
