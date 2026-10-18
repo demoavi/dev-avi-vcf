@@ -1,0 +1,21 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: http-route-migration
+spec:
+  parentRefs:
+    - name: gw-1
+  hostnames:
+    - "migration.mydomain.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: svc-v1
+          port: 80
+          weight: 90
+        - name: svc-v2
+          port: 80
+          weight: 10

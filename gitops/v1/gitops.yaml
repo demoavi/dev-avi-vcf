@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-front3
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: app-selector-v3
+  template:
+    metadata:
+      name: web-front3
+      labels:
+        app: app-selector-v3
+    spec:
+      containers:
+        - name: web-front3
+          image: tacobayle/busybox-v3
+          command: [ "sh", "-c"]
+          args:
+            - while true; do
+              echo -e "HTTP/1.1 200 OK\n\n$(date)\nApp version is $(printenv AppVersion)\nNode is $(printenv MY_NODE_NAME)\nPod is $(printenv MY_POD_NAME)\nNamespace is $(printenv MY_POD_NAMESPACE)\nPod IP is $(printenv MY_POD_IP)\nPod Service account is $(printenv MY_POD_SERVICE_ACCOUNT)" | nc -l -p 8080;
+              done;
+          env:
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MY_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: MY_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: MY_POD_SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-v3
+spec:
+  selector:
+    app: app-selector-v3
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: Gateway
+metadata:
+  name: gw-gitops
+spec:
+  gatewayClassName: avi-lb
+  listeners:
+    - name: foo-http
+      protocol: HTTP
+      port: 80
+      hostname: "*.mydomain.com"
+    - name: bar-https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.mydomain.com"
+      tls:
+        certificateRefs:
+          - kind: Secret
+            group: ""
+            name: cert01
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: HTTPRoute
+metadata:
+  name: http-route-gitops
+spec:
+  parentRefs:
+    - name: gw-gitops
+  hostnames:
+    - "gw-v3.mydomain.com"
+  rules:
+    - filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: ako.vmware.com
+            kind: L7Rule
+            name: gw-sec
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: svc-v3
+          port: 80
