@@ -616,6 +616,67 @@ do
     # render exactly as before, then hand real ownership to the org at
     # the end below.
     #
+    # Renders ONE yaml file (any number of documents) for an org: copies $1 to $2, then rewrites each document by its own
+    # Kind with the org's domain $3 (hostnames/URLs), then - only when $4 is "true" - points the container images of
+    # Deployments (the filter is a no-op on every other document) to the Harbor registry. Used for dev-avi-vcf/yamls
+    # (domain <org>-vks.<domain>) and dev-avi-vcf/gitops (domain <org>-gitops.<domain>); both pass harbor_deployed as $4.
+    render_org_yaml() {
+      local yaml_src="$1" yaml_dst="$2" render_domain="$3" render_images="$4"
+      local last_di doc_count di i this_kind rule_count httproute_name hostrule_name rbe_name
+      cp "$yaml_src" "$yaml_dst"
+      # Per-document dispatch - see vcf_bootstrap.sh's own copy of this
+      # same logic (before this merge) for the full rationale: looping
+      # per document index and dispatching each one on ITS OWN kind
+      # handles any Kind/ordering combination in a multi-doc file.
+      last_di=$(yq 'document_index' "$yaml_dst" | tail -1)
+      doc_count=$((last_di + 1))
+      for ((di = 0; di < doc_count; di++)); do
+        this_kind="$(yq "select(di == $di) | .kind" "$yaml_dst")"
+        case "$this_kind" in
+          Ingress)
+            rule_count=$(yq "select(di == $di) | .spec.rules | length" "$yaml_dst")
+            for ((i = 0; i < rule_count; i++)); do
+              yq -i "(select(di == $di) | .spec.rules[$i].host) = \"v$((i + 1)).${render_domain}\"" "$yaml_dst"
+            done
+            ;;
+          HTTPRoute)
+            httproute_name="$(yq "select(di == $di) | .metadata.name" "$yaml_dst")"
+            yq -i "(select(di == $di)) |= (del(.spec.hostnames) | .spec.hostnames[0] = \"${httproute_name}.${render_domain}\")" "$yaml_dst"
+            ;;
+          Gateway)
+            yq -i "(select(di == $di) | .spec.listeners[].hostname) = \"*.${render_domain}\"" "$yaml_dst"
+            ;;
+          HostRule)
+            hostrule_name="$(yq "select(di == $di) | .metadata.name" "$yaml_dst")"
+            yq -i "(select(di == $di) | .spec.virtualhost.fqdn) = \"${hostrule_name}.${render_domain}\"" "$yaml_dst"
+            ;;
+          RouteBackendExtension)
+            rbe_name="$(yq "select(di == $di) | .metadata.name" "$yaml_dst")"
+            yq -i "(select(di == $di) | .spec.backendTLS.domainName[0]) = \"${rbe_name}.${render_domain}\"" "$yaml_dst"
+            ;;
+          *)
+            # HealthMonitor, L7Rule, Service, Deployment - no per-Kind
+            # hostname/URL rewrite for this document. The Harbor image
+            # rewrite below runs unconditionally instead of as a case
+            # here - see that comment for why.
+            ;;
+        esac
+      done
+      # Runs on the whole file at once (not per-document like the loop
+      # above), unconditionally - the select(has("containers")) filter
+      # already makes it a safe no-op on every document that isn't a
+      # Deployment (or anything else without a
+      # .containers/.initContainers path), regardless of position in
+      # the file or of any document's own kind.
+      if [ "${render_images}" == "true" ]; then
+        yq -i '(.. | select(has("containers")) | .containers[], .. | select(has("initContainers")) | .initContainers[] | select(.image != null)).image |= sub("^.*/", "'"${harbor_registry_fqdn}"'/registry/")' "$yaml_dst"
+      fi
+    }
+
+    # Harbor deployed on this gw? Its CA is saved by supervisor-bootstrap.sh only then (same signal as git-bootstrap.sh).
+    # Without Harbor the rendered files keep their upstream images instead of pointing to a registry that is not there.
+    harbor_deployed="false"
+    [ -s "${HARBOR_CA_CERT_PATH:-/home/ubuntu/harbor-ca.crt}" ] && harbor_deployed="true"
     if [ -d /home/ubuntu/dev-avi-vcf/yamls ]; then
       org_yaml_folder="/home/${org_name}/${yaml_folder}"
       sudo mkdir -p "${org_yaml_folder}"
@@ -623,55 +684,43 @@ do
       org_full_domain="${org_name}-vks.${domain}"
       harbor_registry_fqdn="harbor.${avi_subdomain}.${domain}"
       for yaml_src in /home/ubuntu/dev-avi-vcf/yamls/*.yaml; do
-        yaml_dst="${org_yaml_folder}/$(basename "$yaml_src")"
-        cp "$yaml_src" "$yaml_dst"
-        # Per-document dispatch - see vcf_bootstrap.sh's own copy of this
-        # same logic (before this merge) for the full rationale: looping
-        # per document index and dispatching each one on ITS OWN kind
-        # handles any Kind/ordering combination in a multi-doc file.
-        last_di=$(yq 'document_index' "$yaml_dst" | tail -1)
-        doc_count=$((last_di + 1))
-        for ((di = 0; di < doc_count; di++)); do
-          this_kind="$(yq "select(di == $di) | .kind" "$yaml_dst")"
-          case "$this_kind" in
-            Ingress)
-              rule_count=$(yq "select(di == $di) | .spec.rules | length" "$yaml_dst")
-              for ((i = 0; i < rule_count; i++)); do
-                yq -i "(select(di == $di) | .spec.rules[$i].host) = \"v$((i + 1)).${org_full_domain}\"" "$yaml_dst"
-              done
-              ;;
-            HTTPRoute)
-              httproute_name="$(yq "select(di == $di) | .metadata.name" "$yaml_dst")"
-              yq -i "(select(di == $di)) |= (del(.spec.hostnames) | .spec.hostnames[0] = \"${httproute_name}.${org_full_domain}\")" "$yaml_dst"
-              ;;
-            Gateway)
-              yq -i "(select(di == $di) | .spec.listeners[].hostname) = \"*.${org_full_domain}\"" "$yaml_dst"
-              ;;
-            HostRule)
-              hostrule_name="$(yq "select(di == $di) | .metadata.name" "$yaml_dst")"
-              yq -i "(select(di == $di) | .spec.virtualhost.fqdn) = \"${hostrule_name}.${org_full_domain}\"" "$yaml_dst"
-              ;;
-            RouteBackendExtension)
-              rbe_name="$(yq "select(di == $di) | .metadata.name" "$yaml_dst")"
-              yq -i "(select(di == $di) | .spec.backendTLS.domainName[0]) = \"${rbe_name}.${org_full_domain}\"" "$yaml_dst"
-              ;;
-            *)
-              # HealthMonitor, L7Rule, Service, Deployment - no per-Kind
-              # hostname/URL rewrite for this document. The Harbor image
-              # rewrite below runs unconditionally instead of as a case
-              # here - see that comment for why.
-              ;;
-          esac
-        done
-        # Runs on the whole file at once (not per-document like the loop
-        # above), unconditionally - the select(has("containers")) filter
-        # already makes it a safe no-op on every document that isn't a
-        # Deployment (or anything else without a
-        # .containers/.initContainers path), regardless of position in
-        # the file or of any document's own kind.
-        yq -i '(.. | select(has("containers")) | .containers[], .. | select(has("initContainers")) | .initContainers[] | select(.image != null)).image |= sub("^.*/", "'"${harbor_registry_fqdn}"'/registry/")' "$yaml_dst"
+        render_org_yaml "${yaml_src}" "${org_yaml_folder}/$(basename "${yaml_src}")" "${org_full_domain}" "${harbor_deployed}"
       done
       sudo chown -R "${org_name}:${org_name}" "${org_yaml_folder}"
+      if [ "${harbor_deployed}" != "true" ]; then
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${org_name}: Harbor is not deployed on this gw (no ${HARBOR_CA_CERT_PATH:-/home/ubuntu/harbor-ca.crt}), the demo yamls in ${org_yaml_folder} keep their upstream images" "${log_file}" "" ""
+      fi
+    fi
+
+    #
+    # dev-avi-vcf/gitops/<subdir>/*.yaml - the manifests an org commits to its own Git repo (ArgoCD in its VKS cluster
+    # syncs them): rendered with the same rules as the demo yamls above but for the org's own GitOps domain
+    # (<org>-gitops.<domain>, delegated to Avi like the other two), keeping the sub-directories, into
+    # /home/<org>/gitops/. Images are pointed to Harbor only when Harbor is deployed on this gw (its CA was saved by
+    # supervisor-bootstrap.sh) - else the files keep their upstream images. A file that already exists is kept: the org
+    # may have edited it, a rerun must not wipe that.
+    #
+    if [ -d /home/ubuntu/dev-avi-vcf/gitops ]; then
+      org_gitops_folder="/home/${org_name}/gitops"
+      org_gitops_domain="${org_name}-gitops.${domain}"
+      harbor_registry_fqdn="harbor.${avi_subdomain}.${domain}"
+      gitops_images="${harbor_deployed}"
+      gitops_images_label="as in the source"; [ "${gitops_images}" == "true" ] && gitops_images_label="pointed to Harbor"
+      sudo mkdir -p "${org_gitops_folder}"
+      sudo chown -R ubuntu:ubuntu "${org_gitops_folder}"
+      gitops_new=0; gitops_kept=0
+      while IFS= read -r gitops_src; do
+        gitops_dst="${org_gitops_folder}/${gitops_src#/home/ubuntu/dev-avi-vcf/gitops/}"
+        if [ -e "${gitops_dst}" ]; then
+          gitops_kept=$((gitops_kept + 1))
+          continue
+        fi
+        mkdir -p "$(dirname "${gitops_dst}")"
+        render_org_yaml "${gitops_src}" "${gitops_dst}" "${org_gitops_domain}" "${gitops_images}"
+        gitops_new=$((gitops_new + 1))
+      done < <(find /home/ubuntu/dev-avi-vcf/gitops -mindepth 2 -type f -name '*.yaml' | sort)
+      sudo chown -R "${org_name}:${org_name}" "${org_gitops_folder}"
+      log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${org_name}: GitOps manifests rendered into ${org_gitops_folder} for ${org_gitops_domain} (${gitops_new} new, ${gitops_kept} kept as they were; images: ${gitops_images_label})" "${log_file}" "" ""
     fi
 
     #

@@ -658,6 +658,270 @@ else
             fi
 
             #
+            # Standalone ArgoCD in this org's VKS cluster (spec.sddc.argocd.enabled; needs spec.sddc.git.enabled, the Git
+            # server built earlier by git-bootstrap.sh). Installs the Helm chart plus the org's Gitea repo as a repository
+            # credential, onboards that repo with one sample Application and checks its ConfigMap reaches the cluster
+            # (further Applications are left to the org), and exposes the UI at argocd.<org>-vks.<domain> (the DNS
+            # zone Avi is authoritative for, for this org's VKS cluster) through an AKO Gateway/HTTPRoute with a
+            # self-signed certificate, like cert01 above. Offline-first like git-bootstrap.sh: the chart (.tgz) and the
+            # argocd/redis images (pushed to Harbor by supervisor-bootstrap.sh) come from the gw-tools ISO, the Internet is
+            # only a fallback. Idempotent (helm upgrade --install, apply) and non-fatal: every failure is logged and the
+            # rest of this org's setup carries on. The Supervisor-side ArgoCD Supervisor Service is deliberately not used:
+            # it can only deploy into a registered Supervisor namespace or cluster with a role the namespace owner has
+            # to grant, while a standalone instance targets its own cluster (kubernetes.default.svc) with no registration.
+            #
+            if [ "${argocd_enabled}" == "true" ]; then
+              argocd_fqdn="${argocd_fqdn_prefix}.${org_name}-vks.${domain}"
+              argocd_fail() {
+                log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ERROR: ArgoCD for ${org_name}'s VKS cluster ${vks_name}: $1 - continuing without it" "${log_file}" "${slack_webhook}" "${google_webhook}"
+              }
+              argocd_work=$(mktemp -d)
+              chmod 700 "${argocd_work}"
+              argocd_kc() { kubectl --kubeconfig="${vks_kubeconfig}" "$@"; }
+              for argocd_once in once; do
+                if [ "${git_enabled}" != "true" ]; then
+                  argocd_fail "sddc.argocd.enabled needs sddc.git.enabled (the org's repo is its credential)"; break
+                fi
+                for argocd_tool in helm openssl jq curl; do
+                  command -v "${argocd_tool}" > /dev/null 2>&1 || { argocd_fail "${argocd_tool} is not installed on gw"; break 2; }
+                done
+                # Same derivation as git-bootstrap.sh's org user (gw_accounts_secret + org name)
+                argocd_git_fqdn="${git_fqdn_prefix}.${avi_subdomain}.${domain}"
+                argocd_org_password="VMware1!$(echo -n "${gw_accounts_secret}${org_name}" | sha256sum | cut -c1-4)VMware1!"
+                argocd_repo_url="https://${argocd_git_fqdn}/${org_name}/${git_repo_name}.git"
+                ( umask 077; printf 'user = "%s:%s"\n' "${org_name}" "${argocd_org_password}" > "${argocd_work}/curl.conf" )
+                argocd_repo_code=$(curl -sk -m 20 -K "${argocd_work}/curl.conf" -o /dev/null -w '%{http_code}' "https://${argocd_git_fqdn}/api/v1/repos/${org_name}/${git_repo_name}")
+                if [ "${argocd_repo_code}" != "200" ]; then
+                  argocd_fail "the Gitea repo ${org_name}/${git_repo_name} is not reachable as ${org_name} (HTTP ${argocd_repo_code:-none}, https://${argocd_git_fqdn}) - was git-bootstrap.sh completed?"; break
+                fi
+
+                # Gitea's certificate chain (Vault PKI): every certificate after the first (the leaf) is the CA ArgoCD's repo
+                # server has to trust. Without it the repo credential falls back to skipping the verification (warning).
+                echo | openssl s_client -connect "${argocd_git_fqdn}:443" -servername "${argocd_git_fqdn}" -showcerts 2> /dev/null \
+                  | awk '/BEGIN CERTIFICATE/{n++} n>=2{print} /END CERTIFICATE/{if(n>=2) print ""}' | sed '/^$/d' > "${argocd_work}/git-ca.pem"
+                argocd_git_insecure="false"
+                if ! grep -q 'BEGIN CERTIFICATE' "${argocd_work}/git-ca.pem"; then
+                  argocd_git_insecure="true"
+                  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: WARNING: ArgoCD for ${org_name}: no CA certificate in the chain served by ${argocd_git_fqdn}, the repository credential will not verify its TLS certificate" "${log_file}" "${slack_webhook}" "${google_webhook}"
+                fi
+
+                # Chart: the ISO's file if present, else the chart repository
+                if [ -s "/home/ubuntu/${argocd_chart_file}" ]; then
+                  argocd_chart="/home/ubuntu/${argocd_chart_file}"
+                else
+                  helm pull argo-cd --repo "${argocd_helm_repo_url}" --version "${argocd_chart_version}" -d "${argocd_work}" > /dev/null 2>&1 \
+                    || { argocd_fail "no chart file /home/ubuntu/${argocd_chart_file} and the chart repository ${argocd_helm_repo_url} does not answer"; break; }
+                  argocd_chart="${argocd_work}/argo-cd-${argocd_chart_version}.tgz"
+                  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: WARNING: ArgoCD for ${org_name}: chart from ${argocd_helm_repo_url} (no ${argocd_chart_file} on the gw-tools ISO)" "${log_file}" "" ""
+                fi
+
+                # Images: Harbor if it has both (<name>_<tag>.tar -> <name>:<tag>), else the chart's upstream defaults.
+                argocd_img_base="$(basename "${argocd_image_file}" .tar.gz)"; argocd_img_base="$(basename "${argocd_img_base}" .tar)"
+                argocd_img_name="${argocd_img_base%%_*}"; argocd_img_tag="${argocd_img_base#*_}"
+                argocd_redis_base="$(basename "${argocd_redis_image_file}" .tar.gz)"; argocd_redis_base="$(basename "${argocd_redis_base}" .tar)"
+                argocd_redis_name="${argocd_redis_base%%_*}"; argocd_redis_tag="${argocd_redis_base#*_}"
+                argocd_harbor_host="harbor.${avi_subdomain}.${domain}"
+                argocd_harbor_ca="/home/ubuntu/harbor-ca.crt"
+                argocd_from_harbor="true"
+                if [ ! -s "${argocd_harbor_ca}" ]; then
+                  argocd_from_harbor="false"
+                else
+                  for argocd_img in "${argocd_img_name}:${argocd_img_tag}" "${argocd_redis_name}:${argocd_redis_tag}"; do
+                    argocd_img_code=$(curl -s -m 15 --cacert "${argocd_harbor_ca}" -o /dev/null -w '%{http_code}' \
+                      -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json' \
+                      "https://${argocd_harbor_host}/v2/${argocd_harbor_project}/${argocd_img%%:*}/manifests/${argocd_img#*:}")
+                    [ "${argocd_img_code}" == "200" ] || argocd_from_harbor="false"
+                  done
+                fi
+
+                # Values: no Dex, no notifications, the UI behind AKO (TLS ends at the Avi virtual service: insecure = plain
+                # HTTP from there to argocd-server), the Gitea CA, and - when bcrypt is available - the admin password set to
+                # the org's usual password (otherwise ArgoCD's random initial password stays in argocd-initial-admin-secret).
+                jq -n --arg fqdn "${argocd_fqdn}" --arg gitfqdn "${argocd_git_fqdn}" --rawfile ca "${argocd_work}/git-ca.pem" \
+                  '{dex: {enabled: false}, notifications: {enabled: false},
+                    configs: {params: {"server.insecure": true}, cm: {url: ("https://" + $fqdn)}}}
+                   | if ($ca | length) > 0 then .configs.tls = {certificates: {($gitfqdn): $ca}} else . end' > "${argocd_work}/values.json"
+                if [ "${argocd_from_harbor}" == "true" ]; then
+                  jq --arg ai "${argocd_harbor_host}/${argocd_harbor_project}/${argocd_img_name}" --arg at "${argocd_img_tag}" \
+                     --arg ri "${argocd_harbor_host}/${argocd_harbor_project}/${argocd_redis_name}" --arg rt "${argocd_redis_tag}" \
+                     '.global.image = {repository: $ai, tag: $at} | .redis.image = {repository: $ri, tag: $rt}' "${argocd_work}/values.json" > "${argocd_work}/values.tmp" \
+                    && mv "${argocd_work}/values.tmp" "${argocd_work}/values.json"
+                  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ArgoCD for ${org_name}: images from Harbor (${argocd_harbor_host}/${argocd_harbor_project})" "${log_file}" "" ""
+                else
+                  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: WARNING: ArgoCD for ${org_name}: images NOT from Harbor (${argocd_harbor_host}/${argocd_harbor_project}/${argocd_img_name}:${argocd_img_tag} or ${argocd_redis_name}:${argocd_redis_tag} missing, or no Harbor CA), the VKS nodes will pull the chart's upstream images from the Internet" "${log_file}" "${slack_webhook}" "${google_webhook}"
+                fi
+                # The admin hash has to be in the values on EVERY run: a chart rendered without it drops admin.password from
+                # argocd-secret and ArgoCD falls back to its random initial password. So when the stored hash still matches
+                # the org's password it is passed again as it is (with its timestamp: no needless rewrite), else a new one.
+                argocd_admin_hash=""; argocd_admin_mtime=""
+                if python3 -c 'import bcrypt' > /dev/null 2>&1; then
+                  argocd_current_hash=$(argocd_kc -n "${argocd_namespace}" get secret argocd-secret -o jsonpath='{.data.admin\.password}' 2> /dev/null | base64 -d 2> /dev/null)
+                  argocd_current_mtime=$(argocd_kc -n "${argocd_namespace}" get secret argocd-secret -o jsonpath='{.data.admin\.passwordMtime}' 2> /dev/null | base64 -d 2> /dev/null)
+                  if [ -n "${argocd_current_hash}" ] && [ -n "${argocd_current_mtime}" ] \
+                     && ARGOCD_PW="${argocd_org_password}" ARGOCD_H="${argocd_current_hash}" python3 -c 'import bcrypt,os,sys;sys.exit(0 if bcrypt.checkpw(os.environ["ARGOCD_PW"].encode(),os.environ["ARGOCD_H"].encode()) else 1)' 2> /dev/null; then
+                    argocd_admin_hash="${argocd_current_hash}"; argocd_admin_mtime="${argocd_current_mtime}"
+                  else
+                    argocd_admin_hash=$(ARGOCD_PW="${argocd_org_password}" python3 -c 'import bcrypt,os;print(bcrypt.hashpw(os.environ["ARGOCD_PW"].encode(),bcrypt.gensalt(10)).decode())' 2> /dev/null)
+                    argocd_admin_mtime="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  fi
+                fi
+                if [ -n "${argocd_admin_hash}" ]; then
+                  ( umask 077; jq --arg h "${argocd_admin_hash}" --arg t "${argocd_admin_mtime}" \
+                      '.configs.secret = {argocdServerAdminPassword: $h, argocdServerAdminPasswordMtime: $t}' "${argocd_work}/values.json" > "${argocd_work}/values.tmp" )
+                  mv "${argocd_work}/values.tmp" "${argocd_work}/values.json"
+                fi
+
+                # Certificate of the UI (self-signed, SAN = the FQDN), before the Gateway so AKO finds the Secret at once
+                argocd_kc create namespace "${argocd_namespace}" --dry-run=client -o yaml | argocd_kc apply -f - > /dev/null 2>&1 \
+                  || { argocd_fail "cannot create the namespace ${argocd_namespace}"; break; }
+                if ! argocd_kc -n "${argocd_namespace}" get secret "${argocd_tls_secret}" > /dev/null 2>&1; then
+                  openssl req -newkey rsa:2048 -x509 -sha256 -days 3650 -nodes -out "${argocd_work}/tls.crt" -keyout "${argocd_work}/tls.key" \
+                    -subj "/CN=${argocd_fqdn}" -addext "subjectAltName=DNS:${argocd_fqdn}" > /dev/null 2>&1 \
+                    && argocd_kc -n "${argocd_namespace}" create secret tls "${argocd_tls_secret}" --key="${argocd_work}/tls.key" --cert="${argocd_work}/tls.crt" > /dev/null 2>&1 \
+                    || { argocd_fail "cannot create the TLS secret ${argocd_tls_secret}"; break; }
+                fi
+
+                helm --kubeconfig "${vks_kubeconfig}" upgrade --install argocd "${argocd_chart}" -n "${argocd_namespace}" -f "${argocd_work}/values.json" \
+                  --wait --timeout 300s > "${argocd_work}/helm.log" 2>&1 \
+                  || { argocd_fail "helm upgrade --install failed: $(tail -3 "${argocd_work}/helm.log" | tr '\n' ' ')"; break; }
+
+                # An upgrade that re-renders argocd-secret (the admin password above) drops the server's session signing key
+                # (server.secretkey), which argocd-server only re-creates when it starts: every login then fails with HTTP
+                # 500 "server.secretkey is missing". Restart the server when the key is gone.
+                if [ -z "$(argocd_kc -n "${argocd_namespace}" get secret argocd-secret -o jsonpath='{.data.server\.secretkey}' 2> /dev/null)" ]; then
+                  argocd_kc -n "${argocd_namespace}" rollout restart deployment/argocd-server > /dev/null 2>&1 \
+                    && argocd_kc -n "${argocd_namespace}" rollout status deployment/argocd-server --timeout=120s > /dev/null 2>&1 \
+                    || { argocd_fail "argocd-server did not restart after the upgrade (server.secretkey was missing from argocd-secret)"; break; }
+                fi
+
+                # Repository credential: declarative (labelled Secret, picked up by ArgoCD at once). Files, not
+                # --from-literal, so the password never shows on a command line other gw accounts can list.
+                printf '%s' "git" > "${argocd_work}/f.type"; printf '%s' "${argocd_repo_url}" > "${argocd_work}/f.url"
+                ( umask 077; printf '%s' "${org_name}" > "${argocd_work}/f.username"; printf '%s' "${argocd_org_password}" > "${argocd_work}/f.password" )
+                argocd_secret_args=(--from-file=type="${argocd_work}/f.type" --from-file=url="${argocd_work}/f.url" --from-file=username="${argocd_work}/f.username" --from-file=password="${argocd_work}/f.password")
+                if [ "${argocd_git_insecure}" == "true" ]; then
+                  printf '%s' "true" > "${argocd_work}/f.insecure"
+                  argocd_secret_args+=(--from-file=insecure="${argocd_work}/f.insecure")
+                fi
+                argocd_kc -n "${argocd_namespace}" create secret generic "${argocd_repo_secret}" "${argocd_secret_args[@]}" --dry-run=client -o yaml \
+                  | argocd_kc label --local -f - argocd.argoproj.io/secret-type=repository -o yaml \
+                  | argocd_kc apply -f - > /dev/null 2>&1 \
+                  || { argocd_fail "cannot create the repository secret ${argocd_repo_secret}"; break; }
+
+                # Onboarding of the org's repo: one Application (automated sync, prune, self-heal) tracking the sample path
+                # git-bootstrap.sh committed to it (a ConfigMap) into this cluster's default namespace. Then the end-to-end
+                # proof Git -> ArgoCD -> cluster: wait until the ConfigMap really exists in the cluster, with this org's name
+                # in it. Further Applications are the org's own business.
+                argocd_kc apply -f - > "${argocd_work}/app.log" 2>&1 <<ARGOCD_APP_EOF || { argocd_fail "creating the Application ${argocd_app_name} failed: $(tail -2 "${argocd_work}/app.log" | tr '\n' ' ')"; break; }
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ${argocd_app_name}
+  namespace: ${argocd_namespace}
+spec:
+  project: default
+  source:
+    repoURL: ${argocd_repo_url}
+    targetRevision: HEAD
+    path: ${git_sample_path}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+ARGOCD_APP_EOF
+                argocd_synced="false"
+                for argocd_attempt in $(seq 1 36); do
+                  argocd_state=$(argocd_kc -n "${argocd_namespace}" get application "${argocd_app_name}" -o jsonpath='{.status.sync.status}/{.status.health.status}' 2> /dev/null)
+                  if [ "${argocd_state}" == "Synced/Healthy" ] && [ "$(argocd_kc -n default get configmap "${git_sample_configmap}" -o jsonpath='{.data.org}' 2> /dev/null)" == "${org_name}" ]; then
+                    argocd_synced="true"; break
+                  fi
+                  sleep 5
+                done
+                if [ "${argocd_synced}" != "true" ]; then
+                  argocd_why=$(argocd_kc -n "${argocd_namespace}" get application "${argocd_app_name}" -o json 2> /dev/null | jq -r '[.status.conditions[]?.message] | join("; ")' 2> /dev/null)
+                  argocd_fail "the sample ConfigMap ${git_sample_configmap} from ${argocd_repo_url} (path ${git_sample_path}) is not in the cluster after 3 minutes (Application ${argocd_state:-unknown}${argocd_why:+: ${argocd_why}}) - was the sample committed by git-bootstrap.sh?"; break
+                fi
+                log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ArgoCD for ${org_name}: Application ${argocd_app_name} Synced/Healthy, ConfigMap ${git_sample_configmap} from ${argocd_repo_url} is in the cluster (default namespace)" "${log_file}" "" ""
+
+                # UI: Gateway + HTTPRoute through AKO (same shape as the Git server's, the certificate is already there)
+                argocd_kc apply -f - > "${argocd_work}/gateway.log" 2>&1 <<ARGOCD_GATEWAY_EOF || { argocd_fail "creating the Gateway/HTTPRoute failed: $(tail -2 "${argocd_work}/gateway.log" | tr '\n' ' ')"; break; }
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: Gateway
+metadata:
+  name: ${argocd_gateway_name}
+  namespace: ${argocd_namespace}
+spec:
+  gatewayClassName: avi-lb
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: ${argocd_fqdn}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            group: ""
+            name: ${argocd_tls_secret}
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: ${argocd_fqdn}
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: HTTPRoute
+metadata:
+  name: argocd
+  namespace: ${argocd_namespace}
+spec:
+  parentRefs:
+    - name: ${argocd_gateway_name}
+  hostnames:
+    - ${argocd_fqdn}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: argocd-server
+          port: 80
+ARGOCD_GATEWAY_EOF
+                argocd_vip=""
+                for argocd_attempt in $(seq 1 30); do
+                  argocd_vip=$(argocd_kc -n "${argocd_namespace}" get gateway "${argocd_gateway_name}" -o jsonpath='{.status.addresses[0].value}' 2> /dev/null)
+                  [ -n "${argocd_vip}" ] && break
+                  sleep 10
+                done
+                if [ -z "${argocd_vip}" ]; then
+                  argocd_why=$(argocd_kc -n "${argocd_namespace}" get gateway "${argocd_gateway_name}" -o json 2> /dev/null | jq -r '[.status.listeners[]?.conditions[]? | select(.status == "False") | .message] | unique | join("; ")' 2> /dev/null)
+                  argocd_fail "the Gateway ${argocd_gateway_name} got no address from AKO/Avi (${argocd_why:-no reason reported}; a 'sub-domains' message means Avi's DNS profile has no ${org_name}-vks.${domain} domain, or AKO has to be restarted to learn it) - kubectl -n ${argocd_namespace} describe gateway ${argocd_gateway_name}"; break
+                fi
+                # Through the VIP (not DNS: the name is only resolvable once Avi's DNS knows it)
+                argocd_ui_code=""
+                for argocd_attempt in $(seq 1 18); do
+                  argocd_ui_code=$(curl -sk -m 10 --resolve "${argocd_fqdn}:443:${argocd_vip}" -o /dev/null -w '%{http_code}' "https://${argocd_fqdn}/healthz")
+                  [ "${argocd_ui_code}" == "200" ] && break
+                  sleep 10
+                done
+                if [ "${argocd_ui_code}" != "200" ]; then
+                  argocd_fail "the UI https://${argocd_fqdn} (VIP ${argocd_vip}) does not answer on /healthz (HTTP ${argocd_ui_code:-none})"; break
+                fi
+                if [ -n "${argocd_admin_hash}" ]; then
+                  argocd_login_hint="user admin, the org's usual password"
+                else
+                  argocd_login_hint="user admin, password in the secret argocd-initial-admin-secret of namespace ${argocd_namespace}"
+                fi
+                log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ArgoCD for ${org_name}'s VKS cluster ${vks_name} is ready: https://${argocd_fqdn} (VIP ${argocd_vip}; ${argocd_login_hint}), repository ${argocd_repo_url} registered as ${argocd_repo_secret}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+              done
+              rm -rf "${argocd_work}"
+              unset -f argocd_fail argocd_kc
+            fi
+
+            #
             # Hand this same admin kubeconfig to the org's own account
             # (see gw-accounts.sh) so its SSH login has a fully-ready
             # `kubectl` against its own VKS cluster with no extra

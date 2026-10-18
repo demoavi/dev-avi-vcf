@@ -293,8 +293,10 @@ avi_api 2 2 PATCH "${cloud_update_json}" "api/cloud/${cloud_uuid}"
 # step substitutes avi_subdomain with the org's own name for exactly this
 # reason) - and "${org_name}-vks.${domain}" (org-1-vks.vcf9.lab, ...) -
 # resolved by that org's demo-yaml rendering (vcfa_provider_bootstrap.sh's
-# own per-org loop). Both are needed per org, not just one, since they're two
-# different consumers with two different naming conventions. Without a
+# own per-org loop) - and "${org_name}-gitops.${domain}" (org-1-gitops.vcf9.lab,
+# ...) - resolved by whatever the org deploys from its own Git repo
+# (ArgoCD in its VKS cluster). All three are needed per org, not just one, since they're
+# three different consumers with three different naming conventions. Without a
 # matching DNS service domain for each, Avi's internal DNS/IPAM has
 # nothing authoritative to resolve those hostnames against.
 # vcf_a_organizations is already the full expanded per-org list (empty
@@ -306,7 +308,8 @@ avi_api 2 2 PATCH "${cloud_update_json}" "api/cloud/${cloud_uuid}"
 avi_dns_domains_json=$(jq -n --arg base "${avi_subdomain}.${domain}" --argjson orgs "${vcf_a_organizations}" --arg domain "${domain}" \
   '[{domain_name: $base, pass_through: true}]
    + ($orgs | map({domain_name: (.name + "." + $domain), pass_through: true}))
-   + ($orgs | map({domain_name: (.name + "-vks." + $domain), pass_through: true}))')
+   + ($orgs | map({domain_name: (.name + "-vks." + $domain), pass_through: true}))
+   + ($orgs | map({domain_name: (.name + "-gitops." + $domain), pass_through: true}))')
 avi_api 2 2 POST "$(jq -n --argjson dsd "${avi_dns_domains_json}" '{name: "dns-avi", type: "IPAMDNS_TYPE_INTERNAL_DNS", internal_profile: {dns_service_domain: $dsd}}')" api/ipamdnsproviderprofile
 log_only "configure Avi - waiting 120 seconds"
 sleep 120

@@ -289,6 +289,20 @@ while read -r org_name; do
     [ "${code}" == "201" ] || { log_notify "ERROR: git-bootstrap: creating the repo ${org_name}/${git_repo_name} failed (HTTP ${code}: $(jq -r '.message // empty' "${k8s_dir}/.gitea-answer" 2> /dev/null))"; continue; }
     log_only "repo ${org_name}/${git_repo_name} created (private)"
   fi
+  # Sample content: <git_sample_path>/<git_sample_configmap>.yaml, a ConfigMap the ArgoCD of the org's VKS cluster syncs
+  # (vcfa_tenant_bootstrap.sh) - committed once, never overwritten (the org owns the repo from then on).
+  sample_file="${git_sample_path}/${git_sample_configmap}.yaml"
+  code=$(echo '{}' | gitea_admin_api GET "repos/${org_name}/${git_repo_name}/contents/${sample_file}?ref=main")
+  if [ "${code}" == "404" ]; then
+    sample_yaml=$(printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: %s\ndata:\n  from: gitea\n  org: %s\n' "${git_sample_configmap}" "${org_name}")
+    code=$(jq -n --arg c "$(printf '%s\n' "${sample_yaml}" | base64 -w0)" --arg m "Sample ConfigMap synced by ArgoCD" \
+             '{content: $c, message: $m, branch: "main"}' | gitea_admin_api POST "repos/${org_name}/${git_repo_name}/contents/${sample_file}")
+    if [ "${code}" == "201" ]; then
+      log_only "sample ${sample_file} committed to ${org_name}/${git_repo_name}"
+    else
+      log_notify "ERROR: git-bootstrap: committing ${sample_file} to ${org_name}/${git_repo_name} failed (HTTP ${code}: $(jq -r '.message // empty' "${k8s_dir}/.gitea-answer" 2> /dev/null))"
+    fi
+  fi
 done < <(echo "${vcf_a_organizations}" | jq -r '.[].name')
 rm -f "${k8s_dir}/.gitea-answer"
 
