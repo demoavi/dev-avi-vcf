@@ -106,7 +106,7 @@ spec:
           extensionRef:
             group: ako.vmware.com
             kind: L7Rule
-            name: l7-rule-waf-detection
+            name: l7-rule-waf-enforcement
       matches:
         - path:
             type: PathPrefix
