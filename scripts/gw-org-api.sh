@@ -115,6 +115,12 @@ add_bookmark "${infra_type}" "Avi" "https://${basename_sddc}-avi.${domain}"
 add_bookmark "${infra_type}" "VCF Automation" "https://${basename_sddc}-auto-vip.${domain}/tenant/{org_name}/"
 # Git (spec.sddc.git.enabled): straight to the org's own repo, git.<avi subdomain>.<domain>/<org>/<repo>
 [ "${git_enabled}" == "true" ] && add_bookmark "${app_type}" "Git server" "https://${git_fqdn_prefix}.${avi_subdomain}.${domain}/{org_name}/${git_repo_name}"
+# ArgoCD (spec.sddc.argocd.enabled, needs git and a VKS cluster, installed per org by vcfa_tenant_bootstrap.sh): at
+# argocd.<org>-vks.<domain>. The list is not per org, so it is shown when any org has vks_cluster.enabled.
+if [ "${argocd_enabled}" == "true" ] && [ "${git_enabled}" == "true" ] \
+   && echo "${vcf_a_organizations}" | jq -e 'any(.[]; .vks_cluster.enabled == true)' >/dev/null 2>&1; then
+  add_bookmark "${app_type}" "ArgoCD" "https://${argocd_fqdn_prefix}.{org_name}-vks.${domain}"
+fi
 # Harbor: deployed as a supervisor_services entry of type harbor (supervisor-bootstrap.sh)
 echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor")' >/dev/null 2>&1 \
   && add_bookmark "${app_type}" "Harbor registry" "https://harbor.${avi_subdomain}.${domain}"
