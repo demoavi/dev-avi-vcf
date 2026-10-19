@@ -4,6 +4,7 @@
   GET  /orgs  -> {"orgs": ["org-2", "org-3", ...]}   unassigned orgs
   POST /org   -> {"org_name": "org-1", "org_password": "...", <info fields>,
                   "bookmarks": [{"name": "vCenter", "url": "https://...", "type": "Infrastructure Components"}, ...],
+                  "folders": [".kube", "gitops", "wireguard", "yaml-files"],
                   "certificates": [{"name": "vault-root-ca", "pem": "-----BEGIN CERTIFICATE-----\n..."}, ...]}
                  where certificates are the CA certificates the client should add to its trust store (e.g. the Vault
                  root CA that signs the lab's certificates; an empty list when there are none, e.g. no Vault on the
@@ -23,7 +24,7 @@ a later GET /orgs no longer lists it); there is deliberately no release.
 
 Everything it needs is in one root-only JSON config, re-read per request:
   {"username", "password", "port", "cert", "key", "home_base", 
-   "info": {...}, "bookmarks": [{"name", "url", "type"}, ...], "certificates": [{"name", "file"}, ...],
+   "info": {...}, "bookmarks": [{"name", "url", "type"}, ...], "folders": ["name", ...], "certificates": [{"name", "file"}, ...],
    "orgs": [{"name", "password"}, ...]}
 rendered by gw-org-api.sh (which owns the org list/password derivation - the
 same formula as gw-accounts.sh - so none of that is duplicated here).
@@ -184,6 +185,7 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write(f"assigned {org['name']} to {self.client_address[0]}\n")
             return self._send(200, {"org_name": org["name"], "org_password": org["password"],
                                     **cfg.get("info", {}), "bookmarks": bookmarks_for(cfg, org["name"]),
+                                    "folders": list(cfg.get("folders", [])),
                                     "certificates": certificates_for(cfg)})
         return self._send(404, {"error": "not found"})
 

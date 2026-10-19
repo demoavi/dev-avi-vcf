@@ -148,10 +148,28 @@ do
   [ -n "${bookmark_name}" ] || continue
   bookmarks_json=$(jq -c --arg t "${bookmark_type}" --arg n "${bookmark_name}" --arg u "${bookmark_url}" '. += [{name: $n, url: $u, type: $t}]' <<< "${bookmarks_json}")
 done <<< "${bookmark_lines}"
+# Folders of the org's home on this gw that the student desktop copies (variables.json org_folders, same names on the gw and
+# on the desktop, relative to the home). Same principle as the bookmarks: a folder is listed when the deployment is
+# CONFIGURED to build it, not when it exists yet (this service starts first, .kube and gitops come hours later) - the
+# client skips or retries one that is not there yet. wireguard (gw-accounts.sh) is always there; .kube needs a VKS
+# cluster in some org (vcfa_tenant_bootstrap.sh, same condition as the ArgoCD bookmark); gitops and yaml-files are
+# rendered from the bootstrap repository's own gitops/ and yamls/ folders (vcfa_provider_bootstrap.sh) when they exist
+# there; a name without a condition here is listed as it is.
+repo_dir="$(cd "${script_dir}/.." && pwd)"
+folders_json="[]"
+while read -r folder_name; do
+  [ -n "${folder_name}" ] || continue
+  case "${folder_name}" in
+    .kube) echo "${vcf_a_organizations}" | jq -e 'any(.[]; .vks_cluster.enabled == true)' >/dev/null 2>&1 || continue ;;
+    gitops) [ -d "${repo_dir}/gitops" ] || continue ;;
+    yaml-files) [ -d "${repo_dir}/yamls" ] || continue ;;
+  esac
+  folders_json=$(jq -c --arg f "${folder_name}" '. += [$f]' <<< "${folders_json}")
+done < <(echo "${org_folders:-[]}" | jq -r '.[]' 2>/dev/null)
 new_conf=$(API_USER="${org_api_username}" API_PW="${org_api_password}" jq -n -c \
-  --argjson orgs "${orgs_json}" --argjson port "${org_api_port}" --argjson info "${info_json}" --argjson bookmarks "${bookmarks_json}" \
+  --argjson orgs "${orgs_json}" --argjson port "${org_api_port}" --argjson info "${info_json}" --argjson bookmarks "${bookmarks_json}" --argjson folders "${folders_json}" \
   --arg cert "${conf_dir}/cert.pem" --arg key "${conf_dir}/key.pem" --arg ca "${conf_dir}/vault-root-ca.pem" \
-  '{username: env.API_USER, password: env.API_PW, port: $port, cert: $cert, key: $key, home_base: "/home", info: $info, bookmarks: $bookmarks, certificates: [{name: "vault-root-ca", file: $ca}], orgs: $orgs}')
+  '{username: env.API_USER, password: env.API_PW, port: $port, cert: $cert, key: $key, home_base: "/home", info: $info, bookmarks: $bookmarks, folders: $folders, certificates: [{name: "vault-root-ca", file: $ca}], orgs: $orgs}')
 if [ -z "${new_conf}" ]; then
   log_notify "ERROR: gw-org-api: config rendering failed (is org_api_port '${org_api_port}' a number?), skipping"
   exit 0
