@@ -166,10 +166,20 @@ while read -r folder_name; do
   esac
   folders_json=$(jq -c --arg f "${folder_name}" '. += [$f]' <<< "${folders_json}")
 done < <(echo "${org_folders:-[]}" | jq -r '.[]' 2>/dev/null)
+# Environment variables the student desktop exports (list of {name, value}; "{org_name}" in a value is replaced per org by
+# gw-org-api.py, like the bookmarks). WAF_DEMO_HOST is the host of the first HTTPRoute of the first gitops/ sub-folder (v1)
+# as vcfa_provider_bootstrap.sh renders it: <HTTPRoute metadata.name>.<org>-gitops.<domain> (the hostname written in the
+# source file is only a placeholder). Left out when that file or route is not there.
+env_vars_json="[]"
+gitops_first_yaml=$(find "${repo_dir}/gitops" -mindepth 2 -type f -name '*.yaml' 2>/dev/null | sort | head -1)
+if [ -n "${gitops_first_yaml}" ]; then
+  waf_route_name=$(yq 'select(.kind == "HTTPRoute") | .metadata.name' "${gitops_first_yaml}" 2>/dev/null | grep -v -E '^(null|---)?$' | head -1)
+  [ -n "${waf_route_name}" ] && env_vars_json=$(jq -c --arg v "${waf_route_name}.{org_name}-gitops.${domain}" '. += [{name: "WAF_DEMO_HOST", value: $v}]' <<< "${env_vars_json}")
+fi
 new_conf=$(API_USER="${org_api_username}" API_PW="${org_api_password}" jq -n -c \
-  --argjson orgs "${orgs_json}" --argjson port "${org_api_port}" --argjson info "${info_json}" --argjson bookmarks "${bookmarks_json}" --argjson folders "${folders_json}" \
+  --argjson orgs "${orgs_json}" --argjson port "${org_api_port}" --argjson info "${info_json}" --argjson bookmarks "${bookmarks_json}" --argjson folders "${folders_json}" --argjson env_vars "${env_vars_json}" \
   --arg cert "${conf_dir}/cert.pem" --arg key "${conf_dir}/key.pem" --arg ca "${conf_dir}/vault-root-ca.pem" \
-  '{username: env.API_USER, password: env.API_PW, port: $port, cert: $cert, key: $key, home_base: "/home", info: $info, bookmarks: $bookmarks, folders: $folders, certificates: [{name: "vault-root-ca", file: $ca}], orgs: $orgs}')
+  '{username: env.API_USER, password: env.API_PW, port: $port, cert: $cert, key: $key, home_base: "/home", info: $info, bookmarks: $bookmarks, folders: $folders, environment_variables: $env_vars, certificates: [{name: "vault-root-ca", file: $ca}], orgs: $orgs}')
 if [ -z "${new_conf}" ]; then
   log_notify "ERROR: gw-org-api: config rendering failed (is org_api_port '${org_api_port}' a number?), skipping"
   exit 0

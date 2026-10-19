@@ -5,6 +5,7 @@
   POST /org   -> {"org_name": "org-1", "org_password": "...", <info fields>,
                   "bookmarks": [{"name": "vCenter", "url": "https://...", "type": "Infrastructure Components"}, ...],
                   "folders": [".kube", "gitops", "wireguard", "yaml-files"],
+                  "environment_variables": [{"name": "WAF_DEMO_HOST", "value": "http-route-gitops.org-1-gitops.vcf9.lab"}],
                   "certificates": [{"name": "vault-root-ca", "pem": "-----BEGIN CERTIFICATE-----\n..."}, ...]}
                  where certificates are the CA certificates the client should add to its trust store (e.g. the Vault
                  root CA that signs the lab's certificates; an empty list when there are none, e.g. no Vault on the
@@ -24,7 +25,8 @@ a later GET /orgs no longer lists it); there is deliberately no release.
 
 Everything it needs is in one root-only JSON config, re-read per request:
   {"username", "password", "port", "cert", "key", "home_base", 
-   "info": {...}, "bookmarks": [{"name", "url", "type"}, ...], "folders": ["name", ...], "certificates": [{"name", "file"}, ...],
+   "info": {...}, "bookmarks": [{"name", "url", "type"}, ...], "folders": ["name", ...],
+   "environment_variables": [{"name", "value"}, ...], "certificates": [{"name", "file"}, ...],
    "orgs": [{"name", "password"}, ...]}
 rendered by gw-org-api.sh (which owns the org list/password derivation - the
 same formula as gw-accounts.sh - so none of that is duplicated here).
@@ -81,6 +83,12 @@ def bookmarks_for(cfg, org_name):
     org that was just assigned."""
     quoted = urllib.parse.quote(org_name, safe="")
     return [{**b, "url": b["url"].replace("{org_name}", quoted)} for b in cfg.get("bookmarks", [])]
+
+
+def environment_variables_for(cfg, org_name):
+    """The config's environment variables, [{"name", "value"}, ...], with "{org_name}" in a value replaced by the
+    org that was just assigned."""
+    return [{**e, "value": e["value"].replace("{org_name}", org_name)} for e in cfg.get("environment_variables", [])]
 
 
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -186,6 +194,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"org_name": org["name"], "org_password": org["password"],
                                     **cfg.get("info", {}), "bookmarks": bookmarks_for(cfg, org["name"]),
                                     "folders": list(cfg.get("folders", [])),
+                                    "environment_variables": environment_variables_for(cfg, org["name"]),
                                     "certificates": certificates_for(cfg)})
         return self._send(404, {"error": "not found"})
 
