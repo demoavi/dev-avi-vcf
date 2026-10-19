@@ -84,13 +84,13 @@ metadata:
 spec:
   parentRefs:
     - name: gw-gitops
-  hostnames:
-    - "gw-v3.mydomain.com"
   rules:
-      matches:
+    - matches:
         - path:
             type: PathPrefix
             value: /
       backendRefs:
         - name: svc-v3
           port: 80
+  hostnames:
+    - "gw-v3.mydomain.com"
