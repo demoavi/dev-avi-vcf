@@ -8,7 +8,9 @@
                  where certificates are the CA certificates the client should add to its trust store (e.g. the Vault
                  root CA that signs the lab's certificates; an empty list when there are none, e.g. no Vault on the
                  gw) and the info fields are the config's "info" object (e.g.
-                 the SSO domain) and bookmarks the config's "bookmarks" list
+                 the SSO domain and kubectl_version - the gw's kubectl as
+                 major.minor like "v1.35", for a client that wants to align
+                 its own) and bookmarks the config's "bookmarks" list
                  (the services' URLs) - the same for every org, except that a
                  bookmark url may contain "{org_name}", which is replaced by the
                  org just assigned (URL-encoded), e.g. .../tenant/{org_name}/.

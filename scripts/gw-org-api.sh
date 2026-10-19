@@ -99,7 +99,17 @@ done < <(echo "${vcf_a_organizations}" | jq -r '.[].name')
 # {org_name}, which the server replaces by the org it assigns on each POST /org (the VCF Automation
 # tenant URL is per org); it is kept as a literal placeholder in the config.
 sso_domain=$(jq -c -r '.sddc.vcenter.ssoDomain // empty' "${jsonFile}")
-info_json=$(jq -n -c --arg sso "${sso_domain}" '{sso_domain: $sso}')
+# kubectl_version: major.minor of the kubectl this gw really has (e.g. v1.35 - the pkgs.k8s.io repository a client picks to
+# get the same one), so the student desktop can align its own. The installed binary is the truth (its install is allowed
+# to fail, and an older gw keeps its older one); without it, the version the gw was told to install (variables.json
+# K8s_version_short); else the key is left out.
+kubectl_version=""
+if command -v kubectl > /dev/null 2>&1; then
+  kubectl_version=$(kubectl version --client -o json 2> /dev/null | jq -r '.clientVersion | select(.major != null and .minor != null) | "v" + .major + "." + (.minor | gsub("[^0-9]"; ""))' 2> /dev/null)
+fi
+[[ "${kubectl_version}" =~ ^v[0-9]+\.[0-9]+$ ]] || kubectl_version="${k8s_version_short}"
+[[ "${kubectl_version}" =~ ^v[0-9]+\.[0-9]+$ ]] || kubectl_version=""
+info_json=$(jq -n -c --arg sso "${sso_domain}" --arg kv "${kubectl_version}" '{sso_domain: $sso} + (if $kv != "" then {kubectl_version: $kv} else {} end)')
 # Every bookmark carries a type: "Infrastructure Components" (the SDDC consoles) or "Application Components" (what the
 # student uses on top: Git, Harbor, the Vault CA). The application ones are listed when they are CONFIGURED to be deployed
 # (same conditions as their own bootstrap scripts), not when they are up yet - this script runs first, and the student
