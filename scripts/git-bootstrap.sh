@@ -84,7 +84,10 @@ if [ "${image_name}" == "${image_base}" ]; then
 elif [ ! -s "${harbor_ca_file}" ]; then
   harbor_why="no Harbor CA at ${harbor_ca_file} (Harbor not deployed on this gw?)"
 else
-  harbor_code=$(curl -s -m 15 --cacert "${harbor_ca_file}" -o /dev/null -w '%{http_code}' \
+  # Harbor answers 401 to a plain manifest request even for a public project: a registry client first gets an anonymous
+  # token from the token service and sends it as a Bearer. No token endpoint (a plain registry): no header, as before.
+  harbor_token=$(curl -s -m 15 --cacert "${harbor_ca_file}" "https://${harbor_host}/service/token?service=harbor-registry&scope=repository:${git_harbor_project}/${image_name}:pull" 2> /dev/null | jq -r '.token // empty' 2> /dev/null)
+  harbor_code=$(curl -s -m 15 --cacert "${harbor_ca_file}" -o /dev/null -w '%{http_code}' ${harbor_token:+-H "Authorization: Bearer ${harbor_token}"} \
     -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json' \
     "https://${harbor_host}/v2/${git_harbor_project}/${image_name}/manifests/${image_tag}")
   if [ "${harbor_code}" == "200" ]; then

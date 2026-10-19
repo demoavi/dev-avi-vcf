@@ -727,7 +727,9 @@ else
                   argocd_from_harbor="false"
                 else
                   for argocd_img in "${argocd_img_name}:${argocd_img_tag}" "${argocd_redis_name}:${argocd_redis_tag}"; do
-                    argocd_img_code=$(curl -s -m 15 --cacert "${argocd_harbor_ca}" -o /dev/null -w '%{http_code}' \
+                    # anonymous token first (Harbor answers a plain manifest request with 401), as git-bootstrap.sh does
+                    argocd_img_token=$(curl -s -m 15 --cacert "${argocd_harbor_ca}" "https://${argocd_harbor_host}/service/token?service=harbor-registry&scope=repository:${argocd_harbor_project}/${argocd_img%%:*}:pull" 2> /dev/null | jq -r '.token // empty' 2> /dev/null)
+                    argocd_img_code=$(curl -s -m 15 --cacert "${argocd_harbor_ca}" -o /dev/null -w '%{http_code}' ${argocd_img_token:+-H "Authorization: Bearer ${argocd_img_token}"} \
                       -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json' \
                       "https://${argocd_harbor_host}/v2/${argocd_harbor_project}/${argocd_img%%:*}/manifests/${argocd_img#*:}")
                     [ "${argocd_img_code}" == "200" ] || argocd_from_harbor="false"
