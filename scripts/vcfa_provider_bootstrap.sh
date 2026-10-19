@@ -719,8 +719,14 @@ do
         render_org_yaml "${gitops_src}" "${gitops_dst}" "${org_gitops_domain}" "${gitops_images}"
         gitops_new=$((gitops_new + 1))
       done < <(find /home/ubuntu/dev-avi-vcf/gitops -mindepth 2 -type f -name '*.yaml' | sort)
+      # Helper scripts at the root of gitops/ (e.g. waf-demo.sh) are copied as they are, no rendering, executable.
+      gitops_scripts=0
+      while IFS= read -r gitops_script; do
+        install -m 0755 "${gitops_script}" "${org_gitops_folder}/$(basename "${gitops_script}")"
+        gitops_scripts=$((gitops_scripts + 1))
+      done < <(find /home/ubuntu/dev-avi-vcf/gitops -maxdepth 1 -type f -name '*.sh' | sort)
       sudo chown -R "${org_name}:${org_name}" "${org_gitops_folder}"
-      log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${org_name}: GitOps manifests rendered into ${org_gitops_folder} for ${org_gitops_domain} (${gitops_new} new, ${gitops_kept} kept as they were; images: ${gitops_images_label})" "${log_file}" "" ""
+      log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${org_name}: GitOps manifests rendered into ${org_gitops_folder} for ${org_gitops_domain} (${gitops_new} new, ${gitops_kept} kept as they were; images: ${gitops_images_label}; ${gitops_scripts} script(s) copied as is)" "${log_file}" "" ""
     fi
 
     #
