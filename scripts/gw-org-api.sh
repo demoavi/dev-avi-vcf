@@ -236,7 +236,9 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
 done
 if [ "${api_check_code}" == "200" ]; then
-  log_notify "gw-org-api active on https://<gw>:${org_api_port} ($(jq '.orgs | length' /tmp/gw-org-api-check.json) orgs available)"
+  # The address is spelled out: a literal "<gw>" is taken for markup by the chat notification and disappears
+  api_host=$(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1)
+  log_notify "gw-org-api active on https://${api_host:-this gw}:${org_api_port} ($(jq '.orgs | length' /tmp/gw-org-api-check.json) orgs available)"
 else
   log_notify "ERROR: gw-org-api: authenticated GET /orgs returned '${api_check_code}' (journalctl -u gw-org-api)"
 fi

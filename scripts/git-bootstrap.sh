@@ -251,7 +251,9 @@ if [ "${tls_enabled}" == "true" ]; then
     sent=$(echo | openssl s_client -connect "${git_vip}:443" -servername "${git_fqdn}" -showcerts 2> /dev/null | grep -c "BEGIN CERTIFICATE")
     log_notify "Gitea's certificate verifies against the Vault root CA; the server sends ${sent} certificate(s) (leaf + intermediate, plus the root when 3: importing the root CA in a browser is enough)"
   else
-    log_notify "WARNING: git-bootstrap: the certificate of ${git_fqdn} does not verify against the Vault root CA (https://<gw>:8200/v1/pki/ca/pem)"
+    # Addresses are spelled out in notifications: a literal "<...>" is taken for markup by the chat and disappears
+    vault_host=$(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1)
+    log_notify "WARNING: git-bootstrap: the certificate of ${git_fqdn} does not verify against the Vault root CA (https://${vault_host:-this gw}:8200/v1/pki/ca/pem)"
   fi
   rm -f "${root_ca_file}"
 fi
@@ -331,4 +333,4 @@ if [ "${org_count}" -ge 2 ]; then
   fi
 fi
 
-log_notify "Git server ready: ${git_scheme}://${git_fqdn} (Gitea chart ${git_chart_version}), ${org_count} org user(s), each with a private repo <org>/${git_repo_name}"
+log_notify "Git server ready: ${git_scheme}://${git_fqdn} (Gitea chart ${git_chart_version}), ${org_count} org user(s), each with a private repo named ${git_repo_name} (one per org)"
