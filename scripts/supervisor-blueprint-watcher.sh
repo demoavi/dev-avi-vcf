@@ -1,8 +1,9 @@
 #!/bin/bash
 #
 # LAST phase: the Supervisor side of the blueprint dropdown feature (see gw-blueprint-api.sh, which runs much earlier and
-# provides the receiver, its HMAC secret and its certificate). Switch and names: spec.sddc.blueprint_apps in the CR ->
-# blueprint_apps_*; the rest (watcher namespace, image, timings) is variables.json's "blueprint_apps" block.
+# provides the receiver, its HMAC secret and its certificate). Switch and names: blueprints.auto_update of the orgs in
+# spec.sddc.vcf_a.organization_templates/organization_overrides -> blueprint_apps_* (blueprint_apps_orgs: the names of the orgs
+# that enabled it, the only ones followed); the rest (watcher namespace, image, timings) is variables.json's "blueprint_apps" block.
 #
 # It runs last because it needs everything before it: the Supervisor, the org namespaces and their labels
 # (vcfa_tenant_bootstrap.sh), and the blueprints, which are uploaded by then - so the watcher's very first post already
@@ -17,7 +18,7 @@
 #      watcher verifies it) and a ConfigMap with the watcher's code (supervisor-blueprint-watcher.py, stdlib only, so
 #      the image is a plain python one).
 #   3. The targets: every namespace carrying the VCF-A labels vmware-system-vcf/organization-id and .../project-id (the
-#      org namespaces, however they were created) gets a Role + RoleBinding letting the ServiceAccount list and watch
+#      org namespaces, however they were created) of an org that enabled blueprints.auto_update gets a Role + RoleBinding letting the ServiceAccount list and watch
 #      VirtualMachines there, and is listed with its org and project in the ConfigMap blueprint-watcher-targets. Only
 #      NAMESPACED RBAC is used: the Supervisor login of this deployment cannot create ClusterRoles. (A Supervisor Service
 #      could carry a cluster-wide role; not done here.) The labels are a hint: gw-blueprint-api re-validates every
@@ -38,7 +39,7 @@ source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 
 if [ "${blueprint_apps_enabled}" != "true" ]; then
-  log_only "sddc.blueprint_apps.enabled is not true, skipping supervisor-blueprint-watcher"
+  log_only "no org enabled blueprints.auto_update, skipping supervisor-blueprint-watcher"
   exit 0
 fi
 vcd_login
@@ -127,6 +128,47 @@ targets=$(kc get namespaces -l 'vmware-system-vcf/organization-id,vmware-system-
             | {namespace: .metadata.name, organization_id: .metadata.labels["vmware-system-vcf/organization-id"],
                project_id: .metadata.labels["vmware-system-vcf/project-id"]}]')
 [ -n "${targets}" ] || bw_fail "cannot list the org namespaces"
+
+# VCF-A provider login (also used by the blueprint check at the end): provider_token and the OIDC client id of the
+# automation relying party. Done once, whichever step needs it first.
+vcfa_host="https://${basename_sddc}-auto-vip.${domain}"
+vcfa_accept="Accept: application/json;version=9.1.0"
+bw_vcfa_login() {
+  [ -n "${provider_token:-}" ] && return 0
+  provider_token=$(curl -sk -m 30 -i -X POST "${vcfa_host}/cloudapi/1.0.0/sessions/provider" -H "${vcfa_accept}" \
+    -H "Content-Type: application/json;version=9.1.0" \
+    -H "Authorization: Basic $(printf '%s@system:%s' admin "${generic_password}" | base64 -w0)" \
+    | grep -i '^x-vmware-vcloud-access-token:' | awk '{print $2}' | tr -d '\r')
+  client_id=""
+  [ -n "${provider_token}" ] && client_id=$(curl -sk -m 30 "${vcfa_host}/cloudapi/1.0.0/openIdProvider/relyingParties" -H "${vcfa_accept}" \
+    -H "Authorization: Bearer ${provider_token}" | jq -r '[.values[] | select(.clientName == "automation-relying-party")][0].clientId // [.values[] | select(.isPublic == true)][0].clientId // empty')
+}
+
+# Only the orgs that enabled blueprints.auto_update (blueprint_apps_orgs, names) are followed: their VCF-A organization ids
+# are looked up by name and the targets reduced to the namespaces carrying one of them. When the lookup does not work the
+# feature must not stop, so every org namespace is kept and a warning says so.
+if [ "$(echo "${blueprint_apps_orgs:-[]}" | jq 'length' 2> /dev/null || echo 0)" -gt 0 ]; then
+  bw_vcfa_login
+  selected_ids="[]"
+  if [ -n "${provider_token}" ]; then
+    for sel_org in $(echo "${blueprint_apps_orgs}" | jq -r '.[]'); do
+      sel_id=$(curl -sk -m 30 "${vcfa_host}/cloudapi/1.0.0/orgs?filter=name==${sel_org}" -H "${vcfa_accept}" \
+        -H "Authorization: Bearer ${provider_token}" | jq -r '.values[0].id // empty')
+      sel_id="${sel_id#urn:vcloud:org:}"
+      if [ -n "${sel_id}" ]; then
+        selected_ids=$(jq -c --arg i "${sel_id}" '. + [$i]' <<< "${selected_ids}")
+      else
+        log_notify "WARNING: supervisor-blueprint-watcher: VCF-A has no org named ${sel_org} (blueprints.auto_update.enabled), skipping it"
+      fi
+    done
+  fi
+  if [ "$(echo "${selected_ids}" | jq 'length')" -gt 0 ]; then
+    targets=$(echo "${targets}" | jq -c --argjson ids "${selected_ids}" \
+      '[.[] | select((.organization_id | sub("^urn:vcloud:org:"; "")) as $o | $ids | index($o))]')
+  else
+    log_notify "WARNING: supervisor-blueprint-watcher: could not select the orgs of blueprints.auto_update in VCF-A, watching every org namespace"
+  fi
+fi
 target_count=$(echo "${targets}" | jq 'length')
 if [ "${target_count}" -eq 0 ]; then
   log_notify "WARNING: supervisor-blueprint-watcher: no namespace carries the VCF-A org/project labels yet (no org namespace?): the watcher is installed but idle, run this phase again once an org namespace exists"
@@ -209,15 +251,7 @@ done
 [ "${posted}" == "true" ] || bw_fail "the watcher has not posted its state to ${receiver_url} after 2 minutes (kubectl --context sup-admin-01 -n ${ns} logs -l app=${name}; is ${receiver_bind}:${receiver_port} reachable from the Supervisor?)"
 # The blueprint check asks VCF-A directly (not the receiver's log, which says nothing on a rerun that posts nothing new):
 # for every project that has a target namespace, does a blueprint named blueprint_apps_blueprint_name exist?
-vcfa_host="https://${basename_sddc}-auto-vip.${domain}"
-vcfa_accept="Accept: application/json;version=9.1.0"
-provider_token=$(curl -sk -m 30 -i -X POST "${vcfa_host}/cloudapi/1.0.0/sessions/provider" -H "${vcfa_accept}" \
-  -H "Content-Type: application/json;version=9.1.0" \
-  -H "Authorization: Basic $(printf '%s@system:%s' admin "${generic_password}" | base64 -w0)" \
-  | grep -i '^x-vmware-vcloud-access-token:' | awk '{print $2}' | tr -d '\r')
-client_id=""
-[ -n "${provider_token}" ] && client_id=$(curl -sk -m 30 "${vcfa_host}/cloudapi/1.0.0/openIdProvider/relyingParties" -H "${vcfa_accept}" \
-  -H "Authorization: Bearer ${provider_token}" | jq -r '[.values[] | select(.clientName == "automation-relying-party")][0].clientId // [.values[] | select(.isPublic == true)][0].clientId // empty')
+bw_vcfa_login
 if [ -z "${client_id}" ]; then
   log_notify "WARNING: supervisor-blueprint-watcher: could not log in to VCF-A to check that the blueprint '${blueprint_apps_blueprint_name}' exists"
 else
@@ -238,7 +272,7 @@ else
     done
   done
   if [ -n "${missing_ns}" ]; then
-    log_notify "WARNING: supervisor-blueprint-watcher: no blueprint named '${blueprint_apps_blueprint_name}' for the namespace(s) ${missing_ns}: check sddc.blueprint_apps.blueprint_name in the CR (it is the file name in dev-avi-vcf/blueprints/ without .yaml.template) and that blueprints.enabled is true for that org - gw-blueprint-api drops their updates until it exists"
+    log_notify "WARNING: supervisor-blueprint-watcher: no blueprint named '${blueprint_apps_blueprint_name}' for the namespace(s) ${missing_ns}: check blueprints.auto_update.blueprint_name of the org in the CR (it is the file name in dev-avi-vcf/blueprints/ without .yaml.template) and that blueprints.enabled is true for that org - gw-blueprint-api drops their updates until it exists"
   fi
 fi
 log_notify "supervisor-blueprint-watcher: ${name} running in ${ns}, watching ${target_count} org namespace(s), posting to ${receiver_url}"

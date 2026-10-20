@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Optional Git server (Gitea, helm) on the shared Kubernetes cluster built by k8s-bootstrap.sh - phase 2 of that
-# platform. Switch: spec.sddc.git.enabled in the CR (-> git_enabled; needs sddc.k8s.enabled). Everything else is in
+# platform. Switch: spec.sddc.k8s.git.enabled in the CR (-> git_enabled; needs sddc.k8s.enabled). Everything else is in
 # variables.json's "git" block (-> git_* in variables.sh): chart version, namespace, FQDN prefix, volume size,
 # admin user, repo name, TLS secret and Gateway names.
 #
@@ -39,7 +39,7 @@ source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 
 if [ "${git_enabled}" != "true" ]; then
-  log_only "sddc.git.enabled is not true, skipping the Git server"
+  log_only "sddc.k8s.git.enabled is not true, skipping the Git server"
   exit 0
 fi
 vcd_login
@@ -50,7 +50,7 @@ git_fail() {
   exit 0
 }
 
-[ "${k8s_enabled}" == "true" ] || git_fail "sddc.git.enabled needs sddc.k8s.enabled (the Git server runs on that cluster)"
+[ "${k8s_enabled}" == "true" ] || git_fail "sddc.k8s.git.enabled needs sddc.k8s.enabled (the Git server runs on that cluster)"
 for tool in kubectl helm jq curl openssl; do
   command -v "${tool}" > /dev/null 2>&1 || git_fail "${tool} is not installed on gw"
 done

@@ -8,7 +8,7 @@
 # from the SDDC build - VCF-A is only needed when a message arrives (a post for a project whose blueprint does not exist
 # yet is dropped and healed by the watcher's next periodic resync).
 #
-# Switch and names: spec.sddc.blueprint_apps (enabled, blueprint_name, input_name) in the CR -> blueprint_apps_* in
+# Switch and names: blueprints.auto_update (enabled, blueprint_name, input_name) of the orgs in spec.sddc.vcf_a.organization_templates/organization_overrides -> blueprint_apps_* in
 # variables.sh; the port is variables.json's blueprint_apps block (8444: gw-org-api's default is 8443). Not enabled ->
 # skipped. What it creates under /etc/gw-blueprint-api (root only): a self-signed certificate (10 years, SAN = the gw's
 # address and name; renewed when the address changed), the HMAC secret shared with the watcher (generated once) and
@@ -24,7 +24,7 @@ source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 
 if [ "${blueprint_apps_enabled}" != "true" ]; then
-  log_only "sddc.blueprint_apps.enabled is not true, skipping gw-blueprint-api"
+  log_only "no org enabled blueprints.auto_update, skipping gw-blueprint-api"
   exit 0
 fi
 vcd_login

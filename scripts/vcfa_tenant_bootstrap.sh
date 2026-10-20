@@ -658,7 +658,8 @@ else
             fi
 
             #
-            # Standalone ArgoCD in this org's VKS cluster (spec.sddc.argocd.enabled; needs spec.sddc.git.enabled, the Git
+            # Standalone ArgoCD in this org's VKS cluster (vks_cluster.argocd.enabled of the org in spec.sddc.vcf_a, formerly
+            # the global spec.sddc.argocd.enabled; needs spec.sddc.k8s.git.enabled, the Git
             # server built earlier by git-bootstrap.sh). Installs the Helm chart plus the org's Gitea repo as a repository
             # credential, onboards that repo with one sample Application and checks its ConfigMap reaches the cluster
             # (further Applications are left to the org), and exposes the UI at argocd.<org>-vks.<domain> (the DNS
@@ -670,7 +671,8 @@ else
             # it can only deploy into a registered Supervisor namespace or cluster with a role the namespace owner has
             # to grant, while a standalone instance targets its own cluster (kubernetes.default.svc) with no registration.
             #
-            if [ "${argocd_enabled}" == "true" ]; then
+            argocd_org_enabled=$(echo ${item} | jq -c -r '.vks_cluster.argocd.enabled // false')
+            if [ "${argocd_org_enabled}" == "true" ]; then
               argocd_fqdn="${argocd_fqdn_prefix}.${org_name}-vks.${domain}"
               argocd_fail() {
                 log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ERROR: ArgoCD for ${org_name}'s VKS cluster ${vks_name}: $1 - continuing without it" "${log_file}" "${slack_webhook}" "${google_webhook}"
@@ -680,7 +682,7 @@ else
               argocd_kc() { kubectl --kubeconfig="${vks_kubeconfig}" "$@"; }
               for argocd_once in once; do
                 if [ "${git_enabled}" != "true" ]; then
-                  argocd_fail "sddc.argocd.enabled needs sddc.git.enabled (the org's repo is its credential)"; break
+                  argocd_fail "vks_cluster.argocd.enabled needs sddc.k8s.git.enabled (the org's repo is its credential)"; break
                 fi
                 for argocd_tool in helm openssl jq curl; do
                   command -v "${argocd_tool}" > /dev/null 2>&1 || { argocd_fail "${argocd_tool} is not installed on gw"; break 2; }
