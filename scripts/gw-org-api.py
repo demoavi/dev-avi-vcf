@@ -3,7 +3,9 @@
 
   GET  /orgs  -> {"orgs": ["org-2", "org-3", ...]}   unassigned orgs
   POST /org   -> {"org_name": "org-1", "org_password": "...", <info fields>,
-                  "bookmarks": [{"name": "vCenter", "url": "https://...", "type": "Infrastructure Components"}, ...],
+                  "bookmarks": [{"name": "vCenter", "url": "https://...", "type": "Infrastructure Components", "auth": true,
+                                 "username": "org-1@vsphere.local", "password": "<the org's password>"},
+                                {"name": "Harbor registry", "url": "https://...", "type": "Application Components", "auth": false}, ...],
                   "folders": [".kube", "gitops", "wireguard", "yaml-files"],
                   "environment_variables": [{"name": "WAF_DEMO_HOST", "value": "http-route-gitops.org-1-gitops.vcf9.lab"}],
                   "certificates": [{"name": "vault-root-ca", "pem": "-----BEGIN CERTIFICATE-----\n..."}, ...]}
@@ -16,6 +18,10 @@
                  (the services' URLs) - the same for every org, except that a
                  bookmark url may contain "{org_name}", which is replaced by the
                  org just assigned (URL-encoded), e.g. .../tenant/{org_name}/.
+                 A bookmark with "auth": true also carries the login for that
+                 service ("username": <org>, <org>@<sso domain> for vCenter, or
+                 admin for ArgoCD; "password": the org's password); "auth":
+                 false has no credentials.
                  Assigns the lowest-numbered unassigned org and removes it
                  from /orgs; 409 {"error": "no org available"} if none left
 
@@ -25,7 +31,7 @@ a later GET /orgs no longer lists it); there is deliberately no release.
 
 Everything it needs is in one root-only JSON config, re-read per request:
   {"username", "password", "port", "cert", "key", "home_base", 
-   "info": {...}, "bookmarks": [{"name", "url", "type"}, ...], "folders": ["name", ...],
+   "info": {...}, "bookmarks": [{"name", "url", "type", "auth", "username"?, "password"?}, ...], "folders": ["name", ...],
    "environment_variables": [{"name", "value"}, ...], "certificates": [{"name", "file"}, ...],
    "orgs": [{"name", "password"}, ...]}
 rendered by gw-org-api.sh (which owns the org list/password derivation - the
@@ -78,11 +84,19 @@ def available_orgs(cfg):
     return out
 
 
-def bookmarks_for(cfg, org_name):
-    """The config's bookmarks with "{org_name}" in their url replaced by the
-    org that was just assigned."""
+def bookmarks_for(cfg, org_name, org_password):
+    """The config's bookmarks for the org that was just assigned: "{org_name}" in the url (URL-encoded) and in the
+    username (as is), "{org_password}" in the password. The config only holds the placeholders."""
     quoted = urllib.parse.quote(org_name, safe="")
-    return [{**b, "url": b["url"].replace("{org_name}", quoted)} for b in cfg.get("bookmarks", [])]
+    out = []
+    for b in cfg.get("bookmarks", []):
+        e = {**b, "url": b["url"].replace("{org_name}", quoted)}
+        if "username" in e:
+            e["username"] = e["username"].replace("{org_name}", org_name)
+        if "password" in e:
+            e["password"] = e["password"].replace("{org_password}", org_password)
+        out.append(e)
+    return out
 
 
 def environment_variables_for(cfg, org_name):
@@ -192,7 +206,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": "no org available"})
             sys.stderr.write(f"assigned {org['name']} to {self.client_address[0]}\n")
             return self._send(200, {"org_name": org["name"], "org_password": org["password"],
-                                    **cfg.get("info", {}), "bookmarks": bookmarks_for(cfg, org["name"]),
+                                    **cfg.get("info", {}), "bookmarks": bookmarks_for(cfg, org["name"], org["password"]),
                                     "folders": list(cfg.get("folders", [])),
                                     "environment_variables": environment_variables_for(cfg, org["name"]),
                                     "certificates": certificates_for(cfg)})

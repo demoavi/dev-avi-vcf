@@ -147,6 +147,21 @@ CERT_CONF_EOF
   vault write -tls-skip-verify -format=json ${vault_pki_name}/root/sign-intermediate issuer_ref="${vault_pki_cert_issuer_name}" csr=@${vault_pki_intermediate_cert_path} format=pem_bundle ttl="${vault_pki_intermediate_max_lease_ttl}" | jq -r '.data.certificate' | tee ${vault_pki_intermediate_cert_path_signed}
   vault write -tls-skip-verify ${vault_pki_intermediate_name}/intermediate/set-signed certificate=@${vault_pki_intermediate_cert_path_signed}
   vault write -tls-skip-verify ${vault_pki_intermediate_name}/roles/${vault_pki_intermediate_role_name} issuer_ref="$(vault read -tls-skip-verify -field=default ${vault_pki_intermediate_name}/config/issuers)" allowed_domains="${domain}" allow_subdomains=${vault_pki_intermediate_role_allow_subdomains} max_ttl="${vault_pki_intermediate_role_max_ttl}"
+  # Read-only login for the students: the userpass method with one user per org (name = org, password = the org's usual
+  # one, derived as in gw-accounts.sh) and a policy that can only read and list the two PKI mounts (CA, issuers, roles,
+  # certificate metadata - Vault never returns a private key). Nothing under auth/ (cert-manager's AppRole) or the rest
+  # of sys/ is reachable, and there are no per-org secrets in this Vault to cross. The org API hands the login out in the
+  # Vault bookmark. Idempotent: the method is only enabled once, the policy and the users are overwritten.
+  vault auth list -tls-skip-verify | grep -q '^userpass/' || vault auth enable -tls-skip-verify userpass
+  vault policy write -tls-skip-verify "${vault_student_policy_name}" - <<VAULT_POLICY_EOF
+path "${vault_pki_name}/*" { capabilities = ["read", "list"] }
+path "${vault_pki_intermediate_name}/*" { capabilities = ["read", "list"] }
+VAULT_POLICY_EOF
+  for vault_org in $(echo "${vcf_a_organizations}" | jq -r '.[].name'); do
+    vault_org_password="VMware1!$(echo -n "${gw_accounts_secret}${vault_org}" | sha256sum | cut -c1-4)VMware1!"
+    printf '%s' "${vault_org_password}" | vault write -tls-skip-verify "auth/userpass/users/${vault_org}" password=- policies="${vault_student_policy_name}" > /dev/null
+  done
+  log_notify "Vault: read-only student login (policy ${vault_student_policy_name}) created for $(echo "${vcf_a_organizations}" | jq -r 'length') org(s)"
   # The root CA's public certificate for the org API (gw-org-api.py returns it in the "certificates" list as vault-root-ca;
   # the desktop adds it to its trust store). Vault serves it without authentication. Never fatal: only a convenience for clients.
   if curl -sk -m 10 "https://127.0.0.1:8200/v1/${vault_pki_name}/ca/pem" | grep -q "BEGIN CERTIFICATE" \

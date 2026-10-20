@@ -113,23 +113,29 @@ info_json=$(jq -n -c --arg sso "${sso_domain}" --arg kv "${kubectl_version}" '{s
 # Every bookmark carries a type: "Infrastructure Components" (the SDDC consoles) or "Application Components" (what the
 # student uses on top: Git, Harbor, the Vault CA). The application ones are listed when they are CONFIGURED to be deployed
 # (same conditions as their own bootstrap scripts), not when they are up yet - this script runs first, and the student
-# desktop checks natively whether each one answers. Lines: <type>|<label>|<url>; a url may contain {org_name}
-# (see above).
+# desktop checks natively whether each one answers. Lines: <type>|<label>|<url>|<auth>|<username>; a url or username may
+# contain {org_name} (see above). auth is true when the student has a login for it: the entry then also carries "username"
+# and "password" (the placeholder {org_password}, replaced by the server with the password of the org it assigns - no
+# password is stored in the config); false: the entry has no credentials.
 infra_type="Infrastructure Components"
 app_type="Application Components"
 bookmark_lines=""
-add_bookmark() { bookmark_lines="${bookmark_lines}${1}|${2}|${3}"$'\n'; }
-add_bookmark "${infra_type}" "vCenter" "https://${basename_sddc}-vc01.${domain}/ui/"
-add_bookmark "${infra_type}" "NSX" "https://${basename_sddc}-nsx01.${domain}"
-add_bookmark "${infra_type}" "Avi" "https://${basename_sddc}-avi.${domain}"
-add_bookmark "${infra_type}" "VCF Automation" "https://${basename_sddc}-auto-vip.${domain}/tenant/{org_name}/"
+# add_bookmark <type> <label> <url> [<username>]: with a username the entry is auth true, without it auth false.
+add_bookmark() { local bm_auth="false"; [ -n "${4:-}" ] && bm_auth="true"; bookmark_lines="${bookmark_lines}${1}|${2}|${3}|${bm_auth}|${4:-}"$'\n'; }
+# Per-org accounts (same name and password as the gw account, see gw-accounts.sh): the vCenter SSO user is <org>@<sso domain>,
+# NSX, Avi, VCF Automation, Git and Vault take <org>; ArgoCD's only local account is admin (its password is the org's).
+# Harbor and the rest have no student account.
+add_bookmark "${infra_type}" "vCenter" "https://${basename_sddc}-vc01.${domain}/ui/" "{org_name}${sso_domain:+@${sso_domain}}"
+add_bookmark "${infra_type}" "NSX" "https://${basename_sddc}-nsx01.${domain}" "{org_name}"
+add_bookmark "${infra_type}" "Avi" "https://${basename_sddc}-avi.${domain}" "{org_name}"
+add_bookmark "${infra_type}" "VCF Automation" "https://${basename_sddc}-auto-vip.${domain}/tenant/{org_name}/" "{org_name}"
 # Git (spec.sddc.k8s.git.enabled): straight to the org's own repo, git.<avi subdomain>.<domain>/<org>/<repo>
-[ "${git_enabled}" == "true" ] && add_bookmark "${app_type}" "Git server" "https://${git_fqdn_prefix}.${avi_subdomain}.${domain}/{org_name}/${git_repo_name}"
+[ "${git_enabled}" == "true" ] && add_bookmark "${app_type}" "Git server" "https://${git_fqdn_prefix}.${avi_subdomain}.${domain}/{org_name}/${git_repo_name}" "{org_name}"
 # ArgoCD (vks_cluster.argocd.enabled of the org, needs git and a VKS cluster, installed per org by vcfa_tenant_bootstrap.sh):
 # at argocd.<org>-vks.<domain>. The list is not per org, so it is shown when any org has a VKS cluster with ArgoCD.
 if [ "${git_enabled}" == "true" ] \
    && echo "${vcf_a_organizations}" | jq -e 'any(.[]; .vks_cluster.enabled == true and .vks_cluster.argocd.enabled == true)' >/dev/null 2>&1; then
-  add_bookmark "${app_type}" "ArgoCD" "https://${argocd_fqdn_prefix}.{org_name}-vks.${domain}"
+  add_bookmark "${app_type}" "ArgoCD" "https://${argocd_fqdn_prefix}.{org_name}-vks.${domain}" "admin"
 fi
 # Harbor: deployed as a supervisor_services entry of type harbor (supervisor-bootstrap.sh)
 echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor")' >/dev/null 2>&1 \
@@ -139,13 +145,14 @@ echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor")' >/dev/null 2
 vault_for_orgs="false"
 echo "${vcf_a_organizations}" | jq -e 'any(.[]; .namespace.vault_integration.enabled == true)' >/dev/null 2>&1 && vault_for_orgs="true"
 if [ "${vault_for_orgs}" == "true" ] || [ "${k8s_enabled}" == "true" ]; then
-  add_bookmark "${app_type}" "Private Certificate Authority (Vault)" "https://vault.${domain}:8200"
+  add_bookmark "${app_type}" "Private Certificate Authority (Vault)" "https://vault.${domain}:8200" "{org_name}"
 fi
 bookmarks_json="[]"
-while IFS='|' read -r bookmark_type bookmark_name bookmark_url
+while IFS='|' read -r bookmark_type bookmark_name bookmark_url bookmark_auth bookmark_user
 do
   [ -n "${bookmark_name}" ] || continue
-  bookmarks_json=$(jq -c --arg t "${bookmark_type}" --arg n "${bookmark_name}" --arg u "${bookmark_url}" '. += [{name: $n, url: $u, type: $t}]' <<< "${bookmarks_json}")
+  bookmarks_json=$(jq -c --arg t "${bookmark_type}" --arg n "${bookmark_name}" --arg u "${bookmark_url}" --arg a "${bookmark_auth}" --arg user "${bookmark_user}" \
+    '. += [{name: $n, url: $u, type: $t, auth: ($a == "true")} + (if $a == "true" then {username: $user, password: "{org_password}"} else {} end)]' <<< "${bookmarks_json}")
 done <<< "${bookmark_lines}"
 # Folders of the org's home on this gw that the student desktop copies (variables.json org_folders, same names on the gw and
 # on the desktop, relative to the home). Same principle as the bookmarks: a folder is listed when the deployment is
