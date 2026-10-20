@@ -134,13 +134,12 @@ fi
 # Harbor: deployed as a supervisor_services entry of type harbor (supervisor-bootstrap.sh)
 echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor")' >/dev/null 2>&1 \
   && add_bookmark "${app_type}" "Harbor registry" "https://harbor.${avi_subdomain}.${domain}"
-# Vault (vault-pki-bootstrap.sh's own condition: an org with vault_integration, or the k8s cluster): by the gw's IP, same
-# derivation as the certificate's SAN above, Vault's listener port.
+# Vault (vault-pki-bootstrap.sh's own condition: an org with vault_integration, or the k8s cluster): by its name
+# vault.<domain> (A record of the gw in bind, gw-setup.sh.tpl; also a SAN of Vault's certificate), Vault's listener port.
 vault_for_orgs="false"
 echo "${vcf_a_organizations}" | jq -e 'any(.[]; .namespace.vault_integration.enabled == true)' >/dev/null 2>&1 && vault_for_orgs="true"
 if [ "${vault_for_orgs}" == "true" ] || [ "${k8s_enabled}" == "true" ]; then
-  vault_ip=$(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1)
-  [ -n "${vault_ip}" ] && add_bookmark "${app_type}" "Private Certificate Authority (Vault)" "https://${vault_ip}:8200"
+  add_bookmark "${app_type}" "Private Certificate Authority (Vault)" "https://vault.${domain}:8200"
 fi
 bookmarks_json="[]"
 while IFS='|' read -r bookmark_type bookmark_name bookmark_url
