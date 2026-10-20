@@ -358,8 +358,14 @@ if [ "${deployment_kind}" == "vApp" ]; then
 fi
 
 sddc_manager_api 3 2 GET '' "${ip_vcf_installer}" v1/bundles $(jq -c -r .accessToken /tmp/token_vcfi.json)
-depots_ids=$(echo ${response_body} | jq --arg arg "${vcf_version}" '[.elements[] | select ((.components[0].imageType == "INSTALL") and (.version | startswith($arg))) | .id]')
-depots_to_download=$(echo ${response_body} | jq --arg arg "${vcf_version}" '[.elements[] | select ((.components[0].imageType == "INSTALL") and (.version | startswith($arg))) | .id ] | length')
+# Only the INSTALL bundles of the build being deployed. A bundle's .version is "<major.minor.patch>-<build>" and is the
+# same for the "9.1.1.0", "9.1.1.0100" and "9.1.1.0200" releases of 9.1.1, so matching on it alone pulls every patch level
+# the depot lists (about 86 GB more); the release is in the component's toVersion ("9.1.1.0.<build>" for the base one),
+# matched here with vcf_version_full ("9.1.1.0", from the ESX ISO name) plus a dot - without the dot "9.1.1.0" would also
+# match "9.1.1.0100". When vcf_version_full is empty the match falls back to the old .version prefix.
+bundle_select='select ((.components[0].imageType == "INSTALL") and (if $full != "" then (.components[0].toVersion | startswith($full + ".")) else (.version | startswith($arg)) end))'
+depots_ids=$(echo ${response_body} | jq --arg arg "${vcf_version}" --arg full "${vcf_version_full}" "[.elements[] | ${bundle_select} | .id]")
+depots_to_download=$(echo ${response_body} | jq --arg arg "${vcf_version}" --arg full "${vcf_version_full}" "[.elements[] | ${bundle_select} | .id ] | length")
 echo ${depots_ids} | jq -c -r .[] | while read depot_id
 do
   sddc_manager_api 3 2 PATCH '{"bundleDownloadSpec":{"downloadNow":true}}' "${ip_vcf_installer}" v1/bundles/${depot_id} $(jq -c -r .accessToken /tmp/token_vcfi.json)
@@ -375,7 +381,7 @@ retry_download=60 ; pause_download=20 ; attempt_download=1
 while true
 do
   sddc_manager_api 3 2 GET '' "${ip_vcf_installer}" v1/bundles $(jq -c -r .accessToken /tmp/token_vcfi.json)
-  depot_downloaded=$(echo ${response_body} | jq --arg arg "${vcf_version}" '[.elements[] | select ((.components[0].imageType == "INSTALL") and (.downloadStatus == "SUCCESSFUL") and (.version | startswith($arg))) ] | length')
+  depot_downloaded=$(echo ${response_body} | jq --arg arg "${vcf_version}" --arg full "${vcf_version_full}" "[.elements[] | ${bundle_select} | select (.downloadStatus == \"SUCCESSFUL\") ] | length")
   if [[ ${depot_downloaded} == ${depots_to_download} ]]; then
     log_notify "VCF-I: all bundles downloaded"
     break
