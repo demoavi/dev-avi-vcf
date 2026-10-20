@@ -141,11 +141,12 @@ fi
 echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor")' >/dev/null 2>&1 \
   && add_bookmark "${app_type}" "Harbor registry" "https://harbor.${avi_subdomain}.${domain}"
 # Vault (vault-pki-bootstrap.sh's own condition: an org with vault_integration, or the k8s cluster): by its name
-# vault.<domain> (A record of the gw in bind, gw-setup.sh.tpl; also a SAN of Vault's certificate), Vault's listener port.
+# vault.<domain> (A record of the gw in bind, gw-setup.sh.tpl; also a SAN of Vault's certificate), Vault's listener port, on
+# the UI login page with the userpass method preselected (?with=<mount path>, see vault-pki-bootstrap.sh).
 vault_for_orgs="false"
 echo "${vcf_a_organizations}" | jq -e 'any(.[]; .namespace.vault_integration.enabled == true)' >/dev/null 2>&1 && vault_for_orgs="true"
 if [ "${vault_for_orgs}" == "true" ] || [ "${k8s_enabled}" == "true" ]; then
-  add_bookmark "${app_type}" "Private Certificate Authority (Vault)" "https://vault.${domain}:8200" "{org_name}"
+  add_bookmark "${app_type}" "Private Certificate Authority (Vault)" "https://vault.${domain}:8200/ui/vault/auth?with=userpass" "{org_name}"
 fi
 bookmarks_json="[]"
 while IFS='|' read -r bookmark_type bookmark_name bookmark_url bookmark_auth bookmark_user

@@ -152,7 +152,14 @@ CERT_CONF_EOF
   # certificate metadata - Vault never returns a private key). Nothing under auth/ (cert-manager's AppRole) or the rest
   # of sys/ is reachable, and there are no per-org secrets in this Vault to cross. The org API hands the login out in the
   # Vault bookmark. Idempotent: the method is only enabled once, the policy and the users are overwritten.
-  vault auth list -tls-skip-verify | grep -q '^userpass/' || vault auth enable -tls-skip-verify userpass
+  # listing_visibility=unauth: the login page lists only the mounts that allow it, and the Vault bookmark of the org API links to
+  # /ui/vault/auth?with=userpass (the UI reads "with" as the mount path), so the method is preselected, not hidden under "Other".
+  # It reveals only that a userpass mount exists.
+  if vault auth list -tls-skip-verify | grep -q '^userpass/'; then
+    vault auth tune -tls-skip-verify -listing-visibility=unauth userpass
+  else
+    vault auth enable -tls-skip-verify -listing-visibility=unauth userpass
+  fi
   vault policy write -tls-skip-verify "${vault_student_policy_name}" - <<VAULT_POLICY_EOF
 path "${vault_pki_name}/*" { capabilities = ["read", "list"] }
 path "${vault_pki_intermediate_name}/*" { capabilities = ["read", "list"] }
