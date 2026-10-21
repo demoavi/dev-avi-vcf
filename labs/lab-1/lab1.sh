@@ -1,7 +1,7 @@
 #!/bin/bash
 # lab1.sh - drive the VCF Automation org catalog through the API, the same calls the org portal makes, in three steps:
 #   1. create-2-vms                     deployment <name>          (first namespace, first VM image, first VM size, app <app>)
-#   2. create-virtual-service-dynamic   deployment claude-vs       (app <app>, target port 80, DNS record, SSL, Trusted certificate)
+#   2. create-virtual-service           deployment claude-vs       (app <app>, target port 80, DNS record, SSL, Trusted certificate)
 #   3. create-2-vms                     deployment <name>-2        (same settings as step 1)
 #   4. Avi check                         the DNS name of the HTTPRoute of step 2 must exist in Avi: parent VS (vsvip DNS entry)
 #                                        -> child VS of that parent -> its pool group -> its pool(s), which must hold
@@ -26,7 +26,7 @@
 #
 # Optional environment:
 #   BLUEPRINT_VMS    catalog item of steps 1 and 3 (default create-2-vms)
-#   BLUEPRINT_VS     catalog item of step 2 (default create-virtual-service-dynamic)
+#   BLUEPRINT_VS     catalog item of step 2 (default create-virtual-service)
 #   VM_DEPLOYMENT_NAME   deployment name of step 1 (default test-claude; the optional 9th argument does the same)
 #   VS_DEPLOYMENT_NAME   deployment name of step 2 (default claude-vs)
 #   VM2_DEPLOYMENT_NAME  deployment name of step 3 (default <step 1 name>-2)
@@ -54,7 +54,7 @@ app_name="${10:-test-claude}"
 suffix="${NAME_SUFFIX:-}"
 # catalog items (blueprints) and the virtual service deployment name; override from the environment if they are renamed
 blueprint_vms="${BLUEPRINT_VMS:-create-2-vms}"
-blueprint_vs="${BLUEPRINT_VS:-create-virtual-service-dynamic}"
+blueprint_vs="${BLUEPRINT_VS:-create-virtual-service}"
 # deployment names of the three requests; the optional 9th argument overrides the first one
 vm_deployment_name="${9:-${VM_DEPLOYMENT_NAME:-test-claude}}"
 vs_deployment_name="${VS_DEPLOYMENT_NAME:-claude-vs}"
@@ -173,9 +173,16 @@ run_step() {
       '{namespace: $ns, vm_image_id: $img, vm_flavor: $f, app: $a}')
   else
     local cert
-    api "${bp}: form data apps" "catalog/api/items/${item_id}/versions/${version}/data/vro-actions/com.demo.supervisor/getSupervisorApps?namespace=${ns}"
-    echo "${CALL_BODY}" | jq -e --arg a "${app_name}" 'any(.content[]?; .id == $a)' > /dev/null 2>&1 \
-      || { step_detail[idx]="app ${app_name} is not offered by the Supervisor apps list of ${ns}: $(echo "${CALL_BODY}" | jq -c '[.content[]?.id]')"; return 1; }
+    # the app list is either a fixed enum of the form (kept up to date by the Supervisor watcher) or a dynamic vRO list
+    local offered
+    if [ "$(echo "${schema}" | jq -r '(.schema.properties.app.enum // []) | length' 2> /dev/null)" -gt 0 ]; then
+      offered=$(echo "${schema}" | jq -c '[.schema.properties.app.enum[]]')
+    else
+      api "${bp}: form data apps" "catalog/api/items/${item_id}/versions/${version}/data/vro-actions/com.demo.supervisor/getSupervisorApps?namespace=${ns}"
+      offered=$(echo "${CALL_BODY}" | jq -c '[.content[]?.id]' 2> /dev/null)
+    fi
+    echo "${offered}" | jq -e --arg a "${app_name}" 'index($a) != null' > /dev/null 2>&1 \
+      || { step_detail[idx]="app ${app_name} is not offered for ${ns}: ${offered}"; return 1; }
     cert=$(echo "${schema}" | jq -r '[.schema.properties.ssl_cert.enum[]? | select(startswith("Trusted"))][0] // empty')
     [ -n "${cert}" ] || { step_detail[idx]="no Trusted certificate option in the form"; return 1; }
     inputs=$(jq -n --arg ns "${ns}" --arg a "${app_name}" --arg c "${cert}" \
