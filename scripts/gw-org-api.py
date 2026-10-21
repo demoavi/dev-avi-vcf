@@ -5,7 +5,7 @@
   POST /org   -> {"org_name": "org-1", "org_password": "...", <info fields>,
                   "bookmarks": [{"name": "vCenter", "url": "https://...", "type": "Infrastructure Components", "auth": true,
                                  "username": "org-1@vsphere.local", "password": "<the org's password>"},
-                                {"name": "Harbor registry", "url": "https://...", "type": "Application Components", "auth": false}, ...],
+                                {"name": "Harbor registry", "url": "https://...", "type": "Application Components", "auth": true, "username": "org-1", "password": "..."}, ...],
                   "folders": [".kube", "gitops", "wireguard", "yaml-files"],
                   "environment_variables": [{"name": "WAF_DEMO_HOST", "value": "http-route-gitops.org-1-gitops.vcf9.lab"}],
                   "certificates": [{"name": "vault-root-ca", "pem": "-----BEGIN CERTIFICATE-----\n..."}, ...]}

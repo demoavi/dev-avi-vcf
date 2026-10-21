@@ -124,7 +124,7 @@ bookmark_lines=""
 add_bookmark() { local bm_auth="false"; [ -n "${4:-}" ] && bm_auth="true"; bookmark_lines="${bookmark_lines}${1}|${2}|${3}|${bm_auth}|${4:-}"$'\n'; }
 # Per-org accounts (same name and password as the gw account, see gw-accounts.sh): the vCenter SSO user is <org>@<sso domain>,
 # NSX, Avi, VCF Automation, Git and Vault take <org>; ArgoCD's only local account is admin (its password is the org's).
-# Harbor and the rest have no student account.
+# Harbor: a local read-only (guest) user per org, created by vcfa_tenant_bootstrap.sh.
 add_bookmark "${infra_type}" "vCenter" "https://${basename_sddc}-vc01.${domain}/ui/" "{org_name}${sso_domain:+@${sso_domain}}"
 add_bookmark "${infra_type}" "NSX" "https://${basename_sddc}-nsx01.${domain}" "{org_name}"
 add_bookmark "${infra_type}" "Avi" "https://${basename_sddc}-avi.${domain}" "{org_name}"
@@ -139,7 +139,7 @@ if [ "${git_enabled}" == "true" ] \
 fi
 # Harbor: deployed as a supervisor_services entry of type harbor (supervisor-bootstrap.sh)
 echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor")' >/dev/null 2>&1 \
-  && add_bookmark "${app_type}" "Harbor registry" "https://harbor.${avi_subdomain}.${domain}"
+  && add_bookmark "${app_type}" "Harbor registry" "https://harbor.${avi_subdomain}.${domain}" "{org_name}"
 # Vault (vault-pki-bootstrap.sh's own condition: an org with vault_integration, or the k8s cluster): by its name
 # vault.<domain> (A record of the gw in bind, gw-setup.sh.tpl; also a SAN of Vault's certificate), Vault's listener port, on
 # the UI login page with the userpass method preselected (?with=<mount path>, see vault-pki-bootstrap.sh).

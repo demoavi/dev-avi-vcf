@@ -1280,6 +1280,50 @@ else
           "$(jq -n --arg u "${org_name}" --arg p "${org_password}" '{username: $u, full_name: $u, password: $p}')"
         log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: NSX node user ${org_name} created with auditor (read-only) role" "${log_file}" "" ""
       fi
+
+      #
+      # Harbor per-org read-only user (only when Harbor is deployed, see supervisor-bootstrap.sh): a local db_auth user named
+      # after the org, same password as every other org account, member of the projects as "guest" (role_id 3: pull/browse,
+      # no push). The role is checked by NAME before it is granted, so another Harbor release can never silently hand out a
+      # writing role. Soft-fails: a problem only logs a warning, never aborts the other orgs.
+      #
+      if echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor")' > /dev/null 2>&1; then
+        harbor_url="https://harbor.${avi_subdomain}.${domain}"
+        harbor_curl() { curl -sk -m 30 -u "admin:${generic_password}" -H 'Content-Type: application/json' "$@"; }
+        harbor_mode=$(harbor_curl "${harbor_url}/api/v2.0/systeminfo" | jq -r '.auth_mode // empty')
+        if [ "${harbor_mode}" != "db_auth" ]; then
+          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: WARNING: Harbor not reachable or auth_mode '${harbor_mode}' is not db_auth, skipping Harbor user ${org_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+        else
+          harbor_user_id=$(harbor_curl "${harbor_url}/api/v2.0/users/search?username=${org_name}" | jq -r --arg u "${org_name}" '[.[] | select(.username == $u)][0].user_id // empty')
+          if [ -z "${harbor_user_id}" ]; then
+            harbor_curl -X POST "${harbor_url}/api/v2.0/users" \
+              -d "$(jq -n --arg u "${org_name}" --arg p "${org_password}" '{username: $u, email: ($u + "@students.local"), realname: $u, password: $p}')" -o /dev/null
+            harbor_user_id=$(harbor_curl "${harbor_url}/api/v2.0/users/search?username=${org_name}" | jq -r --arg u "${org_name}" '[.[] | select(.username == $u)][0].user_id // empty')
+          else
+            # admin password reset keeps a rerun in line with the current org password
+            harbor_curl -X PUT "${harbor_url}/api/v2.0/users/${harbor_user_id}/password" \
+              -d "$(jq -n --arg p "${org_password}" '{new_password: $p}')" -o /dev/null
+          fi
+          if [ -z "${harbor_user_id}" ]; then
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: WARNING: Harbor user ${org_name} could not be created" "${log_file}" "${slack_webhook}" "${google_webhook}"
+          else
+            harbor_guest_ok="true"
+            for harbor_project in registry library; do
+              harbor_code=$(harbor_curl -X POST "${harbor_url}/api/v2.0/projects/${harbor_project}/members" -o /dev/null -w '%{http_code}' \
+                -d "$(jq -n --arg u "${org_name}" '{role_id: 3, member_user: {username: $u}}')")
+              case "${harbor_code}" in 201|409) ;; 404) ;; *) harbor_guest_ok="false" ;; esac
+              harbor_role=$(harbor_curl "${harbor_url}/api/v2.0/projects/${harbor_project}/members?entityname=${org_name}" | jq -r --arg u "${org_name}" '[.[] | select(.entity_name == $u)][0].role_name // empty')
+              if [ -n "${harbor_role}" ] && [ "${harbor_role}" != "guest" ]; then
+                harbor_guest_ok="false"
+                log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: WARNING: Harbor user ${org_name} has role '${harbor_role}' on ${harbor_project}, expected guest" "${log_file}" "${slack_webhook}" "${google_webhook}"
+              fi
+            done
+            if [ "${harbor_guest_ok}" == "true" ]; then
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: Harbor user ${org_name} ready (guest on registry and library, read-only)" "${log_file}" "" ""
+            fi
+          fi
+        fi
+      fi
     fi
   done < <(echo "${vcf_a_organizations}" | jq -c -r .[])
 fi
