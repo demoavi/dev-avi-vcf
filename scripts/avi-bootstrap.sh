@@ -577,9 +577,9 @@ fi
 # controller assigns itself (uuid, url, _last_modified, created_by), set name and mode, and POST that to
 # api/macro as {model_name: wafpolicy, data: ...}. A copy that already exists is left alone, so a re-run is safe.
 #
-# clone_waf_policy <new name> <mode>
+# clone_waf_policy <new name> <mode> [pre_crs_groups json array, optional]
 clone_waf_policy() {
-  local new_name=$1 new_mode=$2
+  local new_name=$1 new_mode=$2 pre_crs_groups=$3
   avi_api 2 2 GET "" "api/wafpolicy?name=${new_name}"
   if [ "$(echo ${response_body} | jq -c -r '.count')" -gt 0 ]; then
     log_only "WAF policy ${new_name} already exists, skipping"
@@ -590,7 +590,11 @@ clone_waf_policy() {
     log_notify "ERROR: default WAF policy System-WAF-Policy not found on the Avi ctrl, cannot create ${new_name}"
     exit 100
   fi
-  waf_policy_json=$(echo ${response_body} | jq -c --arg n "${new_name}" --arg m "${new_mode}" '.results[0] | del(.uuid, .url, ._last_modified, .created_by) | .name = $n | .mode = $m')
+  if [ -n "${pre_crs_groups}" ]; then
+    waf_policy_json=$(echo ${response_body} | jq -c --arg n "${new_name}" --arg m "${new_mode}" --argjson pcg "${pre_crs_groups}" '.results[0] | del(.uuid, .url, ._last_modified, .created_by) | .name = $n | .mode = $m | .pre_crs_groups = $pcg')
+  else
+    waf_policy_json=$(echo ${response_body} | jq -c --arg n "${new_name}" --arg m "${new_mode}" '.results[0] | del(.uuid, .url, ._last_modified, .created_by) | .name = $n | .mode = $m')
+  fi
   avi_api 2 2 POST "$(jq -n -c --argjson d "${waf_policy_json}" '{model_name: "wafpolicy", data: $d}')" api/macro
   log_only "WAF policy ${new_name} created (${new_mode})"
 }
@@ -598,3 +602,30 @@ avi_login
 clone_waf_policy "System-WAF-Policy-Detection" "WAF_MODE_DETECTION_ONLY"
 clone_waf_policy "System-WAF-Policy-Enforcement" "WAF_MODE_ENFORCEMENT"
 log_notify "WAF policies System-WAF-Policy-Detection and System-WAF-Policy-Enforcement configured"
+
+#
+# System-WAF-Policy-Enforcement-Php2shell: same clone as System-WAF-Policy-Enforcement above, plus four
+# pre-CRS rules (200-203) for the PHP2Shell RCE indicators from Broadcom KB 460068 (CVE-2026-109618/109619) -
+# PHPSESSID submitted as a POST form field, a malformed PHP_SESSION_UPLOAD_PROGRESS value, an uploaded
+# filename containing a PHP open tag, and an uploaded filename containing a serialized-PHP-object pattern.
+# Kept as its own policy rather than added to System-WAF-Policy-Enforcement so the php2shell demo app is the
+# only thing that ever references it.
+#
+php2shell_pre_crs_groups='[
+  {
+    "name": "php2shell-pre-crs",
+    "index": 0,
+    "rules": [
+      { "name": "php2shell-200-phpsessid-form-field", "index": 0, "enable": true, "mode": "WAF_MODE_ENFORCEMENT",
+        "rule": "SecRule REQUEST_METHOD \"@streq POST\" \"chain,id:200,phase:2,deny,msg:'"'"'PHP2Shell: PHPSESSID submitted as a POST form field (session fixation)'"'"'\" SecRule ARGS_NAMES \"@streq PHPSESSID\" \"\"" },
+      { "name": "php2shell-201-malformed-upload-progress", "index": 1, "enable": true, "mode": "WAF_MODE_ENFORCEMENT",
+        "rule": "SecRule ARGS:PHP_SESSION_UPLOAD_PROGRESS \"!@rx ^[A-Za-z0-9_.-]*$\" \"id:201,phase:2,deny,msg:'"'"'PHP2Shell: malformed PHP_SESSION_UPLOAD_PROGRESS'"'"'\"" },
+      { "name": "php2shell-202-php-tag-filename", "index": 2, "enable": true, "mode": "WAF_MODE_ENFORCEMENT",
+        "rule": "SecRule FILES_NAMES \"@contains <?php\" \"id:202,phase:2,deny,msg:'"'"'PHP2Shell: upload filename contains a PHP open tag'"'"'\"" },
+      { "name": "php2shell-203-serialized-object-filename", "index": 3, "enable": true, "mode": "WAF_MODE_ENFORCEMENT",
+        "rule": "SecRule FILES_NAMES \"@rx O:[0-9]+:\\\"\" \"id:203,phase:2,deny,msg:'"'"'PHP2Shell: upload filename contains a serialized PHP object pattern'"'"'\"" }
+    ]
+  }
+]'
+clone_waf_policy "System-WAF-Policy-Enforcement-Php2shell" "WAF_MODE_ENFORCEMENT" "${php2shell_pre_crs_groups}"
+log_notify "WAF policy System-WAF-Policy-Enforcement-Php2shell configured"

