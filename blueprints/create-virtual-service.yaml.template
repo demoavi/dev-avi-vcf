@@ -141,9 +141,9 @@ resources:
           issuerRef:
             name: vault-issuer
             kind: Issuer
-          commonName: ${env.deploymentName}.${avi_subdomain}.${domain}
+          commonName: ${input.app}.${avi_subdomain}.${domain}
           dnsNames:
-            - ${env.deploymentName}.${avi_subdomain}.${domain}
+            - ${input.app}.${avi_subdomain}.${domain}
           duration: 8760h
           renewBefore: 720h
           privateKey:
