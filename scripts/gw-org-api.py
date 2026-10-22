@@ -8,7 +8,7 @@
                                 {"name": "Harbor registry", "url": "https://...", "type": "Application Components", "auth": true, "username": "org-1", "password": "..."}, ...],
                   "folders": [".kube", "gitops", "wireguard", "yaml-files"],
                   "environment_variables": [{"name": "WAF_DEMO_HOST", "value": "http-route-gitops.org-1-gitops.vcf9.lab"}],
-                  "certificates": [{"name": "vault-root-ca", "pem": "-----BEGIN CERTIFICATE-----\n..."}, ...]}
+                  "certificates": [{"name": "vault-root-ca", "pem": "-----BEGIN CERTIFICATE-----\n..."}, {"name": "vault-intermediate-ca", "pem": "..."}, ...]}
                  where certificates are the CA certificates the client should add to its trust store (e.g. the Vault
                  root CA that signs the lab's certificates; an empty list when there are none, e.g. no Vault on the
                  gw) and the info fields are the config's "info" object (e.g.

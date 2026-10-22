@@ -199,6 +199,15 @@ VAULT_POLICY_EOF
   else
     log_notify "WARNING: could not publish the Vault root CA for the org API"
   fi
+  # Same for the intermediate CA (the one that actually signs the lab's certificates; vault-intermediate-ca in the list).
+  if curl -sk -m 10 "https://127.0.0.1:8200/v1/${vault_pki_intermediate_name}/ca/pem" | grep -q "BEGIN CERTIFICATE" \
+     && sudo mkdir -p /etc/gw-org-api \
+     && curl -sk -m 10 "https://127.0.0.1:8200/v1/${vault_pki_intermediate_name}/ca/pem" | sudo tee /etc/gw-org-api/vault-intermediate-ca.pem > /dev/null \
+     && sudo chmod 644 /etc/gw-org-api/vault-intermediate-ca.pem; then
+    log_notify "Vault intermediate CA published for the org API (/etc/gw-org-api/vault-intermediate-ca.pem)"
+  else
+    log_notify "WARNING: could not publish the Vault intermediate CA for the org API"
+  fi
   log_notify "Vault bootstrap complete"
 else
   log_notify "no org needs vault_integration and the k8s cluster is not enabled, skipping Vault bootstrap"

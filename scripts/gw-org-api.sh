@@ -185,8 +185,8 @@ if [ -n "${gitops_first_yaml}" ]; then
 fi
 new_conf=$(API_USER="${org_api_username}" API_PW="${org_api_password}" jq -n -c \
   --argjson orgs "${orgs_json}" --argjson port "${org_api_port}" --argjson info "${info_json}" --argjson bookmarks "${bookmarks_json}" --argjson folders "${folders_json}" --argjson env_vars "${env_vars_json}" \
-  --arg cert "${conf_dir}/cert.pem" --arg key "${conf_dir}/key.pem" --arg ca "${conf_dir}/vault-root-ca.pem" \
-  '{username: env.API_USER, password: env.API_PW, port: $port, cert: $cert, key: $key, home_base: "/home", info: $info, bookmarks: $bookmarks, folders: $folders, environment_variables: $env_vars, certificates: [{name: "vault-root-ca", file: $ca}], orgs: $orgs}')
+  --arg cert "${conf_dir}/cert.pem" --arg key "${conf_dir}/key.pem" --arg ca "${conf_dir}/vault-root-ca.pem" --arg ica "${conf_dir}/vault-intermediate-ca.pem" \
+  '{username: env.API_USER, password: env.API_PW, port: $port, cert: $cert, key: $key, home_base: "/home", info: $info, bookmarks: $bookmarks, folders: $folders, environment_variables: $env_vars, certificates: [{name: "vault-root-ca", file: $ca}, {name: "vault-intermediate-ca", file: $ica}], orgs: $orgs}')
 if [ -z "${new_conf}" ]; then
   log_notify "ERROR: gw-org-api: config rendering failed (is org_api_port '${org_api_port}' a number?), skipping"
   exit 0
