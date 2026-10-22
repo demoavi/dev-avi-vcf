@@ -1,3 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: php2shell-demo-app
+data:
+  index.php: |
+    <?php
+    session_start();
+    header('Content-Type: text/plain');
+    echo "PHP2Shell demo app - lab only\n";
+    echo "PHP version: " . phpversion() . "\n";
+    echo "Session ID: " . session_id() . "\n";
+    if (isset($_POST['PHPSESSID'])) {
+        echo "Received PHPSESSID form field: " . $_POST['PHPSESSID'] . "\n";
+    }
+    if (isset($_POST['PHP_SESSION_UPLOAD_PROGRESS'])) {
+        echo "Received PHP_SESSION_UPLOAD_PROGRESS: " . $_POST['PHP_SESSION_UPLOAD_PROGRESS'] . "\n";
+    }
+    if (!empty($_FILES['file']) && $_FILES['file']['error'] === UPLOAD_ERR_OK) {
+        $dir = '/tmp/uploads';
+        if (!is_dir($dir)) { mkdir($dir, 0777, true); }
+        $name = basename($_FILES['file']['name']);
+        $dest = $dir . '/' . $name;
+        if (move_uploaded_file($_FILES['file']['tmp_name'], $dest)) {
+            echo "Uploaded and stored as: $name\n";
+        } else {
+            echo "Upload failed\n";
+        }
+    } else {
+        echo "POST a file as 'file' to upload.\n";
+    }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,33 +47,17 @@ spec:
     spec:
       containers:
         - name: web-front3
-          image: tacobayle/busybox-v3
-          command: [ "sh", "-c"]
-          args:
-            - while true; do
-              echo -e "HTTP/1.1 200 OK\n\n$(date)\nApp version is $(printenv AppVersion)\nNode is $(printenv MY_NODE_NAME)\nPod is $(printenv MY_POD_NAME)\nNamespace is $(printenv MY_POD_NAMESPACE)\nPod IP is $(printenv MY_POD_IP)\nPod Service account is $(printenv MY_POD_SERVICE_ACCOUNT)" | nc -l -p 8080;
-              done;
-          env:
-            - name: MY_NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: MY_POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: MY_POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: MY_POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-            - name: MY_POD_SERVICE_ACCOUNT
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.serviceAccountName
+          image: harbor.avi.vcf9.lab/registry/php:8.3.35-apache
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: app
+              mountPath: /var/www/html/index.php
+              subPath: index.php
+      volumes:
+        - name: app
+          configMap:
+            name: php2shell-demo-app
       restartPolicy: Always
 ---
 apiVersion: v1
@@ -54,7 +70,7 @@ spec:
   ports:
     - protocol: TCP
       port: 80
-      targetPort: 8080
+      targetPort: 80
 ---
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: Gateway
@@ -93,4 +109,4 @@ spec:
         - name: svc-v3
           port: 80
   hostnames:
-    - "gw-v3.mydomain.com"
+    - "virtual-patching.mydomain.com"
