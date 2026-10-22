@@ -134,6 +134,26 @@ CERT_CONF_EOF
   fi
   vault operator unseal -tls-skip-verify $(jq -c -r .unseal_keys_hex[0] ${vault_secret_file_path})
   vault login -tls-skip-verify $(jq -c -r .root_token ${vault_secret_file_path})
+  # Auto-unseal at every start of the service: Vault comes back sealed after a gw reboot (or any restart) and every
+  # cert-manager Issuer that signs with it then fails with a 503 until somebody unseals it by hand. A systemd drop-in runs
+  # this script as ExecStartPost, which waits for Vault to answer and then unseals it with the key of the init file above
+  # (HTTP API, the key goes through stdin and never on a command line). Nothing happens when Vault is already unsealed.
+  # Rewritten on every run of this phase; Vault itself is not restarted here.
+  sudo tee /usr/local/bin/vault-unseal.sh > /dev/null <<UNSEAL_EOF
+#!/bin/bash
+for i in \$(seq 1 30); do
+  if [ "\$(curl -sk -m 5 -o /dev/null -w '%{http_code}' https://127.0.0.1:8200/v1/sys/health)" != "000" ]; then
+    jq -c '{key: .unseal_keys_hex[0]}' ${vault_secret_file_path} | curl -sk -m 10 -X PUT --data @- https://127.0.0.1:8200/v1/sys/unseal > /dev/null
+    exit 0
+  fi
+  sleep 2
+done
+exit 0
+UNSEAL_EOF
+  sudo chmod 700 /usr/local/bin/vault-unseal.sh
+  sudo mkdir -p /etc/systemd/system/vault.service.d
+  printf '[Service]\nExecStartPost=/usr/local/bin/vault-unseal.sh\n' | sudo tee /etc/systemd/system/vault.service.d/unseal.conf > /dev/null
+  sudo systemctl daemon-reload
   # root ca
   vault secrets enable -tls-skip-verify ${vault_pki_name}
   vault secrets tune -tls-skip-verify -max-lease-ttl=${vault_pki_max_lease_ttl} "${vault_pki_name}"
