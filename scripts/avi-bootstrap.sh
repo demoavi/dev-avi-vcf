@@ -617,13 +617,13 @@ php2shell_pre_crs_groups='[
     "index": 0,
     "rules": [
       { "name": "php2shell-200-phpsessid-form-field", "index": 0, "enable": true, "mode": "WAF_MODE_ENFORCEMENT",
-        "rule": "SecRule REQUEST_METHOD \"@streq POST\" \"chain,id:200,phase:2,deny,msg:'"'"'PHP2Shell: PHPSESSID submitted as a POST form field (session fixation)'"'"'\" SecRule ARGS_NAMES \"@streq PHPSESSID\" \"\"" },
+        "rule": "SecRule REQUEST_METHOD \"@streq POST\" \"id:200,phase:2,deny,status:403,t:none,tag:'"'"'CVE-2026-109618'"'"',tag:'"'"'CVE-2026-109619'"'"',msg:'"'"'PHP2Shell: PHPSESSID submitted as POST form field (session fixation)'"'"',severity:'"'"'CRITICAL'"'"',chain\" SecRule ARGS_NAMES \"@streq phpsessid\" \"t:none,t:lowercase\"" },
       { "name": "php2shell-201-malformed-upload-progress", "index": 1, "enable": true, "mode": "WAF_MODE_ENFORCEMENT",
-        "rule": "SecRule ARGS:PHP_SESSION_UPLOAD_PROGRESS \"!@rx ^[A-Za-z0-9_.-]*$\" \"id:201,phase:2,deny,msg:'"'"'PHP2Shell: malformed PHP_SESSION_UPLOAD_PROGRESS'"'"'\"" },
+        "rule": "SecRule REQUEST_METHOD \"@streq POST\" \"id:201,phase:2,deny,status:403,t:none,tag:'"'"'CVE-2026-109618'"'"',tag:'"'"'CVE-2026-109619'"'"',msg:'"'"'PHP2Shell: PHP_SESSION_UPLOAD_PROGRESS value contains unsafe characters'"'"',severity:'"'"'CRITICAL'"'"',chain\" SecRule ARGS:PHP_SESSION_UPLOAD_PROGRESS \"!@rx ^[a-zA-Z0-9_.-]+$\" \"t:none\"" },
       { "name": "php2shell-202-php-tag-filename", "index": 2, "enable": true, "mode": "WAF_MODE_ENFORCEMENT",
-        "rule": "SecRule FILES_NAMES \"@contains <?php\" \"id:202,phase:2,deny,msg:'"'"'PHP2Shell: upload filename contains a PHP open tag'"'"'\"" },
+        "rule": "SecRule FILES \"@rx <\\?(?:php|=)\" \"id:202,phase:2,deny,status:403,t:none,t:lowercase,tag:'"'"'CVE-2026-109618'"'"',msg:'"'"'PHP2Shell: PHP open tag in upload filename'"'"',severity:'"'"'CRITICAL'"'"'\"" },
       { "name": "php2shell-203-serialized-object-filename", "index": 3, "enable": true, "mode": "WAF_MODE_ENFORCEMENT",
-        "rule": "SecRule FILES_NAMES \"@rx O:[0-9]+:\\\"\" \"id:203,phase:2,deny,msg:'"'"'PHP2Shell: upload filename contains a serialized PHP object pattern'"'"'\"" }
+        "rule": "SecRule FILES \"@rx [|;](?:O|C|a|s):\\d+:\" \"id:203,phase:2,deny,status:403,t:none,tag:'"'"'CVE-2026-109619'"'"',msg:'"'"'PHP2Shell: Serialized PHP object in upload filename'"'"',severity:'"'"'CRITICAL'"'"'\"" }
     ]
   }
 ]'
