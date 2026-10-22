@@ -101,7 +101,7 @@ metadata:
 spec:
   wafPolicy:
     kind: AviRef
-    name: System-WAF-Policy-Enforcement-Php2shell
+    name: System-WAF-Policy-Enforcement
   analyticsPolicy:
     fullClientLogs:
       enabled: true
