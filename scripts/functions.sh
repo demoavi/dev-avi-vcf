@@ -487,6 +487,12 @@ blueprint_api() {
   response_code=$(tail -n1 <<< "$response")
   [[ ${response_code} == 2[0-9][0-9] ]]
 }
+# The ONE read-only NSX Manager node user shared by every org (NSX Manager caps local node users - about 10 custom ones -
+# so one per org does not scale to 16+ orgs, and its roles are not project-scoped anyway: every org saw the whole manager).
+# Created by nsx-bootstrap.sh, handed out as a bookmark credential by gw-org-api.sh. The password has the same 20-char shape
+# as every other derived password but is derived from a fixed label, not an org name, and is not generic_password.
+nsx_readonly_user="student"
+nsx_readonly_password() { echo "VMware1!$(echo -n "${gw_accounts_secret}nsx-readonly" | sha256sum | cut -c1-4)VMware1!"; }
 # find_org_manifest <folder> <kind> <metadata.name> - prints the path of the first single-document *.yaml file in
 # <folder> (not recursive) whose Kind and metadata.name match, so callers find a manifest by content and not by file
 # name. The folder can be owned by another user, hence sudo. Returns 1 if there is none.

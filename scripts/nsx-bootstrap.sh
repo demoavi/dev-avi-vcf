@@ -389,3 +389,19 @@ do
   nsx_set_object "policy/api/v1/infra/segments/${seg_name}" PUT "${seg_data}"
 done < <(echo ${nsx_segments_overlay} | jq -c -r '.[]')
 
+#
+# The single read-only NSX Manager node user for all the orgs (name/password: nsx_readonly_user/nsx_readonly_password in
+# functions.sh; gw-org-api.sh hands the same pair out). Replaces the old one-user-per-org of vcfa_tenant_bootstrap.sh, which hit
+# NSX Manager's cap on local users (error 36159) at the 11th org. Soft-fails (subshell: nsx_api exits 100 on an error): an
+# NSX console login is not worth aborting the pipeline for. An existing user is left as it is (password included).
+#
+if [ -n "${gw_accounts_secret}" ]; then
+  if ( nsx_get_object "api/v1/node/users" \
+       && if echo "${response_body}" | jq -e --arg u "${nsx_readonly_user}" '[.results[]? | select(.username == $u)] | length > 0' > /dev/null; then exit 0; fi \
+       && nsx_set_object "api/v1/node/users?action=create_user" POST \
+            "$(jq -n --arg u "${nsx_readonly_user}" --arg p "$(nsx_readonly_password)" '{username: $u, full_name: $u, password: $p}')" ); then
+    log_notify "NSX Manager read-only node user ${nsx_readonly_user} ready (shared by every org)"
+  else
+    log_notify "WARNING: nsx-bootstrap: could not create the NSX Manager read-only node user ${nsx_readonly_user} - students get no NSX login"
+  fi
+fi

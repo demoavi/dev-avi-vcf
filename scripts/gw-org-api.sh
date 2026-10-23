@@ -121,12 +121,13 @@ infra_type="Infrastructure Components"
 app_type="Application Components"
 bookmark_lines=""
 # add_bookmark <type> <label> <url> [<username>]: with a username the entry is auth true, without it auth false.
-add_bookmark() { local bm_auth="false"; [ -n "${4:-}" ] && bm_auth="true"; bookmark_lines="${bookmark_lines}${1}|${2}|${3}|${bm_auth}|${4:-}"$'\n'; }
+# An optional 5th argument is a FIXED password for an account shared by every org (instead of the assigned org's password).
+add_bookmark() { local bm_auth="false"; [ -n "${4:-}" ] && bm_auth="true"; bookmark_lines="${bookmark_lines}${1}|${2}|${3}|${bm_auth}|${4:-}|${5:-}"$'\n'; }
 # Per-org accounts (same name and password as the gw account, see gw-accounts.sh): the vCenter SSO user is <org>@<sso domain>,
-# NSX, Avi, VCF Automation, Git and Vault take <org>; ArgoCD's only local account is admin (its password is the org's).
+# Avi, VCF Automation, Git and Vault take <org>; NSX has ONE shared read-only user (nsx-bootstrap.sh, see functions.sh); ArgoCD's only local account is admin (its password is the org's).
 # Harbor: a local read-only (guest) user per org, created by vcfa_tenant_bootstrap.sh.
 add_bookmark "${infra_type}" "vCenter" "https://${basename_sddc}-vc01.${domain}/ui/" "{org_name}${sso_domain:+@${sso_domain}}"
-add_bookmark "${infra_type}" "NSX" "https://${basename_sddc}-nsx01.${domain}" "{org_name}"
+add_bookmark "${infra_type}" "NSX" "https://${basename_sddc}-nsx01.${domain}" "${nsx_readonly_user}" "$(nsx_readonly_password)"
 add_bookmark "${infra_type}" "Avi" "https://${basename_sddc}-avi.${domain}" "{org_name}"
 add_bookmark "${infra_type}" "VCF Automation" "https://${basename_sddc}-auto-vip.${domain}/tenant/{org_name}/" "{org_name}"
 # Git (spec.sddc.k8s.git.enabled): straight to the org's own repo, git.<avi subdomain>.<domain>/<org>/<repo>
@@ -149,11 +150,11 @@ if [ "${vault_for_orgs}" == "true" ] || [ "${k8s_enabled}" == "true" ]; then
   add_bookmark "${app_type}" "Private Certificate Authority (Vault)" "https://vault.${domain}:8200/ui/vault/auth?with=userpass" "{org_name}"
 fi
 bookmarks_json="[]"
-while IFS='|' read -r bookmark_type bookmark_name bookmark_url bookmark_auth bookmark_user
+while IFS='|' read -r bookmark_type bookmark_name bookmark_url bookmark_auth bookmark_user bookmark_password
 do
   [ -n "${bookmark_name}" ] || continue
-  bookmarks_json=$(jq -c --arg t "${bookmark_type}" --arg n "${bookmark_name}" --arg u "${bookmark_url}" --arg a "${bookmark_auth}" --arg user "${bookmark_user}" \
-    '. += [{name: $n, url: $u, type: $t, auth: ($a == "true")} + (if $a == "true" then {username: $user, password: "{org_password}"} else {} end)]' <<< "${bookmarks_json}")
+  bookmarks_json=$(jq -c --arg t "${bookmark_type}" --arg n "${bookmark_name}" --arg u "${bookmark_url}" --arg a "${bookmark_auth}" --arg user "${bookmark_user}" --arg pw "${bookmark_password}" \
+    '. += [{name: $n, url: $u, type: $t, auth: ($a == "true")} + (if $a == "true" then {username: $user, password: (if $pw != "" then $pw else "{org_password}" end)} else {} end)]' <<< "${bookmarks_json}")
 done <<< "${bookmark_lines}"
 # Folders of the org's home on this gw that the student desktop copies (variables.json org_folders, same names on the gw and
 # on the desktop, relative to the home). Same principle as the bookmarks: a folder is listed when the deployment is
