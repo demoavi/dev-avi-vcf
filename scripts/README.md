@@ -108,6 +108,16 @@ namespace (`vm-watcher`), a ServiceAccount + HMAC Secret + cert and code ConfigM
 every org namespace of an org with `blueprints.auto_update`, the watcher Deployment, and checks that the watcher posted a
 state and that each project has the named blueprint.
 
+### Manual tool: `vcfa_tenant_cleaning.sh` (not part of the pipeline)
+Run by hand on the gw to reset orgs: `vcfa_tenant_cleaning.sh [--org <name>] [--yes] [--dry-run] [--no-recreate]`.
+Without `--org` it takes every org still free in gw-org-api (assigned ones are left alone); with `--org` that org only,
+even if assigned. It always prints a destructive-action warning and asks for `yes` (`--yes` skips the prompt).
+Per org: claim it (`POST /org`, or a root-created `.assigned` for `--org`), reset the Gitea repo to the sample
+ConfigMap only, set AKO `deleteConfig=true` in each VKS cluster and wait for the Avi tenant to be empty, delete the
+blueprint deployments, the VKS cluster(s) and all namespaces. Then it reruns `vcfa_tenant_bootstrap.sh` to recreate
+the namespace and VKS cluster, and releases the cleaned orgs (an org whose cleaning failed stays claimed). Log:
+`/home/ubuntu/vcfa_tenant_cleaning.log`.
+
 ### Helpers
 `functions.sh` (log_notify, vcd_login, vcfa_login/vcfa_api, avi/nsx/vcenter API helpers, `find_org_manifest`).
 `gw-org-api.py`, `gw-blueprint-api.py`, `supervisor-blueprint-watcher.py`: the runtimes behind phases 2, 3 and 16.
