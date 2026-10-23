@@ -121,13 +121,8 @@ Scripts not listed do nothing per org.
 |---|---|
 | `gw-accounts.sh` | Linux account `<org>` with the derived password; `/home/<org>/wireguard` (700) with keypair, `wg0.conf` (tunnel `10.8.0.<N>/24`) and the wg-quick init script. |
 | `gw-org-api.sh` | Adds the org to the assignable list (name + derived password, bookmarks, folders, `WAF_DEMO_HOST`); `POST /org` assigns one org to one student desktop. |
-| `gw-blueprint-api.sh` | Nothing per org at install time; at runtime validates each posted project with VCF-A. |
 | `vault-pki-bootstrap.sh` | Read-only `student-readonly` Vault userpass login `<org>` (one per org). |
-| `esxi-bootstrap.sh` | No direct per-org step, but ESXi CPU/memory/storage scale with org count. |
-| `vcf-installer-bootstrap.sh`, `vcenter-bootstrap.sh`, `nsx-bootstrap.sh` | Nothing per org (shared SDDC infrastructure). |
 | `avi-bootstrap.sh` | Three DNS service domains per org: `<org>.<domain>`, `<org>-vks.<domain>`, `<org>-gitops.<domain>`. (The Avi tenant itself is created by VCF-A, see provider script.) |
-| `nsx-project-vpc.sh` | Per project from the NSX config (the org's NSX project itself is created by VCF-A regional networking). |
-| `supervisor-bootstrap.sh` | Shared Harbor/images; the helper scripts it generates ask which org to log in as. |
 | `git-bootstrap.sh` | Gitea user `<org>` (derived password) owning one private repo `<org>/<git_repo_name>`. |
 | `vcfa_provider_bootstrap.sh` | Renders the GitOps manifests (`gitops/*/*.yaml`, hostnames `<route>.<org>-gitops.<domain>`; existing files are kept) and the demo yaml (`<org>-vks.<domain>`) into `/home/<org>/`; creates the VCF-A **organization**, its **vDC** (CPU/memory/storage limits), VM classes, **regional networking settings** (NSX project, with a delete+recreate retry if it is not really backed), the **Avi setting** (PROVIDER_MANAGED tenant + quota + SEG, when `enable_avi`), and the **org admin user** `<org>` (Organization Administrator). Skips what already exists. |
 | `vcfa_tenant_bootstrap.sh` | Per org, with a fresh org-scoped token: **supervisor namespace** (PROVIDER_MANAGED orgs; class, limits, VM Service content library binding); **Vault integration** (cert-manager token Secret + Issuer in the namespace, if `vault_integration`); **VKS cluster** (1 per org) then waits for Available, fetches its kubeconfig, sets pod security and the `cert01` TLS secret; **ArgoCD** in that VKS cluster (`argocd.<org>-vks.<domain>`, if enabled); **blueprints** created and released in the org's project; **accounts**: vCenter SSO `<org>@<sso domain>` scoped to the org's namespace (siblings NoAccess), Avi `Tenant-Admin` `<org>` in tenant `<org>`, NSX node user `<org>` (auditor), Harbor read-only user `<org>`. |
