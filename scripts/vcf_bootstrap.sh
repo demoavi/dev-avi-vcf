@@ -91,7 +91,9 @@ fi
 # creates the HMAC secret and certificate the Supervisor side needs. supervisor-blueprint-watcher runs LAST: it needs the
 # org namespaces and their labels (vcfa_tenant_bootstrap) and the uploaded blueprints, so the watcher's first post already
 # finds them and fills the dropdown (the blueprint rewrite itself is gw-blueprint-api's runtime job, not a step).
-for phase in gw-accounts gw-org-api gw-blueprint-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap k8s-bootstrap git-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap supervisor-blueprint-watcher; do
+# vcfa-stabilize (soft-fail) runs right after vcf-installer-bootstrap: VCF Automation exists from then on and nothing talks to it
+# until vcfa_provider_bootstrap, whose first step is a health gate that waits for the platform to be calm again.
+for phase in gw-accounts gw-org-api gw-blueprint-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcfa-stabilize vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap k8s-bootstrap git-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap supervisor-blueprint-watcher; do
   bash "${script_dir}/${phase}.sh" "${jsonFile}"
   phase_exit=$?
   if [ ${phase_exit} -ne 0 ]; then

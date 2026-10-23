@@ -115,6 +115,10 @@ VCFA_VERSION="9.1.0"
 ACCEPT="Accept: application/json;version=${VCFA_VERSION}"
 CONTENT_TYPE="Content-Type: application/json;version=${VCFA_VERSION}"
 
+# Health gate (see vcfa_health_gate in functions.sh): the platform has just been through the SDDC build and the
+# vcfa-stabilize phase (API server restart), so wait until it answers calmly before the first provider call.
+vcfa_health_gate "${VCFA_HOST}"
+
 vcfa_login
 
 #

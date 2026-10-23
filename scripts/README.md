@@ -13,7 +13,7 @@ Do not edit a phase script while it is executing (bash reads scripts incremental
 
 ```
 gw-accounts -> gw-org-api -> gw-blueprint-api -> vault-pki-bootstrap -> esxi-bootstrap -> vcf-installer-bootstrap
--> vcenter-bootstrap -> nsx-bootstrap -> avi-bootstrap -> nsx-project-vpc -> supervisor-bootstrap -> k8s-bootstrap
+-> vcfa-stabilize -> vcenter-bootstrap -> nsx-bootstrap -> avi-bootstrap -> nsx-project-vpc -> supervisor-bootstrap -> k8s-bootstrap
 -> git-bootstrap -> vcfa_provider_bootstrap -> vcfa_tenant_bootstrap -> supervisor-blueprint-watcher
 ```
 
@@ -56,48 +56,66 @@ expect), exchanges license credentials for an activation code, downloads the INS
 `toVersion` starts with `<vcf_version_full>.`, i.e. base `9.1.1.0.*`), validates the SDDC spec (`POST /v1/sddcs/validations`),
 then submits and polls the SDDC build until `COMPLETED_WITH_SUCCESS`. The build itself can take many hours; silence is normal.
 
-### 7. `vcenter-bootstrap.sh`
+### 7. `vcfa-stabilize.sh` (soft-fail) + `vcfa-stabilize-node.sh`
+Runs right after the SDDC build, as soon as VCF Automation exists and before anything talks to it. Finds the single VCF-A
+node (the address of `spec.vcf_automation.ip_pool` that answers SSH and has the control-plane static pod manifests; the
+control-plane VIP takes one of the pool addresses too), logs in as `vmware-system-user` (override with
+`vcfa_ssh_user`) with the VCF-A admin password (`generic_password`; sshpass environment variable and sudo stdin, never a
+command line), copies `vcfa-stabilize-node.sh` over and runs it as root. The node script (idempotent; `status` is
+read-only, `apply` waits a bounded time for load1 < 20 first) sets what was measured to keep VCF-A up through its own CPU
+bursts (see "VCF-A stability" below): leader election 60s/40s/6s for kube-controller-manager, kube-scheduler,
+vsphere-cpi and Envoy Gateway, kube-vip 60/40/6 + preserve for both the control-plane static pod and the gateway VIPs,
+etcd CPU request 2500m + hourly compaction, probe tolerance for the Envoy Gateway controller and the two gateway proxies,
+and a CPU request for the BestEffort UI deployments. Static manifests are backed up to `/root/manifest-bak` and edited
+once (the etcd edit restarts the API server for ~2 minutes); objects the operator or Flux revert are re-asserted by a
+60-second systemd keeper (`vcfa-live-keeper`). Soft-fail: a node that cannot be found or logged in to, a layout with more
+than one control-plane node, or a remote error is logged and the pipeline goes on. `vcfa_stabilize=false` skips it.
+Not done here: any VM CPU/memory resize (the results below were measured at 32 vCPU / 128 GiB).
+
+### 8. `vcenter-bootstrap.sh`
 Against the newly built nested vCenter (govc): creates the extra port groups and silences the vSAN health alarms a
 nested vSAN can never pass (they block Supervisor enablement).
 
-### 8. `nsx-bootstrap.sh`
+### 9. `nsx-bootstrap.sh`
 NSX Manager readiness, uplink profile for the edge, transport zones, the external VLAN segment, the host transport
 node profile update, disables the OVF validation flag, deploys the edge nodes (fp-eth0 = overlay, fp-eth1 = external),
 waits for them, creates the edge cluster, then the Tier-0 (with its edge cluster association) and the overlay segments, and finally the single shared read-only NSX node user (`student`) that every org uses (NSX caps local node users, so none per org).
 
-### 9. `avi-bootstrap.sh`
+### 10. `avi-bootstrap.sh`
 Deploys the Avi controller through SDDC Manager (bundle pinned by `spec.sddc.avi.version`) then configures it: NSX
 cloud integration, service engine group(s), IPAM (VIP network and pool), the **DNS profile** (domains for the base
 subdomain plus three per org: `<org>.<domain>`, `<org>-vks.<domain>`, `<org>-gitops.<domain>`), the DNS virtual
 service, license/JWT, the traffic-generator helper, system WAF policies (`clone_waf_policy`, including
 `System-WAF-Policy-Enforcement-Php2shell` with the pre-CRS rules from Broadcom KB 460068), and the Avi upgrade.
 
-### 10. `nsx-project-vpc.sh`
+### 11. `nsx-project-vpc.sh`
 NSX multi-tenancy: per non-default project the Tier-0/edge-cluster project settings, transit-gateway attachments,
 inter-VPC transit gateway IP blocks, VPC connectivity profiles and VPC service profiles (VCF 9.1 only; the Avi
 onboarding workflow of the reference script is dropped).
 
-### 11. `supervisor-bootstrap.sh`
+### 12. `supervisor-bootstrap.sh`
 Subscribes the vCenter content library, enables the Supervisor (1 or 3 control-plane VMs from `supervisor_control_plane_count`, NSX_VPC networking, vSAN storage policy, waits for
 RUNNING/READY plus an extra settle time), installs the Supervisor Services (Harbor, ArgoCD) and pushes the ISO-delivered
 images to Harbor (preload list in the CR), and renders the Supervisor auth helper scripts and `harbor_rewrite_images.sh`.
 
-### 12. `k8s-bootstrap.sh` (optional, soft-fail)
+### 13. `k8s-bootstrap.sh` (optional, soft-fail)
 `spec.sddc.k8s.enabled`: one control-plane + N worker VMs from the Ubuntu cloud-image OVA (govc, static IPs,
 cloud-init), kubeadm, Antrea (NodePortLocal), Gateway API CRDs, AKO (Avi), local-path-provisioner, cert-manager and a
 ClusterIssuer backed by the gw's Vault PKI (AppRole). Shared platform for Helm releases.
 
-### 13. `git-bootstrap.sh` (optional, soft-fail)
+### 14. `git-bootstrap.sh` (optional, soft-fail)
 `spec.sddc.k8s.git.enabled`: Gitea (Helm, from the gw-tools ISO; image from Harbor) on the shared cluster, exposed through
 an AKO Gateway/HTTPRoute at `git.<avi subdomain>.<domain>` with a cert-manager certificate. Creates one private Gitea user
 and one private repo per org, then verifies one org cannot see another's repo.
 
-### 14. `vcfa_provider_bootstrap.sh`
+### 15. `vcfa_provider_bootstrap.sh`
 VCF Automation **provider-portal** half (provider bearer token): regions, external IP spaces, provider gateways,
 shared content libraries and their OVA items, then a per-org loop (see recap). Everything the tenant script needs
-already exists on exit. No-op if `spec.sddc.vcf_a` is unset.
+already exists on exit. No-op if `spec.sddc.vcf_a` is unset. Starts with a **health gate** (`vcfa_health_gate`): it waits for 5
+consecutive answers of the VCF-A gateway in under 3 s (`vcfa_gate_good`, `vcfa_gate_limit_sec`, `vcfa_gate_max_wait_sec` 900,
+`vcfa_health_gate=false` to skip) and then goes on even if the platform never calmed down.
 
-### 15. `vcfa_tenant_bootstrap.sh`
+### 16. `vcfa_tenant_bootstrap.sh`
 VCF Automation **org-portal** half (org-scoped OAuth token obtained by jwt-bearer exchange, one per org): supervisor
 namespaces, Vault integration, VKS clusters, ArgoCD, blueprints, and the per-org vCenter / Avi / NSX / Harbor
 accounts (see recap).
@@ -108,7 +126,7 @@ and the Supervisor. A "calm gate" waits before each new cluster until the provid
 cluster that was not Available the first time. `vks_sequential=false` restores the old create-all-then-wait behaviour;
 `vks_pause_between_orgs_sec` (default 20) spaces the orgs. These are environment variables of the script.
 
-### 16. `supervisor-blueprint-watcher.sh` (last, soft-fail)
+### 17. `supervisor-blueprint-watcher.sh` (last, soft-fail)
 Needs the org namespaces, their labels and the uploaded blueprints, hence last. Creates a provider-only vSphere
 namespace (`vm-watcher`), a ServiceAccount + HMAC Secret + cert and code ConfigMaps in it, namespaced Role/RoleBinding in
 every org namespace of an org with `blueprints.auto_update`, the watcher Deployment, and checks that the watcher posted a
@@ -127,6 +145,29 @@ the namespace and VKS cluster, and releases the cleaned orgs (an org whose clean
 ### Helpers
 `functions.sh` (log_notify, vcd_login, vcfa_login/vcfa_api, avi/nsx/vcenter API helpers, `find_org_manifest`).
 `gw-org-api.py`, `gw-blueprint-api.py`, `supervisor-blueprint-watcher.py`: the runtimes behind phases 2, 3 and 16.
+
+## VCF-A stability (nested lab)
+
+Measured on the 16-org nested lab, VCF-A as one node (32 vCPU, 128 GiB), 2026-10-23. What `vcfa-stabilize` does and does not fix:
+
+- **Symptom:** every 12-26 minutes the node load goes from ~10 to 100-500 for ~30 s (hundreds of runnable tasks, 0% idle,
+  0% steal in the last captures). Un-tuned, each burst made leader-elected controllers miss their lease (the API server
+  stalls for 10 s or more), `kube-vip` dropped the control-plane and gateway VIPs, and pods restarted in waves.
+- **Fixed:** with the settings above the platform survived bursts up to load 502 with no restart of kube-controller-manager,
+  kube-scheduler, kube-vip or the gateway proxies and no failed VIP probe over 4+ hours (only Envoy Gateway's own controller
+  restarted before its lease setting was held by the keeper). The bursts themselves are **not** fixed.
+- **What a burst is made of:** a crowd of short-lived processes - the kubelet's exec probes (`runc exec`, `kubectl`,
+  `rabbitmq-diagnostics` which starts a whole Erlang VM each time) and dozens of `postgres` backends, `iptables` restores,
+  `ytt`. Once the node stalls for a few seconds, the probes pile up and deepen the stall. What starts the first stall is
+  unknown.
+- **Ruled out:** storage latency (2-3 ms), DRS churn, VCD snapshots, a VDC CPU limit, Velero and the backup CronWorkflows
+  (only the etcd backup every 3 h and the hourly WAL cleanup run, neither matches), the host shared with the Supervisor
+  control-plane VM (bursts continued with them on different hosts). Early captures did show hypervisor steal (4-25 %) on
+  an overcommitted host; moving the VM and giving it 32 vCPU removed it.
+- **Not worth doing:** the Kyverno cleanup webhook patch (Kyverno rewrites it itself), more tuning of exec probes across
+  the platform (vmsp-operator reverts it).
+- **Remaining levers are capacity, not tuning:** more CPU headroom for the nested hosts (a CPU reservation or shares for the
+  ESX VMs is a question for the VCD admin) or a second VCF-A node.
 
 ## Recap: what is done per org
 

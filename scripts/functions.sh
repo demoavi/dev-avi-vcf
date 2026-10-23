@@ -350,6 +350,31 @@ log_message() {
   if [ -z "${slack_url}" ] ; then : ; else curl -X POST -H "Content-type: application/json" -d "{\"text\":\"${message}\"}" "${slack_url}" > /dev/null 2>&1; fi
   if [[ -z "${google_url}" ]]; then : ; else curl -X POST -H "Content-Type: application/json" -d "{\"text\":\"${message}\"}" "${google_url}" > /dev/null 2>&1; fi
 }
+#
+# Waits until VCF Automation answers calmly before the provider work starts: "vcfa_gate_good" (default 5) consecutive
+# answers of the gateway root page (the same URL the gw's VIP probe watches: a 301/200 means the gateway VIP is held and the
+# proxies run) in under "vcfa_gate_limit_sec" (default 3) seconds, polled every 10 s, for at most "vcfa_gate_max_wait_sec"
+# (default 900). Right after the SDDC build, and again after the stabilization phase restarted the API server, the platform
+# can still be busy re-converging. Never fails: on timeout it logs a warning and the caller goes on, the provider script has
+# its own retries. vcfa_health_gate=false skips it. $1 = https://<fqdn_vcfa>
+#
+vcfa_health_gate() {
+  [ "${vcfa_health_gate:-true}" == "true" ] || return 0
+  local host="$1" limit="${vcfa_gate_limit_sec:-3}" max_wait="${vcfa_gate_max_wait_sec:-900}" need="${vcfa_gate_good:-5}" waited=0 good=0 r
+  while [ "${waited}" -lt "${max_wait}" ]; do
+    r=$(curl -sk -m 15 -o /dev/null -w '%{http_code} %{time_total}' "${host}/" 2>/dev/null)
+    if awk -v r="${r:-000 99}" -v l="${limit}" 'BEGIN{split(r, x, " "); exit !(x[1] + 0 >= 200 && x[1] + 0 < 400 && x[2] + 0 < l)}'; then
+      good=$((good + 1))
+      [ "${good}" -ge "${need}" ] && return 0
+    else
+      good=0
+    fi
+    sleep 10; waited=$((waited + 10))
+  done
+  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VCF-A health gate: no ${need} consecutive answers under ${limit}s within ${max_wait}s (last: ${r:-none}), continuing anyway" "${log_file}" "${slack_webhook}" "${google_webhook}"
+  return 0
+}
+
 vcfa_login() {
   local creds
   creds=$(printf '%s@system:%s' "admin" "${generic_password}" | base64 -w0)
