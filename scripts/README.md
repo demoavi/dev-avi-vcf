@@ -101,6 +101,12 @@ already exists on exit. No-op if `spec.sddc.vcf_a` is unset.
 VCF Automation **org-portal** half (org-scoped OAuth token obtained by jwt-bearer exchange, one per org): supervisor
 namespaces, Vault integration, VKS clusters, ArgoCD, blueprints, and the per-org vCenter / Avi / NSX / Harbor
 accounts (see recap).
+The VKS clusters are created and finished **one org at a time** (create, wait for Available, kubeconfig, pod security,
+`cert01`, ArgoCD, then the next org), because 16 clusters bootstrapping together overloaded the single-node VCF Automation
+and the Supervisor. A "calm gate" waits before each new cluster until the provider API and the Supervisor API answer fast
+(`vks_calm_limit_sec` 3, `vks_calm_max_wait_sec` 600, `vks_calm_gate=false` to disable); a catch-up pass at the end retries any
+cluster that was not Available the first time. `vks_sequential=false` restores the old create-all-then-wait behaviour;
+`vks_pause_between_orgs_sec` (default 20) spaces the orgs. These are environment variables of the script.
 
 ### 16. `supervisor-blueprint-watcher.sh` (last, soft-fail)
 Needs the org namespaces, their labels and the uploaded blueprints, hence last. Creates a provider-only vSphere

@@ -100,421 +100,54 @@ client_id=$(echo ${response_body} | jq -c -r '[.values[] | select(.clientName ==
 if [ -z "${client_id}" ] || [ "${client_id}" == "null" ]; then
   log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: could not determine the automation relying party clientId, skipping all namespace provisioning" "${log_file}" "${slack_webhook}" "${google_webhook}"
 else
-  while read item
-  do
-    if [ -n "$item" ] && [ "$item" != "null" ]; then
-      org_name=$(echo ${item} | jq -c -r '.name')
-      region_ref_name=$(echo ${item} | jq -c -r '.region_ref')
-      namespace_enabled=$(echo ${item} | jq -c -r '.namespace.enabled // false')
-      if [ "${namespace_enabled}" != "true" ]; then
-        continue
-      fi
-      avi_mode=$(echo ${item} | jq -c -r '.avi_mode // "TENANT_MANAGED"')
-      seg_name=$(echo ${item} | jq -c -r '.avi_service_engine_group_ref')
-      if [ "${avi_mode}" != "PROVIDER_MANAGED" ] || [ -z "${seg_name}" ] || [ "${seg_name}" == "null" ]; then
-        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${org_name} has namespace.enabled but avi_mode is not PROVIDER_MANAGED (or has no SEG) - TENANT_MANAGED namespace provisioning is not yet supported, skipping" "${log_file}" "" ""
-        continue
-      fi
-
-      vcfa_api GET "cloudapi/1.0.0/orgs?filter=name==${org_name}" ""
-      org_id=$(echo ${response_body} | jq -c -r --arg arg "${org_name}" '.values[] | select(.name == $arg) | .id')
-      org_uuid="${org_id##*:}"
-
-      vcfa_api GET "cloudapi/v1/regions" ""
-      region_id=$(echo ${response_body} | jq -c -r --arg arg "${region_ref_name}" '.values[] | select(.name == $arg) | .id')
-
-      vcfa_api GET "cloudapi/v1/regionStoragePolicies" ""
-      storage_class_k8s_name=$(echo ${response_body} | jq -c -r --arg arg "${region_id}" '.values[] | select(.region.id == $arg) | .kubernetesCompliantName' | head -1)
-
-      org_token=$(curl -sk -X POST "${VCFA_HOST}/oidc/oauth2/token" \
-        -H "$ACCEPT" -H "x-vmware-vcloud-tenant-context: ${org_uuid}" \
-        --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
-        --data-urlencode "scope=openid profile email phone groups vcd_idp" \
-        --data-urlencode "assertion=${vcfa_token}" \
-        --data-urlencode "client_id=${client_id}" | jq -r '.access_token')
-      if [ -z "${org_token}" ] || [ "${org_token}" == "null" ]; then
-        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: failed to obtain an org-scoped token for ${org_name}, skipping its namespace" "${log_file}" "${slack_webhook}" "${google_webhook}"
-        continue
-      fi
-
-      project="default-project"
-      cci_api GET "apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${project}/supervisornamespaces" "" "${org_token}"
-      ns_name=$(echo ${response_body} | jq -c -r --arg arg "${org_name}-ns-" '.items[] | select(.metadata.name | startswith($arg)) | .metadata.name' | head -1)
-      if [ -n "${ns_name}" ]; then
-        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: namespace for ${org_name} already exists (${ns_name}), skipping creation" "${log_file}" "" ""
+  #
+  # Calm gate (vks_calm_gate, default true): do not start another VKS cluster while the platform is struggling. The provider
+  # API of VCF Automation and the Supervisor's own API for this namespace must both answer a cheap call within
+  # vks_calm_limit_sec seconds (default 3), three times in a row, for up to vks_calm_max_wait_sec seconds (default 600);
+  # after that it goes on anyway (a log line says so). Any HTTP answer counts as responsive (a 401 is still an answer).
+  #
+  vks_calm_gate_wait() { # ns_endpoint ns_name org_token
+    [ "${vks_calm_gate:-true}" == "true" ] || return 0
+    local limit="${vks_calm_limit_sec:-3}" max_wait="${vks_calm_max_wait_sec:-600}" waited=0 good=0 a b
+    while [ "${waited}" -lt "${max_wait}" ]; do
+      a=$(curl -sk -m 15 -o /dev/null -w '%{http_code} %{time_total}' -H "Authorization: Bearer ${vcfa_token}" -H "${ACCEPT}" "${VCFA_HOST}/cloudapi/1.0.0/orgs?pageSize=1" 2>/dev/null)
+      b=$(curl -sk -m 15 -o /dev/null -w '%{http_code} %{time_total}' -H "Authorization: Bearer ${3}" "${1}/apis/cluster.x-k8s.io/v1beta2/namespaces/${2}/clusters" 2>/dev/null)
+      if awk -v a="${a:-000 99}" -v b="${b:-000 99}" -v l="${limit}" 'BEGIN{split(a,x," "); split(b,y," "); exit !(x[1]!="000" && y[1]!="000" && x[2]+0<l && y[2]+0<l)}'; then
+        good=$((good + 1))
+        [ "${good}" -ge 3 ] && return 0
       else
-        # zone_ref is NOT an input field here either - same derivation
-        # as the vDC creation step above (one zone per region).
-        vcfa_api GET "cloudapi/v1/zones" ""
-        zone_name=$(echo ${response_body} | jq -c -r --arg arg "${region_id}" '.values[] | select(.region.id == $arg) | .name' | head -1)
-        namespace_class=$(echo ${item} | jq -c -r '.namespace.class // "small"')
-        namespace_cpu_limit_mhz=$(echo ${item} | jq -c -r '.namespace.cpu_limit_mhz')
-        namespace_memory_limit_mib=$(echo ${item} | jq -c -r '.namespace.memory_limit_mib')
-        namespace_storage_limit_mib=$(echo ${item} | jq -c -r '.namespace.storage_limit_mib')
-
-        ns_json=$(jq -n --arg prefix "${org_name}-ns-" --arg project "${project}" \
-          --arg region "${region_ref_name}" --arg class "${namespace_class}" \
-          --arg vpc "default-${region_ref_name}" --arg seg "${seg_name}" \
-          --arg zonename "${zone_name}" --arg cpulimit "${namespace_cpu_limit_mhz}M" --arg memlimit "${namespace_memory_limit_mib}Mi" \
-          --arg storagename "${storage_class_k8s_name}" --arg storagelimit "${namespace_storage_limit_mib}Mi" \
-          '{apiVersion: "infrastructure.cci.vmware.com/v1alpha3", kind: "SupervisorNamespace",
-            metadata: {generateName: $prefix, namespace: $project},
-            spec: {regionName: $region, className: $class, vpcName: $vpc, segName: $seg,
-              classConfigOverrides: {
-                zones: [{name: $zonename, cpuLimit: $cpulimit, cpuReservation: "0", memoryLimit: $memlimit, memoryReservation: "0"}],
-                storageClasses: [{name: $storagename, limit: $storagelimit}]
-              }}}')
-        cci_api POST "apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${project}/supervisornamespaces" "${ns_json}" "${org_token}"
-        if [ $? -ne 0 ]; then
-          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: namespace creation for ${org_name} FAILED, response was: ${response_body}" "${log_file}" "${slack_webhook}" "${google_webhook}"
-          continue
-        fi
-        ns_name=$(echo ${response_body} | jq -c -r '.metadata.name')
-
-        retry_ns=12 ; pause_ns=15 ; attempt_ns=1
-        while true
-        do
-          sleep ${pause_ns}
-          cci_api GET "apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${project}/supervisornamespaces/${ns_name}" "" "${org_token}"
-          ns_phase=$(echo ${response_body} | jq -c -r '.status.phase')
-          if [[ "${ns_phase}" == "Created" ]]; then
-            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: namespace ${ns_name} for ${org_name} reached phase Created after ${attempt_ns} attempts of ${pause_ns} seconds" "${log_file}" "" ""
-            break
-          fi
-          ((attempt_ns++))
-          if [ ${attempt_ns} -eq ${retry_ns} ]; then
-            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: namespace ${ns_name} for ${org_name} not Created after ${attempt_ns} attempts of ${pause_ns} seconds (phase=${ns_phase})" "${log_file}" "${slack_webhook}" "${google_webhook}"
-            break
-          fi
-        done
+        good=0
       fi
-
-      #
-      # VM Service content library binding - a separate, lower layer than
-      # VCFA's own "content library visible from every org's portal"
-      # sharing above (cloudapi/v1/contentLibraries, done once for all
-      # orgs) - confirmed live (blueprint admission webhook error:
-      # VirtualMachineImage "vmi-..." not found, traced down to vCenter's
-      # own API) that VM Service only projects a content library's items
-      # into a namespace as VirtualMachineImage objects if that library's
-      # vCenter-NATIVE uuid is explicitly listed in the namespace's own
-      # vm_service_spec.content_libraries (vCenter's
-      # api/vcenter/namespaces/instances/{ns} API) - a completely
-      # different id space than VCFA's own urn:vcloud:contentLibrary:...
-      # id, so the two can't just be string-matched. VCFA-level "shared"
-      # visibility alone does NOT populate this. Every
-      # vcf_a_content_libraries entry is provider-wide/shared by design
-      # (see the "one library serves every org" comment above), so all of
-      # them are bound to every eligible org's namespace here
-      # automatically - no new CRD field needed. Existing entries (e.g. a
-      # tenant's own org-created library, confirmed live to exist
-      # side-by-side) are preserved by merging rather than overwriting.
-      # Runs regardless of whether ns_name was just created above or
-      # already existed, same as the Vault step below, since an
-      # already-existing namespace from before this step existed would
-      # otherwise never get the binding retrofitted.
-      #
-      if [ -n "${ns_name}" ]; then
-        create_vcenter_api_session
-        vcenter_api 3 3 GET "api/content/library" ""
-        all_lib_ids=$(echo "${response_body}" | jq -r '.[]')
-        vc_lib_uuids=""
-        while read -r shared_cl_name
-        do
-          [ -z "${shared_cl_name}" ] && continue
-          for lib_id in ${all_lib_ids}; do
-            vcenter_api 3 3 GET "api/content/library/${lib_id}" ""
-            lib_name=$(echo "${response_body}" | jq -r '.name')
-            if [ "${lib_name}" == "${shared_cl_name}" ]; then
-              vc_lib_uuids="${vc_lib_uuids} ${lib_id}"
-              break
-            fi
-          done
-        done < <(echo "${vcf_a_content_libraries}" | jq -c -r '.[].name')
-
-        if [ -n "$(echo ${vc_lib_uuids})" ]; then
-          vcenter_api 3 3 GET "api/vcenter/namespaces/instances/${ns_name}" ""
-          existing_libs=$(echo "${response_body}" | jq -c '.vm_service_spec.content_libraries // []')
-          merged_libs=$(jq -n --argjson existing "${existing_libs}" --arg new "${vc_lib_uuids}" \
-            '$existing + ($new | split(" ") | map(select(length > 0))) | unique')
-          patch_json=$(jq -n --argjson libs "${merged_libs}" '{vm_service_spec: {content_libraries: $libs}}')
-          vcenter_api 3 3 PATCH "api/vcenter/namespaces/instances/${ns_name}" "${patch_json}"
-          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: bound shared content libraries to namespace ${ns_name}'s vm_service_spec.content_libraries (${merged_libs})" "${log_file}" "" ""
-        fi
-      fi
-
-      #
-      # Vault cert-manager bootstrap - runs kubectl directly against the
-      # Supervisor cluster (NOT VCFA's own API - these are plain K8s
-      # objects VCFA doesn't manage), once this org's namespace is
-      # confirmed present, regardless of whether it was just created
-      # above or already existed (kubectl apply is idempotent, safe to
-      # re-run every time this script runs).
-      #
-      # secret_vault.yaml/vault_issuer.yaml are raw placeholder templates
-      # from demoavi/dev-avi-vcf, copied per-org into ${org_yaml_folder}
-      # by vcfa_provider_bootstrap.sh's own demo-yaml rendering loop
-      # (recomputed fresh below, not inherited - see that assignment's own
-      # comment) untouched, since neither Kind is in the demo-yaml
-      # by-Kind dispatch there - confirmed live this script previously
-      # read them from a stale top-level /home/ubuntu/${yaml_folder}/
-      # path that's never actually populated (that copy step was moved
-      # into this script's own per-org loop, into a per-org subdirectory,
-      # a while back - this comment and the paths below just never got
-      # updated to match), so the kind/name sanity check below always
-      # found an empty/nonexistent file and silently skipped vault
-      # bootstrap for every org. ALL their real values are filled in
-      # here instead, per org/namespace, using yq (mikefarah/yq, installed at
-      # /usr/local/bin/yq by gw's own userdata). This has to happen here
-      # rather than in cloud-init because the actual namespace name isn't
-      # known until VCF-A creates it under this org (well after gw's own
-      # first boot) - cloud-init is simply too early for that value, even
-      # though the OTHER fields (vault token/server/path/caBundle) are
-      # already knowable at cloud-init time. Keeping every substitution in
-      # one place (here) rather than splitting them across cloud-init and
-      # this script is deliberate, since this script is the one meant to
-      # be ported to the local epc-vapp project later - having the whole
-      # mechanism self-contained here keeps that port simple.
-      #
-      # A source-file kind/name sanity check guards against silently
-      # patching the wrong file if the templates in dev-avi-vcf/yamls/
-      # ever get renamed/restructured.
-      #
-      # auth_supervisor_custer.sh switches the local kubectl/vcf CLI
-      # context to the Supervisor cluster itself (sup-admin-01) -
-      # confirmed live this must run first, since a stale context left
-      # over from other kubectl usage (e.g. a VKS workload cluster's own
-      # context) otherwise causes TLS/cert errors reaching the
-      # Supervisor's namespaces. Re-run per org rather than once for the
-      # whole script, since a long batch run across many orgs could
-      # plausibly outlast the CLI's own token (not yet observed live,
-      # but a real risk given how long the aviSetting/
-      # regionalNetworkingSettings polling elsewhere in this script can
-      # already run).
-      #
-      vault_integration_enabled=$(echo ${item} | jq -c -r '.namespace.vault_integration.enabled // false')
-      if [ -n "${ns_name}" ] && [ "${vault_integration_enabled}" == "true" ]; then
-        bash /home/ubuntu/supervisor/auth_supervisor_custer.sh >/dev/null 2>&1
-
-        # Recomputed here rather than inherited from
-        # vcfa_provider_bootstrap.sh's own identical derivation (that
-        # script's demo-yaml rendering loop is what actually creates this
-        # directory) - now a genuinely separate process, and even within
-        # the old single-file version this was already a latent bug
-        # (this loop's own org_name can differ from whichever org the
-        # OTHER, provider-portal loop last set org_yaml_folder to; it
-        # only ever worked by coincidence, since secret_vault.yaml/
-        # vault_issuer.yaml are byte-identical raw templates for every
-        # org regardless of whose copy gets read).
-        org_yaml_folder="/home/${org_name}/${yaml_folder}"
-
-        # org_yaml_folder is owned by ${org_name} now (handed off at the
-        # end of the rendering loop in vcfa_provider_bootstrap.sh), not
-        # ubuntu - these reads need sudo. The /tmp/*.yaml copies below are
-        # ubuntu-owned as usual, so the yq -i edits on those don't need it.
-        # The two manifests are found by CONTENT, not by file name (so they can be renamed or moved around in
-        # dev-avi-vcf/yamls/): a single-document file of Kind Secret named cert-manager-vault-token, and one of
-        # Kind Issuer named vault-issuer (find_org_manifest, functions.sh). Those two names are therefore a
-        # contract - the manifests carry a "do not change" comment.
-        vault_secret_file="$(find_org_manifest "${org_yaml_folder}" Secret cert-manager-vault-token)"
-        vault_issuer_file="$(find_org_manifest "${org_yaml_folder}" Issuer vault-issuer)"
-        if [ -z "${vault_secret_file}" ] || [ -z "${vault_issuer_file}" ]; then
-          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no manifest of Kind Secret named cert-manager-vault-token and/or Kind Issuer named vault-issuer found in ${org_yaml_folder} (secret file: '${vault_secret_file}', issuer file: '${vault_issuer_file}'), skipping vault bootstrap for ${org_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
-        else
-          sudo cp "${vault_secret_file}" "/tmp/${org_name}-secret_vault.yaml"
-          sudo chown ubuntu:ubuntu "/tmp/${org_name}-secret_vault.yaml"
-          yq -i ".metadata.namespace = \"${ns_name}\"" "/tmp/${org_name}-secret_vault.yaml"
-          yq -i ".data.token = \"$(echo -n $(jq -c -r .root_token ${vault_secret_file_path}) | base64)\"" "/tmp/${org_name}-secret_vault.yaml"
-
-          sudo cp "${vault_issuer_file}" "/tmp/${org_name}-vault_issuer.yaml"
-          sudo chown ubuntu:ubuntu "/tmp/${org_name}-vault_issuer.yaml"
-          yq -i ".metadata.namespace = \"${ns_name}\"" "/tmp/${org_name}-vault_issuer.yaml"
-          yq -i ".spec.vault.server = \"https://${ip_gw}:8200\"" "/tmp/${org_name}-vault_issuer.yaml"
-          yq -i ".spec.vault.path = \"${vault_pki_intermediate_name}/sign/${vault_pki_intermediate_role_name}\"" "/tmp/${org_name}-vault_issuer.yaml"
-          # /opt/vault/tls/tls.crt is vault:vault 0600 - unreadable by this
-          # script's own ubuntu user (unlike cloud-init, which built this
-          # same value while still running as root) - confirmed live this
-          # user has passwordless sudo, so read it that way instead.
-          yq -i ".spec.vault.caBundle = \"$(sudo cat /opt/vault/tls/tls.crt | base64 -w0)\"" "/tmp/${org_name}-vault_issuer.yaml"
-
-          kubectl_out=$( { kubectl apply -f "/tmp/${org_name}-secret_vault.yaml" && kubectl apply -f "/tmp/${org_name}-vault_issuer.yaml"; } 2>&1 )
-          if [ $? -eq 0 ]; then
-            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: vault secret + issuer applied for ${org_name} in namespace ${ns_name}" "${log_file}" "" ""
-            # Only these two placeholder templates leave the org's yaml folder once applied (they are meaningless to
-            # the org user); only on success, so a failed apply can still be retried. vcfa_provider_bootstrap.sh
-            # copies them again on its next run.
-            sudo rm -f "${vault_secret_file}" "${vault_issuer_file}"
-          else
-            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: vault secret/issuer apply FAILED for ${org_name} in namespace ${ns_name}, output: ${kubectl_out}" "${log_file}" "${slack_webhook}" "${google_webhook}"
-          fi
-          rm -f "/tmp/${org_name}-secret_vault.yaml" "/tmp/${org_name}-vault_issuer.yaml"
-        fi
-      fi
-
-      #
-      # VKS cluster - very simple data model (vks_cluster.enabled only,
-      # everything else stays at the UI's own "create with defaults"
-      # values) - confirmed live against org-3's own namespace using the
-      # exact topology observed on org-1's manually-created cluster
-      # (kubernetes-cluster-q4md): ClusterClass builtin-generic-v3.6.0,
-      # k8s v1.35.5+vmware.1, 1 control-plane + 1 worker replica,
-      # vmClass best-effort-medium. Confirmed live it's
-      # cluster.x-k8s.io/v1beta2 that the UI actually uses (v1beta1 is
-      # accepted but deprecated AND rejects the request unless
-      # clusterNetwork.services is also set - v1beta2 doesn't need that
-      # worked around). clusterNetwork.pods.cidrBlocks, however, IS
-      # required in both versions and has NO server-side default -
-      # confirmed live: omitting it (as an earlier version of this script
-      # did) leaves every node's Spec.PodCIDR permanently empty, crashing
-      # antrea-agent cluster-wide (CrashLoopBackOff on "Spec.PodCIDR is
-      # empty for Node") and cascading into virtually every other pod
-      # staying stuck ContainerCreating. This range is NOT related to the
-      # namespace's own NSX VPC private-IP block (privateIPs on that
-      # VPC's NetworkInfo, e.g. 172.26.0.0/16 / 172.30.0.0/16 in this
-      # environment) - it's a purely internal Antrea overlay CIDR, safe
-      # to reuse identically across every org's cluster since each one is
-      # isolated within its own VPC/namespace and never routes to
-      # another's pod network directly. Value matches the one seen live
-      # on a UI-created reference cluster (kubernetes-cluster-z8lk).
-      # storageClass reuses ${storage_class_k8s_name}
-      # already derived above for the namespace step, rather than
-      # re-deriving it. The cluster starts with spec.paused: true
-      # (set automatically by an admission webhook) and clears itself
-      # within seconds with no action needed - confirmed live the
-      # cluster then proceeds through normal machine provisioning
-      # (phase: Provisioned, InfrastructureReady: True) with no
-      # equivalent of org-1's "run.tanzu.vmware.com/resolve-os-image"
-      # annotation required (the ClusterClass resolves a default OS
-      # image on its own when that annotation is omitted).
-      #
-      # Confirmed live end-to-end (not just Provisioned): a second test
-      # cluster created in org-1's own namespace with this exact payload
-      # reached status.conditions[type=Available].status == "True"
-      # (fully Ready) after ~8-10 minutes - CNI (Antrea) and the
-      # vsphere-csi addon both take a few minutes to finish reconciling
-      # after the nodes first come up, which is normal and not itself a
-      # failure signal even though AddonsReconciled briefly reports
-      # ReconcileFailed/timed-out during that window. A separate cluster
-      # created in org-3's namespace stayed stuck well past that window
-      # in this same test session - suspected to be an environment-
-      # specific resource constraint (e.g. underlying vSAN capacity) on
-      # that particular namespace/org, not a payload or script issue.
-      #
-      # Idempotency is by PRESENCE, not name (the API only supports
-      # generateName, never a fixed name) - "one default cluster per
-      # org" is the intent per vks_cluster's simple enable/disable model,
-      # so if ANY cluster already exists in the namespace, none is
-      # created.
-      #
-      vks_enabled=$(echo ${item} | jq -c -r '.vks_cluster.enabled // false')
-      vks_count=$(echo ${item} | jq -c -r '.vks_cluster.count // 1')
-      if [ "${vks_count}" != "1" ]; then
-        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${org_name} has vks_cluster.count=${vks_count}, but only 1 is supported today - creating exactly 1" "${log_file}" "" ""
-      fi
-      if [ "${vks_enabled}" == "true" ] && [ -n "${ns_name}" ]; then
-        cci_api GET "apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${project}/supervisornamespaces/${ns_name}" "" "${org_token}"
-        ns_endpoint=$(echo ${response_body} | jq -c -r '.status.namespaceEndpointURL')
-        if [ -z "${ns_endpoint}" ] || [ "${ns_endpoint}" == "null" ]; then
-          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no namespaceEndpointURL for ${ns_name} (${org_name}), skipping VKS cluster" "${log_file}" "${slack_webhook}" "${google_webhook}"
-        else
-          ns_k8s_api GET "${ns_endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns_name}/clusters" "" "${org_token}"
-          existing_vks=$(echo ${response_body} | jq -c -r '.items[0].metadata.name')
-          if [ -n "${existing_vks}" ] && [ "${existing_vks}" != "null" ]; then
-            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster for ${org_name} already exists (${existing_vks}), skipping creation" "${log_file}" "" ""
-          else
-            #
-            # Harbor's self-signed CA is NOT trusted by guest VKS clusters
-            # automatically. A bare top-level "trust" variable is rejected
-            # by the capi.mutating.tanzukubernetescluster.run.tanzu.vmware.com
-            # admission webhook ("variable is not defined") - confirmed live
-            # 2026-09-25 "trust" is not actually a top-level ClusterClass
-            # variable at all, just a field NESTED inside the "osConfiguration"
-            # variable (alongside systemProxy/tuned) - it only ever appeared
-            # in the raw schema dump because that dump includes every nested
-            # property, not just top-level variable names (which live in
-            # `.status.variables` - osConfiguration is there, a bare "trust"
-            # never was). Confirmed working via `--dry-run=server` with
-            # {name: "osConfiguration", value: {trust: {...}}}. builtin-
-            # generic-v3.6.0 itself has no trust-capable patches wired in and
-            # gets silently upgraded to v3.7.0 by the webhook when this is
-            # used, hence classRef below targets v3.7.0 directly.
-            #
-            harbor_ca_cert_path="/home/ubuntu/harbor-ca.crt"
-            os_configuration_json="null"
-            if [ -s "${harbor_ca_cert_path}" ]; then
-              os_configuration_json=$(jq -n --rawfile ca "${harbor_ca_cert_path}" \
-                '{name: "osConfiguration", value: {trust: {additionalTrustedCAs: [{caCert: {content: $ca}}]}}}')
-            fi
-            vks_json=$(jq -n --arg ns "${ns_name}" --arg storagename "${storage_class_k8s_name}" --argjson osconfig "${os_configuration_json}" \
-              '{apiVersion: "cluster.x-k8s.io/v1beta2", kind: "Cluster",
-                metadata: {generateName: "vks-cluster-", namespace: $ns},
-                spec: {
-                  clusterNetwork: {serviceDomain: "cluster.local", pods: {cidrBlocks: ["192.168.156.0/20"]}, services: {cidrBlocks: ["10.96.0.0/12"]}},
-                  topology: {
-                    classRef: {name: "builtin-generic-v3.7.0", namespace: "vmware-system-vks-public"},
-                    version: "v1.35.5+vmware.1",
-                    controlPlane: {replicas: 1},
-                    workers: {machineDeployments: [{class: "node-pool", name: "node-pool-1", replicas: 1}]},
-                    variables: ([
-                      {name: "vmClass", value: "best-effort-medium"},
-                      {name: "storageClass", value: $storagename}
-                    ] + (if $osconfig == null then [] else [$osconfig] end))
-                  }
-                }}')
-            #
-            # Retry a few times - confirmed live (org-20 of 20, all
-            # created back-to-back) this can fail with the Supervisor's
-            # own CAPI validating webhook refusing the connection
-            # ("dial tcp ...:443: connect: connection refused"), most
-            # likely the webhook pod briefly restarting/overloaded under
-            # the load of creating many clusters in quick succession.
-            # Safe to retry - a connection-refused at the admission-
-            # webhook stage means the request never reached the point of
-            # actually creating the object, so no duplicate-creation risk.
-            #
-            vks_create_ok=1
-            for vks_create_attempt in $(seq 1 5); do
-              if ns_k8s_api POST "${ns_endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns_name}/clusters" "${vks_json}" "${org_token}"; then
-                vks_create_ok=0
-                break
-              fi
-              sleep 20
-            done
-            if [ ${vks_create_ok} -ne 0 ]; then
-              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster creation for ${org_name} FAILED after retries, response was: ${response_body}" "${log_file}" "${slack_webhook}" "${google_webhook}"
-            else
-              vks_name=$(echo ${response_body} | jq -c -r '.metadata.name')
-              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster ${vks_name} for ${org_name} created, will check Available status in a later pass (see below) once every org's cluster has been created" "${log_file}" "" ""
-            fi
-          fi
-        fi
-      fi
-    fi
-  done < <(echo "${vcf_a_organizations}" | jq -c -r .[])
+      sleep 10; waited=$((waited + 10))
+    done
+    log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: calm gate: the platform did not get calm within ${max_wait}s (last: provider API ${a:-none}, Supervisor API ${b:-none}), creating the next VKS cluster anyway" "${log_file}" "${slack_webhook}" "${google_webhook}"
+  }
 
   #
-  # VKS cluster status polling - a SEPARATE pass, run only after every
-  # org's cluster has already been created above. Deliberately decoupled
-  # from creation so N clusters bootstrap in parallel server-side, rather
-  # than this script blocking org 1's several-minutes-long node bootstrap
-  # before even starting org 2's cluster creation.
+  # The finishing steps of one org's VKS cluster (wait for Available, kubeconfig, pod security, cert01, ArgoCD, kubeconfig
+  # copy to the org's home). Loop 1 below calls it right after each cluster is created, so the clusters come up ONE AT A
+  # TIME instead of all at once (16 clusters bootstrapping together overloaded the single-node VCF Automation and the
+  # Supervisor - the API servers stopped answering and everything restarted). It is also called once after loop 1 as a
+  # catch-up pass for the orgs whose cluster was not Available yet (vks_done_orgs lists the ones that were).
+  # Set vks_sequential=false to get the old behaviour (create all, then wait for all).
   #
-  # Terminates on status.conditions[] type=="Available" status=="True" -
-  # confirmed live this is CAPI's own top-level cluster-wide readiness
-  # signal (control plane + all workers healthy), NOT the same as
-  # phase=="Provisioned" (only means the topology/infra request was
-  # accepted - observed within seconds of creation while nodes were
-  # still booting, long before Available flips true).
+  # Terminates on status.conditions[] type=="Available" status=="True" - confirmed live this is CAPI's own top-level
+  # cluster-wide readiness signal (control plane + all workers healthy), NOT the same as phase=="Provisioned" (only means
+  # the topology/infra request was accepted - observed within seconds of creation while nodes were still booting).
   #
-  # Re-derives org token/namespace/cluster name from scratch per org
-  # rather than reusing anything from the creation loop above, since bash
-  # doesn't carry per-iteration loop state across two separate while-read
-  # loops - same GET-by-name approach used throughout this script.
+  # Re-derives org token/namespace/cluster name from scratch per org rather than reusing anything from loop 1, since bash
+  # doesn't carry per-iteration loop state across two separate while-read loops - same GET-by-name approach used
+  # throughout this script.
   #
+  vks_done_orgs=""
+  vks_finish_pass() {
   while read item
   do
     if [ -n "$item" ] && [ "$item" != "null" ]; then
       org_name=$(echo ${item} | jq -c -r '.name')
+      # one-org mode (vks_filter_org set by loop 1) and catch-up mode (orgs already Available are skipped)
+      if [ -n "${vks_filter_org:-}" ] && [ "${org_name}" != "${vks_filter_org}" ]; then continue; fi
+      case " ${vks_done_orgs:-} " in *" ${org_name} "*) continue ;; esac
       vks_enabled=$(echo ${item} | jq -c -r '.vks_cluster.enabled // false')
       if [ "${vks_enabled}" != "true" ]; then
         continue
@@ -572,6 +205,7 @@ else
         fi
         if [[ "${vks_available}" == "True" ]]; then
           log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster ${vks_name} for ${org_name} is Available after ${attempt_vks} attempts of ${pause_vks} seconds" "${log_file}" "" ""
+          vks_done_orgs="${vks_done_orgs:-} ${org_name} "
           #
           # status.conditions[type=Available] only reflects CAPI's own
           # control-plane/machine-level readiness (confirmed live earlier
@@ -955,6 +589,416 @@ ARGOCD_GATEWAY_EOF
       done
     fi
   done < <(echo "${vcf_a_organizations}" | jq -c -r .[])
+  }
+
+  while read item
+  do
+    if [ -n "$item" ] && [ "$item" != "null" ]; then
+      org_name=$(echo ${item} | jq -c -r '.name')
+      region_ref_name=$(echo ${item} | jq -c -r '.region_ref')
+      namespace_enabled=$(echo ${item} | jq -c -r '.namespace.enabled // false')
+      if [ "${namespace_enabled}" != "true" ]; then
+        continue
+      fi
+      avi_mode=$(echo ${item} | jq -c -r '.avi_mode // "TENANT_MANAGED"')
+      seg_name=$(echo ${item} | jq -c -r '.avi_service_engine_group_ref')
+      if [ "${avi_mode}" != "PROVIDER_MANAGED" ] || [ -z "${seg_name}" ] || [ "${seg_name}" == "null" ]; then
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${org_name} has namespace.enabled but avi_mode is not PROVIDER_MANAGED (or has no SEG) - TENANT_MANAGED namespace provisioning is not yet supported, skipping" "${log_file}" "" ""
+        continue
+      fi
+
+      vcfa_api GET "cloudapi/1.0.0/orgs?filter=name==${org_name}" ""
+      org_id=$(echo ${response_body} | jq -c -r --arg arg "${org_name}" '.values[] | select(.name == $arg) | .id')
+      org_uuid="${org_id##*:}"
+
+      vcfa_api GET "cloudapi/v1/regions" ""
+      region_id=$(echo ${response_body} | jq -c -r --arg arg "${region_ref_name}" '.values[] | select(.name == $arg) | .id')
+
+      vcfa_api GET "cloudapi/v1/regionStoragePolicies" ""
+      storage_class_k8s_name=$(echo ${response_body} | jq -c -r --arg arg "${region_id}" '.values[] | select(.region.id == $arg) | .kubernetesCompliantName' | head -1)
+
+      org_token=$(curl -sk -X POST "${VCFA_HOST}/oidc/oauth2/token" \
+        -H "$ACCEPT" -H "x-vmware-vcloud-tenant-context: ${org_uuid}" \
+        --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
+        --data-urlencode "scope=openid profile email phone groups vcd_idp" \
+        --data-urlencode "assertion=${vcfa_token}" \
+        --data-urlencode "client_id=${client_id}" | jq -r '.access_token')
+      if [ -z "${org_token}" ] || [ "${org_token}" == "null" ]; then
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: failed to obtain an org-scoped token for ${org_name}, skipping its namespace" "${log_file}" "${slack_webhook}" "${google_webhook}"
+        continue
+      fi
+
+      project="default-project"
+      cci_api GET "apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${project}/supervisornamespaces" "" "${org_token}"
+      ns_name=$(echo ${response_body} | jq -c -r --arg arg "${org_name}-ns-" '.items[] | select(.metadata.name | startswith($arg)) | .metadata.name' | head -1)
+      if [ -n "${ns_name}" ]; then
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: namespace for ${org_name} already exists (${ns_name}), skipping creation" "${log_file}" "" ""
+      else
+        # zone_ref is NOT an input field here either - same derivation
+        # as the vDC creation step above (one zone per region).
+        vcfa_api GET "cloudapi/v1/zones" ""
+        zone_name=$(echo ${response_body} | jq -c -r --arg arg "${region_id}" '.values[] | select(.region.id == $arg) | .name' | head -1)
+        namespace_class=$(echo ${item} | jq -c -r '.namespace.class // "small"')
+        namespace_cpu_limit_mhz=$(echo ${item} | jq -c -r '.namespace.cpu_limit_mhz')
+        namespace_memory_limit_mib=$(echo ${item} | jq -c -r '.namespace.memory_limit_mib')
+        namespace_storage_limit_mib=$(echo ${item} | jq -c -r '.namespace.storage_limit_mib')
+
+        ns_json=$(jq -n --arg prefix "${org_name}-ns-" --arg project "${project}" \
+          --arg region "${region_ref_name}" --arg class "${namespace_class}" \
+          --arg vpc "default-${region_ref_name}" --arg seg "${seg_name}" \
+          --arg zonename "${zone_name}" --arg cpulimit "${namespace_cpu_limit_mhz}M" --arg memlimit "${namespace_memory_limit_mib}Mi" \
+          --arg storagename "${storage_class_k8s_name}" --arg storagelimit "${namespace_storage_limit_mib}Mi" \
+          '{apiVersion: "infrastructure.cci.vmware.com/v1alpha3", kind: "SupervisorNamespace",
+            metadata: {generateName: $prefix, namespace: $project},
+            spec: {regionName: $region, className: $class, vpcName: $vpc, segName: $seg,
+              classConfigOverrides: {
+                zones: [{name: $zonename, cpuLimit: $cpulimit, cpuReservation: "0", memoryLimit: $memlimit, memoryReservation: "0"}],
+                storageClasses: [{name: $storagename, limit: $storagelimit}]
+              }}}')
+        cci_api POST "apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${project}/supervisornamespaces" "${ns_json}" "${org_token}"
+        if [ $? -ne 0 ]; then
+          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: namespace creation for ${org_name} FAILED, response was: ${response_body}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+          continue
+        fi
+        ns_name=$(echo ${response_body} | jq -c -r '.metadata.name')
+
+        retry_ns=12 ; pause_ns=15 ; attempt_ns=1
+        while true
+        do
+          sleep ${pause_ns}
+          cci_api GET "apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${project}/supervisornamespaces/${ns_name}" "" "${org_token}"
+          ns_phase=$(echo ${response_body} | jq -c -r '.status.phase')
+          if [[ "${ns_phase}" == "Created" ]]; then
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: namespace ${ns_name} for ${org_name} reached phase Created after ${attempt_ns} attempts of ${pause_ns} seconds" "${log_file}" "" ""
+            break
+          fi
+          ((attempt_ns++))
+          if [ ${attempt_ns} -eq ${retry_ns} ]; then
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: namespace ${ns_name} for ${org_name} not Created after ${attempt_ns} attempts of ${pause_ns} seconds (phase=${ns_phase})" "${log_file}" "${slack_webhook}" "${google_webhook}"
+            break
+          fi
+        done
+      fi
+
+      #
+      # VM Service content library binding - a separate, lower layer than
+      # VCFA's own "content library visible from every org's portal"
+      # sharing above (cloudapi/v1/contentLibraries, done once for all
+      # orgs) - confirmed live (blueprint admission webhook error:
+      # VirtualMachineImage "vmi-..." not found, traced down to vCenter's
+      # own API) that VM Service only projects a content library's items
+      # into a namespace as VirtualMachineImage objects if that library's
+      # vCenter-NATIVE uuid is explicitly listed in the namespace's own
+      # vm_service_spec.content_libraries (vCenter's
+      # api/vcenter/namespaces/instances/{ns} API) - a completely
+      # different id space than VCFA's own urn:vcloud:contentLibrary:...
+      # id, so the two can't just be string-matched. VCFA-level "shared"
+      # visibility alone does NOT populate this. Every
+      # vcf_a_content_libraries entry is provider-wide/shared by design
+      # (see the "one library serves every org" comment above), so all of
+      # them are bound to every eligible org's namespace here
+      # automatically - no new CRD field needed. Existing entries (e.g. a
+      # tenant's own org-created library, confirmed live to exist
+      # side-by-side) are preserved by merging rather than overwriting.
+      # Runs regardless of whether ns_name was just created above or
+      # already existed, same as the Vault step below, since an
+      # already-existing namespace from before this step existed would
+      # otherwise never get the binding retrofitted.
+      #
+      if [ -n "${ns_name}" ]; then
+        create_vcenter_api_session
+        vcenter_api 3 3 GET "api/content/library" ""
+        all_lib_ids=$(echo "${response_body}" | jq -r '.[]')
+        vc_lib_uuids=""
+        while read -r shared_cl_name
+        do
+          [ -z "${shared_cl_name}" ] && continue
+          for lib_id in ${all_lib_ids}; do
+            vcenter_api 3 3 GET "api/content/library/${lib_id}" ""
+            lib_name=$(echo "${response_body}" | jq -r '.name')
+            if [ "${lib_name}" == "${shared_cl_name}" ]; then
+              vc_lib_uuids="${vc_lib_uuids} ${lib_id}"
+              break
+            fi
+          done
+        done < <(echo "${vcf_a_content_libraries}" | jq -c -r '.[].name')
+
+        if [ -n "$(echo ${vc_lib_uuids})" ]; then
+          vcenter_api 3 3 GET "api/vcenter/namespaces/instances/${ns_name}" ""
+          existing_libs=$(echo "${response_body}" | jq -c '.vm_service_spec.content_libraries // []')
+          merged_libs=$(jq -n --argjson existing "${existing_libs}" --arg new "${vc_lib_uuids}" \
+            '$existing + ($new | split(" ") | map(select(length > 0))) | unique')
+          patch_json=$(jq -n --argjson libs "${merged_libs}" '{vm_service_spec: {content_libraries: $libs}}')
+          vcenter_api 3 3 PATCH "api/vcenter/namespaces/instances/${ns_name}" "${patch_json}"
+          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: bound shared content libraries to namespace ${ns_name}'s vm_service_spec.content_libraries (${merged_libs})" "${log_file}" "" ""
+        fi
+      fi
+
+      #
+      # Vault cert-manager bootstrap - runs kubectl directly against the
+      # Supervisor cluster (NOT VCFA's own API - these are plain K8s
+      # objects VCFA doesn't manage), once this org's namespace is
+      # confirmed present, regardless of whether it was just created
+      # above or already existed (kubectl apply is idempotent, safe to
+      # re-run every time this script runs).
+      #
+      # secret_vault.yaml/vault_issuer.yaml are raw placeholder templates
+      # from demoavi/dev-avi-vcf, copied per-org into ${org_yaml_folder}
+      # by vcfa_provider_bootstrap.sh's own demo-yaml rendering loop
+      # (recomputed fresh below, not inherited - see that assignment's own
+      # comment) untouched, since neither Kind is in the demo-yaml
+      # by-Kind dispatch there - confirmed live this script previously
+      # read them from a stale top-level /home/ubuntu/${yaml_folder}/
+      # path that's never actually populated (that copy step was moved
+      # into this script's own per-org loop, into a per-org subdirectory,
+      # a while back - this comment and the paths below just never got
+      # updated to match), so the kind/name sanity check below always
+      # found an empty/nonexistent file and silently skipped vault
+      # bootstrap for every org. ALL their real values are filled in
+      # here instead, per org/namespace, using yq (mikefarah/yq, installed at
+      # /usr/local/bin/yq by gw's own userdata). This has to happen here
+      # rather than in cloud-init because the actual namespace name isn't
+      # known until VCF-A creates it under this org (well after gw's own
+      # first boot) - cloud-init is simply too early for that value, even
+      # though the OTHER fields (vault token/server/path/caBundle) are
+      # already knowable at cloud-init time. Keeping every substitution in
+      # one place (here) rather than splitting them across cloud-init and
+      # this script is deliberate, since this script is the one meant to
+      # be ported to the local epc-vapp project later - having the whole
+      # mechanism self-contained here keeps that port simple.
+      #
+      # A source-file kind/name sanity check guards against silently
+      # patching the wrong file if the templates in dev-avi-vcf/yamls/
+      # ever get renamed/restructured.
+      #
+      # auth_supervisor_custer.sh switches the local kubectl/vcf CLI
+      # context to the Supervisor cluster itself (sup-admin-01) -
+      # confirmed live this must run first, since a stale context left
+      # over from other kubectl usage (e.g. a VKS workload cluster's own
+      # context) otherwise causes TLS/cert errors reaching the
+      # Supervisor's namespaces. Re-run per org rather than once for the
+      # whole script, since a long batch run across many orgs could
+      # plausibly outlast the CLI's own token (not yet observed live,
+      # but a real risk given how long the aviSetting/
+      # regionalNetworkingSettings polling elsewhere in this script can
+      # already run).
+      #
+      vault_integration_enabled=$(echo ${item} | jq -c -r '.namespace.vault_integration.enabled // false')
+      if [ -n "${ns_name}" ] && [ "${vault_integration_enabled}" == "true" ]; then
+        bash /home/ubuntu/supervisor/auth_supervisor_custer.sh >/dev/null 2>&1
+
+        # Recomputed here rather than inherited from
+        # vcfa_provider_bootstrap.sh's own identical derivation (that
+        # script's demo-yaml rendering loop is what actually creates this
+        # directory) - now a genuinely separate process, and even within
+        # the old single-file version this was already a latent bug
+        # (this loop's own org_name can differ from whichever org the
+        # OTHER, provider-portal loop last set org_yaml_folder to; it
+        # only ever worked by coincidence, since secret_vault.yaml/
+        # vault_issuer.yaml are byte-identical raw templates for every
+        # org regardless of whose copy gets read).
+        org_yaml_folder="/home/${org_name}/${yaml_folder}"
+
+        # org_yaml_folder is owned by ${org_name} now (handed off at the
+        # end of the rendering loop in vcfa_provider_bootstrap.sh), not
+        # ubuntu - these reads need sudo. The /tmp/*.yaml copies below are
+        # ubuntu-owned as usual, so the yq -i edits on those don't need it.
+        # The two manifests are found by CONTENT, not by file name (so they can be renamed or moved around in
+        # dev-avi-vcf/yamls/): a single-document file of Kind Secret named cert-manager-vault-token, and one of
+        # Kind Issuer named vault-issuer (find_org_manifest, functions.sh). Those two names are therefore a
+        # contract - the manifests carry a "do not change" comment.
+        vault_secret_file="$(find_org_manifest "${org_yaml_folder}" Secret cert-manager-vault-token)"
+        vault_issuer_file="$(find_org_manifest "${org_yaml_folder}" Issuer vault-issuer)"
+        if [ -z "${vault_secret_file}" ] || [ -z "${vault_issuer_file}" ]; then
+          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no manifest of Kind Secret named cert-manager-vault-token and/or Kind Issuer named vault-issuer found in ${org_yaml_folder} (secret file: '${vault_secret_file}', issuer file: '${vault_issuer_file}'), skipping vault bootstrap for ${org_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+        else
+          sudo cp "${vault_secret_file}" "/tmp/${org_name}-secret_vault.yaml"
+          sudo chown ubuntu:ubuntu "/tmp/${org_name}-secret_vault.yaml"
+          yq -i ".metadata.namespace = \"${ns_name}\"" "/tmp/${org_name}-secret_vault.yaml"
+          yq -i ".data.token = \"$(echo -n $(jq -c -r .root_token ${vault_secret_file_path}) | base64)\"" "/tmp/${org_name}-secret_vault.yaml"
+
+          sudo cp "${vault_issuer_file}" "/tmp/${org_name}-vault_issuer.yaml"
+          sudo chown ubuntu:ubuntu "/tmp/${org_name}-vault_issuer.yaml"
+          yq -i ".metadata.namespace = \"${ns_name}\"" "/tmp/${org_name}-vault_issuer.yaml"
+          yq -i ".spec.vault.server = \"https://${ip_gw}:8200\"" "/tmp/${org_name}-vault_issuer.yaml"
+          yq -i ".spec.vault.path = \"${vault_pki_intermediate_name}/sign/${vault_pki_intermediate_role_name}\"" "/tmp/${org_name}-vault_issuer.yaml"
+          # /opt/vault/tls/tls.crt is vault:vault 0600 - unreadable by this
+          # script's own ubuntu user (unlike cloud-init, which built this
+          # same value while still running as root) - confirmed live this
+          # user has passwordless sudo, so read it that way instead.
+          yq -i ".spec.vault.caBundle = \"$(sudo cat /opt/vault/tls/tls.crt | base64 -w0)\"" "/tmp/${org_name}-vault_issuer.yaml"
+
+          kubectl_out=$( { kubectl apply -f "/tmp/${org_name}-secret_vault.yaml" && kubectl apply -f "/tmp/${org_name}-vault_issuer.yaml"; } 2>&1 )
+          if [ $? -eq 0 ]; then
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: vault secret + issuer applied for ${org_name} in namespace ${ns_name}" "${log_file}" "" ""
+            # Only these two placeholder templates leave the org's yaml folder once applied (they are meaningless to
+            # the org user); only on success, so a failed apply can still be retried. vcfa_provider_bootstrap.sh
+            # copies them again on its next run.
+            sudo rm -f "${vault_secret_file}" "${vault_issuer_file}"
+          else
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: vault secret/issuer apply FAILED for ${org_name} in namespace ${ns_name}, output: ${kubectl_out}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+          fi
+          rm -f "/tmp/${org_name}-secret_vault.yaml" "/tmp/${org_name}-vault_issuer.yaml"
+        fi
+      fi
+
+      #
+      # VKS cluster - very simple data model (vks_cluster.enabled only,
+      # everything else stays at the UI's own "create with defaults"
+      # values) - confirmed live against org-3's own namespace using the
+      # exact topology observed on org-1's manually-created cluster
+      # (kubernetes-cluster-q4md): ClusterClass builtin-generic-v3.6.0,
+      # k8s v1.35.5+vmware.1, 1 control-plane + 1 worker replica,
+      # vmClass best-effort-medium. Confirmed live it's
+      # cluster.x-k8s.io/v1beta2 that the UI actually uses (v1beta1 is
+      # accepted but deprecated AND rejects the request unless
+      # clusterNetwork.services is also set - v1beta2 doesn't need that
+      # worked around). clusterNetwork.pods.cidrBlocks, however, IS
+      # required in both versions and has NO server-side default -
+      # confirmed live: omitting it (as an earlier version of this script
+      # did) leaves every node's Spec.PodCIDR permanently empty, crashing
+      # antrea-agent cluster-wide (CrashLoopBackOff on "Spec.PodCIDR is
+      # empty for Node") and cascading into virtually every other pod
+      # staying stuck ContainerCreating. This range is NOT related to the
+      # namespace's own NSX VPC private-IP block (privateIPs on that
+      # VPC's NetworkInfo, e.g. 172.26.0.0/16 / 172.30.0.0/16 in this
+      # environment) - it's a purely internal Antrea overlay CIDR, safe
+      # to reuse identically across every org's cluster since each one is
+      # isolated within its own VPC/namespace and never routes to
+      # another's pod network directly. Value matches the one seen live
+      # on a UI-created reference cluster (kubernetes-cluster-z8lk).
+      # storageClass reuses ${storage_class_k8s_name}
+      # already derived above for the namespace step, rather than
+      # re-deriving it. The cluster starts with spec.paused: true
+      # (set automatically by an admission webhook) and clears itself
+      # within seconds with no action needed - confirmed live the
+      # cluster then proceeds through normal machine provisioning
+      # (phase: Provisioned, InfrastructureReady: True) with no
+      # equivalent of org-1's "run.tanzu.vmware.com/resolve-os-image"
+      # annotation required (the ClusterClass resolves a default OS
+      # image on its own when that annotation is omitted).
+      #
+      # Confirmed live end-to-end (not just Provisioned): a second test
+      # cluster created in org-1's own namespace with this exact payload
+      # reached status.conditions[type=Available].status == "True"
+      # (fully Ready) after ~8-10 minutes - CNI (Antrea) and the
+      # vsphere-csi addon both take a few minutes to finish reconciling
+      # after the nodes first come up, which is normal and not itself a
+      # failure signal even though AddonsReconciled briefly reports
+      # ReconcileFailed/timed-out during that window. A separate cluster
+      # created in org-3's namespace stayed stuck well past that window
+      # in this same test session - suspected to be an environment-
+      # specific resource constraint (e.g. underlying vSAN capacity) on
+      # that particular namespace/org, not a payload or script issue.
+      #
+      # Idempotency is by PRESENCE, not name (the API only supports
+      # generateName, never a fixed name) - "one default cluster per
+      # org" is the intent per vks_cluster's simple enable/disable model,
+      # so if ANY cluster already exists in the namespace, none is
+      # created.
+      #
+      vks_enabled=$(echo ${item} | jq -c -r '.vks_cluster.enabled // false')
+      vks_count=$(echo ${item} | jq -c -r '.vks_cluster.count // 1')
+      if [ "${vks_count}" != "1" ]; then
+        log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${org_name} has vks_cluster.count=${vks_count}, but only 1 is supported today - creating exactly 1" "${log_file}" "" ""
+      fi
+      if [ "${vks_enabled}" == "true" ] && [ -n "${ns_name}" ]; then
+        cci_api GET "apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${project}/supervisornamespaces/${ns_name}" "" "${org_token}"
+        ns_endpoint=$(echo ${response_body} | jq -c -r '.status.namespaceEndpointURL')
+        if [ -z "${ns_endpoint}" ] || [ "${ns_endpoint}" == "null" ]; then
+          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no namespaceEndpointURL for ${ns_name} (${org_name}), skipping VKS cluster" "${log_file}" "${slack_webhook}" "${google_webhook}"
+        else
+          ns_k8s_api GET "${ns_endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns_name}/clusters" "" "${org_token}"
+          existing_vks=$(echo ${response_body} | jq -c -r '.items[0].metadata.name')
+          if [ -n "${existing_vks}" ] && [ "${existing_vks}" != "null" ]; then
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster for ${org_name} already exists (${existing_vks}), skipping creation" "${log_file}" "" ""
+          else
+            #
+            # Harbor's self-signed CA is NOT trusted by guest VKS clusters
+            # automatically. A bare top-level "trust" variable is rejected
+            # by the capi.mutating.tanzukubernetescluster.run.tanzu.vmware.com
+            # admission webhook ("variable is not defined") - confirmed live
+            # 2026-09-25 "trust" is not actually a top-level ClusterClass
+            # variable at all, just a field NESTED inside the "osConfiguration"
+            # variable (alongside systemProxy/tuned) - it only ever appeared
+            # in the raw schema dump because that dump includes every nested
+            # property, not just top-level variable names (which live in
+            # `.status.variables` - osConfiguration is there, a bare "trust"
+            # never was). Confirmed working via `--dry-run=server` with
+            # {name: "osConfiguration", value: {trust: {...}}}. builtin-
+            # generic-v3.6.0 itself has no trust-capable patches wired in and
+            # gets silently upgraded to v3.7.0 by the webhook when this is
+            # used, hence classRef below targets v3.7.0 directly.
+            #
+            harbor_ca_cert_path="/home/ubuntu/harbor-ca.crt"
+            os_configuration_json="null"
+            if [ -s "${harbor_ca_cert_path}" ]; then
+              os_configuration_json=$(jq -n --rawfile ca "${harbor_ca_cert_path}" \
+                '{name: "osConfiguration", value: {trust: {additionalTrustedCAs: [{caCert: {content: $ca}}]}}}')
+            fi
+            vks_json=$(jq -n --arg ns "${ns_name}" --arg storagename "${storage_class_k8s_name}" --argjson osconfig "${os_configuration_json}" \
+              '{apiVersion: "cluster.x-k8s.io/v1beta2", kind: "Cluster",
+                metadata: {generateName: "vks-cluster-", namespace: $ns},
+                spec: {
+                  clusterNetwork: {serviceDomain: "cluster.local", pods: {cidrBlocks: ["192.168.156.0/20"]}, services: {cidrBlocks: ["10.96.0.0/12"]}},
+                  topology: {
+                    classRef: {name: "builtin-generic-v3.7.0", namespace: "vmware-system-vks-public"},
+                    version: "v1.35.5+vmware.1",
+                    controlPlane: {replicas: 1},
+                    workers: {machineDeployments: [{class: "node-pool", name: "node-pool-1", replicas: 1}]},
+                    variables: ([
+                      {name: "vmClass", value: "best-effort-medium"},
+                      {name: "storageClass", value: $storagename}
+                    ] + (if $osconfig == null then [] else [$osconfig] end))
+                  }
+                }}')
+            #
+            # Retry a few times - confirmed live (org-20 of 20, all
+            # created back-to-back) this can fail with the Supervisor's
+            # own CAPI validating webhook refusing the connection
+            # ("dial tcp ...:443: connect: connection refused"), most
+            # likely the webhook pod briefly restarting/overloaded under
+            # the load of creating many clusters in quick succession.
+            # Safe to retry - a connection-refused at the admission-
+            # webhook stage means the request never reached the point of
+            # actually creating the object, so no duplicate-creation risk.
+            #
+            vks_create_ok=1
+            # Calm gate: the platform must answer quickly before one more cluster is started
+            vks_calm_gate_wait "${ns_endpoint}" "${ns_name}" "${org_token}"
+            for vks_create_attempt in $(seq 1 5); do
+              if ns_k8s_api POST "${ns_endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns_name}/clusters" "${vks_json}" "${org_token}"; then
+                vks_create_ok=0
+                break
+              fi
+              sleep 20
+            done
+            if [ ${vks_create_ok} -ne 0 ]; then
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster creation for ${org_name} FAILED after retries, response was: ${response_body}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+            else
+              vks_name=$(echo ${response_body} | jq -c -r '.metadata.name')
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster ${vks_name} for ${org_name} created, will check Available status in a later pass (see below) once every org's cluster has been created" "${log_file}" "" ""
+            fi
+          fi
+        fi
+      fi
+    fi
+
+    # One org at a time: wait for THIS org's cluster to be Available and finish its steps before the next org is touched.
+    if [ -n "$item" ] && [ "$item" != "null" ] && [ "${vks_enabled:-false}" == "true" ] && [ "${vks_sequential:-true}" == "true" ]; then
+      vks_filter_org="${org_name}"
+      vks_finish_pass
+      vks_filter_org=""
+      sleep "${vks_pause_between_orgs_sec:-20}"
+    fi
+  done < <(echo "${vcf_a_organizations}" | jq -c -r .[])
+
+  #
+  # Catch-up pass: finishes the orgs whose VKS cluster was not Available when loop 1 handled them (or all of them with
+  # vks_sequential=false). Orgs already finished (vks_done_orgs) are skipped.
+  #
+  vks_filter_org=""
+  vks_finish_pass
 fi
 
 #

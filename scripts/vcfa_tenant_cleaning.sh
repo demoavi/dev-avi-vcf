@@ -150,6 +150,7 @@ get_org_token() { # org -> org_token (fresh each time: they are short lived)
 }
 
 ns_api_base="apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/default-project/supervisornamespaces"
+ip_avi=$(echo ${ips_avi} | jq -r '.[0]')   # derived like the other phases do (variables.sh only has the plural ips_avi)
 
 # wait_until <description> <timeout seconds> <command...>: polls every 15 s until the command succeeds
 wait_until() {
