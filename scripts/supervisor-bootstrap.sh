@@ -75,8 +75,14 @@ vcenter_api 3 3 GET "api/vcenter/network" ""
 network_supervisor_management=$(echo ${nsx_segments_overlay} | jq -c -r '.[] | select( .supervisor_mgmt == true).display_name')
 network_id=$(echo ${response_body} | jq -r --arg pg "${network_supervisor_management}" '.[] | select(.name == $pg).network')
 
+# Control-plane VMs: spec.sddc.vcenter.supervisor_control_plane_count (1 default, 3 = HA). Anything else falls back to 1.
+supervisor_cp_count="${supervisor_cluster_control_plane_count:-1}"
+case "${supervisor_cp_count}" in
+  1|3) ;;
+  *) log_notify "WARNING: supervisor_control_plane_count '${supervisor_cp_count}' is not 1 or 3, using 1"; supervisor_cp_count=1 ;;
+esac
 supervisor_json=$(jq -n \
-  --argjson count 1 \
+  --argjson count "${supervisor_cp_count}" \
   --arg banner "${supervisor_cluster_name}-banner" \
   --arg network_id "${network_id}" \
   --arg gw_addr "$(echo ${nsx_segments_overlay} | jq -c -r '.[] | select( .supervisor_mgmt == true).gateway_address')" \

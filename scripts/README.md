@@ -78,7 +78,7 @@ inter-VPC transit gateway IP blocks, VPC connectivity profiles and VPC service p
 onboarding workflow of the reference script is dropped).
 
 ### 11. `supervisor-bootstrap.sh`
-Subscribes the vCenter content library, enables the Supervisor (NSX_VPC networking, vSAN storage policy, waits for
+Subscribes the vCenter content library, enables the Supervisor (1 or 3 control-plane VMs from `supervisor_control_plane_count`, NSX_VPC networking, vSAN storage policy, waits for
 RUNNING/READY plus an extra settle time), installs the Supervisor Services (Harbor, ArgoCD) and pushes the ISO-delivered
 images to Harbor (preload list in the CR), and renders the Supervisor auth helper scripts and `harbor_rewrite_images.sh`.
 
