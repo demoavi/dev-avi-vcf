@@ -65,7 +65,13 @@ done
 sddc_manager_api 3 2 GET '' "${ip_sddcm}" v1/domains $(jq -c -r .accessToken /tmp/token_sddcm.json)
 nsx_id=$(echo ${response_body} | jq -c -r '.elements[0].nsxtCluster.id')
 
-if [[ $(echo ${ips_avi} | jq -c -r '. | length') -eq 3 ]]; then
+# Rerun: SDDC Manager refuses a second alb-cluster on the same IPs (ECM_ALB_IPS_ALREADY_IN_USE), so an ACTIVE one means the
+# deployment already happened and only the configuration below is left.
+sddc_manager_api 3 2 GET '' "${ip_sddcm}" v1/alb-clusters $(jq -c -r .accessToken /tmp/token_sddcm.json)
+avi_existing_status=$(echo ${response_body} | jq -c -r '.elements[0].deploymentStatus // empty')
+if [[ ${avi_existing_status} == "ACTIVE" ]]; then
+  log_notify "Avi controller already deployed (alb-cluster ACTIVE), skipping the deployment"
+elif [[ $(echo ${ips_avi} | jq -c -r '. | length') -eq 3 ]]; then
   avi_cluster_json=$(jq -n --arg pw "${generic_password}" --arg bundle "${avi_bundle_id}" --arg fqdn "${basename_sddc}-avi.${domain}" --arg nsx "${nsx_id}" --argjson ips "${ips_avi}" \
     '{adminPassword: $pw, bundleId: $bundle, clusterFqdn: $fqdn, clusterName: "cluster-1", formFactor: "SMALL",
       nodes: [$ips[] | {ipAddress: .}], nsxIds: [$nsx], vcfopsAdminPassword: $pw}')
