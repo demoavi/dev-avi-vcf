@@ -34,7 +34,10 @@ echo "Cloud Builder JSON file creation"
 # is unreachable, since deployment_kind only ever resolves to "sddc" via
 # functions.sh's fallback default, never set explicitly by anything yet.
 #
-if [ "${deployment_kind}" == "sddc" ]; then
+# The per-host SSD step further down points govc at the ESXi host itself (GOVC_URL=<host>, root, no datacenter), so the
+# underlay settings are (re)applied at the top of every iteration, not only once: without that, host 2 and later were
+# looked up in host 1's own inventory (never found, a silent 60-minute wait per host).
+govc_underlay_env() {
   export GOVC_URL="${vsphere_underlay_vcsa}"
   export GOVC_USERNAME="${vsphere_underlay_username}"
   export GOVC_PASSWORD="${vsphere_underlay_password}"
@@ -43,11 +46,16 @@ if [ "${deployment_kind}" == "sddc" ]; then
   export GOVC_CLUSTER="${vsphere_underlay_cluster}"
   export GOVC_RESOURCE_POOL="${vsphere_underlay_cluster}/Resources"
   export GOVC_INSECURE=true
+  unset GOVC_PERSIST_SESSION GOVC_DEBUG
+}
+if [ "${deployment_kind}" == "sddc" ]; then
+  govc_underlay_env
 fi
 
 hostSpecs="[]"
 for esxi in $(seq 1 $(echo ${ips_esxi} | jq -c -r '. | length'))
 do
+  [ "${deployment_kind}" == "sddc" ] && govc_underlay_env
   group=$(( (esxi-1)/4 ))
   if [[ ${group} -eq 0 ]] ; then
     name_esxi="${basename_sddc}-mgmt-esx0${esxi}"
