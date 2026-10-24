@@ -154,6 +154,46 @@ fails the phase at once when `gw_accounts_secret` is empty or the text `null` (w
 password is derived from that secret, so without it they would be guessable from the public scripts.
 `gw-org-api.py`, `gw-blueprint-api.py`, `supervisor-blueprint-watcher.py`: the runtimes behind phases 2, 3 and 16.
 
+## vApp vs sddc: what differs
+
+The same scripts serve two use cases, told apart by `deployment_kind` in `variables.sh`: `vApp` (the nested lab built inside
+VCD by this repo's operator) and `sddc` (the nested lab built on an external vCenter by the reference project
+`tacobayle/nested-vcf`, whose `sddc.sh` creates the gw). `functions.sh` defaults it to `sddc` when nothing sets it
+(`: "${deployment_kind:=sddc}"`); the operator always renders `vApp`, and the reference `bash/variables.sh` sets `sddc`.
+Every phase not named in the second table behaves identically in both.
+
+### Around the scripts (who builds and feeds the gw)
+
+| | vApp | sddc |
+|---|---|---|
+| Who creates the gw and its inputs | The operator (`userdata.py`, `vapp_operator.py`): cloud-init renders `/home/ubuntu/bash/variables.sh` (`derive_gw_env_vars`) and `/home/ubuntu/json/deployment.json` (`derive_deployment_json`) from the CR. | The reference `sddc.sh`: merges the spec JSON with its public `json/variables.json` into `/root/<basename>_<operation>.json` and copies it to the gw as `/home/ubuntu/json/<basename>_<operation>.json`. `variables.sh` is the reference's own hand-written list of `jq` lines (no `derive_*`). |
+| JSON file passed to every phase (`$1`) | `/home/ubuntu/json/deployment.json` | `/home/ubuntu/json/<basename>_<operation>.json` (for example `sddc01_apply.json`) |
+| Where the settings of k8s, git, Argo CD, blueprint_apps and vault come from | The CR switches (`sddc.k8s.enabled`, `sddc.k8s.git.enabled`, per-org `vks_cluster.argocd.enabled` and `blueprints.auto_update`) plus the blocks of `variables.json`, rendered by `userdata.py`. | Same inputs, but each variable needs its own `jq` line in the reference `bash/variables.sh` and its block in the reference `json/variables.json`. A variable missing there is simply unset (not an error), so the feature silently misbehaves or is skipped. |
+| Launch of the pipeline | The gw's cloud-init runs `nohup bash .../vcf_bootstrap.sh .../deployment.json > /home/ubuntu/vcf_bootstrap.log 2>&1 &` as `ubuntu`, in the background (the log is truncated at every start). | `sddc.sh` runs it over ssh with the real JSON file name. As of the 2026-10-24 reference commits that line is commented out (followed by `exit`), so the pipeline is started by hand. |
+| Tool files (charts, image tars, OVAs, `vcf-cli`, Avi package) | An Iso CR (`spec.vms.gw.iso`, `spec.sddc.avi.pkg_iso`) is built by `iso_operator.py` and attached as the gw's CD-ROM; cloud-init (`gw-setup.sh.tpl`) mounts it, installs `vcf-cli`, puts the Avi package in `/home/ubuntu/avi/` and copies everything else to `/home/ubuntu/` (mode 600). | `sddc.sh` builds an ISO (`xorrisofs`) from `.gw.iso` (list of URLs) and attaches it with govc; the reference cloud-init mounts it at `/mnt/gw-tools` and (since reference commit 204b3d7) copies every file to `/home/ubuntu/` with the same mode. The Avi package and OVAs are `scp`ed by `sddc.sh`. |
+| `ip_gw` | The gw's management-side address, `<MANAGEMENT three octets>.1` (`userdata.py`). | `.gw.ip` of the spec, the gw's own routable address (the one you ssh to). Used as DNS server for NSX segments and VSP, Avi backup host and Vault certificate address, so the nested networks must be able to reach it. |
+| `ip_gw_direct` | The gw's address on its direct (outside) NIC, passed by the operator. | `.gw.ip`, like `ip_gw`. It is the only DNS and NTP server written into the SDDC spec (`templates/sddc_vcf_installer_trunk_9.1.json.template`). |
+| VCD | The gw logs in to VCD (`.vcd.*` in `deployment.json`) and `log_notify` also writes progress into the gw VM's VCD metadata (`vcf_bootstrap_progress`). | There is no VCD and no `.vcd` in the spec. `vcd_login` returns at once, `gw_vm_href` stays unset, and `log_notify` only prints and posts to `google_webhook`. |
+
+### Inside the phases
+
+| Phase | vApp | sddc |
+|---|---|---|
+| `functions.sh` `vcd_login` | Logs in to VCD and looks up the gw VM (`vcd_find_vm_href`). | Returns immediately. Before this was added, a spec without `.vcd` made `vcd_find_vm_href` page a nonexistent VCD forever (a log of hundreds of `integer expected` lines per second): every phase that calls `vcd_login` at its top, and `vcf_bootstrap.sh` itself, hung. `vcd_find_vm_href` now also gives up when the answer is not a number. |
+| `log_notify` | Message prefix `nested-<basename> (vApp)`, plus the VCD metadata post. | Prefix `nested-<basename> (sddc)`, no metadata post. |
+| `gw-accounts` | Runs: one Linux account per org, the gw's WireGuard keys and per-org `wg0.conf`. | Skipped at once (`gw-accounts.sh skipped (deployment_kind=sddc ...)`). |
+| `gw-org-api` | Runs when `spec.vms.gw.org_api` is set. | Exits at once, before it reads any `org_api_*` variable. |
+| `gw-blueprint-api`, `supervisor-blueprint-watcher` | Run when an org has `blueprints.auto_update.enabled`. | Same, as long as the `blueprint_apps_*` variables exist in `variables.sh`. |
+| `esxi-bootstrap` | `vcd_login`; waits for the ESXi VMs through VCD (`vcd_wait_vm_powered_on`) and power-cycles them with the VCD power API. | No VCD login; talks to the external vCenter with govc (`GOVC_*` from `vsphere_underlay_*`): `govc_wait_vm_powered_on`, `govc vm.power -s` / `-on`. At the end it also ejects the kickstart ISOs from the ESXi VMs and deletes them from the datastore (`nested-vcf/...iso`); the vApp case has nothing to eject. |
+| `vcf-installer-bootstrap` (license) | The gw cannot reach the license service, so the machine id is posted to the gw VM's VCD metadata (`vcfi_machineId`), the operator (`relay_vcf_installer_activation`) exchanges it and writes `vcfi_activation_code` back, and the script clears both afterwards. | The gw calls the license service itself (client-credentials token, then the machine id for an activation code). No metadata, nothing to clear. |
+| `vcfa_tenant_bootstrap`, `vcfa_provider_bootstrap` | Per-org Linux accounts exist (`gw-accounts`), so the per-org files are owned by the org account. | No such accounts, so `chown_org_or_ubuntu` falls back to `ubuntu:ubuntu`. |
+| `vcfa_tenant_cleaning.sh` (manual) | Without `--org` it takes the free orgs from `gw-org-api`. | `gw-org-api` does not run, so only `--org <name>` has anything to work with. |
+| All other phases (`vault-pki-bootstrap`, `vcfa-stabilize`, `vcenter-bootstrap`, `nsx-bootstrap`, `avi-bootstrap`, `nsx-project-vpc`, `supervisor-bootstrap`, `k8s-bootstrap`, `git-bootstrap`) | No branch on the kind. | Same code. They differ only through the values of `variables.sh` and the guard below. |
+
+Common to both: sourcing `functions.sh` aborts when `gw_accounts_secret` is empty or `null` (so the spec JSON must carry that
+key in the sddc use case too, even though `gw-accounts` is skipped there); the `vcfa-stabilize` and `vcfa_health_gate`
+steps are the same; `avi-bootstrap` is re-runnable in both.
+
 ## VCF-A stability (nested lab)
 
 Measured on the 16-org nested lab, VCF-A as one node (32 vCPU, 128 GiB), 2026-10-23. What `vcfa-stabilize` does and does not fix:
