@@ -16,6 +16,18 @@ export HOME=/home/ubuntu
 # entirely, regardless of whatever CWD cloud-init happened to launch us in.
 cd /home/ubuntu || exit 1
 jsonFile=${1}
+shift
+# Optional manual control: --from <phase> runs that phase and every phase after it, --only <phase> runs that one phase.
+# Both ignore sddc.stop_before_phase (below), which only applies to an automatic run.
+start_from=""
+only_phase=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --from) start_from="${2:-}"; shift; shift ;;
+    --only) only_phase="${2:-}"; shift; shift ;;
+    *) echo "usage: vcf_bootstrap.sh <json file> [--from <phase> | --only <phase>]" >&2; exit 2 ;;
+  esac
+done
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 templates_dir="${script_dir}/../templates"
 mkdir -p /home/ubuntu/html /home/ubuntu/json
@@ -93,7 +105,33 @@ fi
 # finds them and fills the dropdown (the blueprint rewrite itself is gw-blueprint-api's runtime job, not a step).
 # vcfa-stabilize (soft-fail) runs right after vcf-installer-bootstrap: VCF Automation exists from then on and nothing talks to it
 # until vcfa_provider_bootstrap, whose first step is a health gate that waits for the platform to be calm again.
-for phase in gw-accounts gw-org-api gw-blueprint-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcfa-stabilize vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap k8s-bootstrap git-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap supervisor-blueprint-watcher; do
+phases="gw-accounts gw-org-api gw-blueprint-api vault-pki-bootstrap esxi-bootstrap vcf-installer-bootstrap vcfa-stabilize vcenter-bootstrap nsx-bootstrap avi-bootstrap nsx-project-vpc supervisor-bootstrap k8s-bootstrap git-bootstrap vcfa_provider_bootstrap vcfa_tenant_bootstrap supervisor-blueprint-watcher"
+
+# stop_before_phase (CR sddc.stop_before_phase, "" = off) pauses an automatic run before that phase - e.g. while something that phase
+# needs is not ready yet. A typo would silently never stop, so every phase name given is checked before anything runs.
+[ "${stop_before_phase:-}" == "null" ] && stop_before_phase=""
+for phase_name in "${stop_before_phase:-}" "${start_from}" "${only_phase}"; do
+  [ -z "${phase_name}" ] && continue
+  case " ${phases} " in
+    *" ${phase_name} "*) ;;
+    *) log_notify "ERROR: unknown phase '${phase_name}' (stop_before_phase, --from or --only); phases: ${phases}"; exit 1 ;;
+  esac
+done
+
+started="false"
+[ -z "${start_from}" ] && started="true"
+for phase in ${phases}; do
+  if [ -n "${only_phase}" ]; then
+    [ "${phase}" == "${only_phase}" ] || continue
+  else
+    if [ "${started}" != "true" ]; then
+      [ "${phase}" == "${start_from}" ] && started="true" || continue
+    fi
+    if [ -z "${start_from}" ] && [ "${phase}" == "${stop_before_phase:-}" ]; then
+      log_notify "vcf_bootstrap.sh paused before ${phase}.sh (stop_before_phase=${phase}). Resume: cd ${script_dir} && bash vcf_bootstrap.sh ${jsonFile} --from ${phase} (or --only <phase> for a single phase)"
+      exit 0
+    fi
+  fi
   bash "${script_dir}/${phase}.sh" "${jsonFile}"
   phase_exit=$?
   if [ ${phase_exit} -ne 0 ]; then

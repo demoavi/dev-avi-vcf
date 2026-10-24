@@ -6,6 +6,14 @@ checks that DNS (bind9) and NTP (chrony) are running, then runs each phase below
 process**, in this order. A non-zero exit of any phase aborts the whole pipeline (`log_notify "ERROR: <phase>.sh failed"`).
 All phases append to the same `/home/ubuntu/vcf_bootstrap.log`.
 
+**Pausing and resuming.** `sddc.stop_before_phase` (CR field, optional; variable `stop_before_phase` in `variables.sh`, empty = off) makes an
+automatic run stop before that phase: `vcf_bootstrap.sh` logs and notifies `paused before <phase>.sh (stop_before_phase=<phase>)`, with the
+resume command, and exits 0 (not an error); nothing after that phase runs either. Resume on the gw, from the scripts directory:
+`bash vcf_bootstrap.sh <json> --from <phase>` runs that phase and all the following ones in order, `bash vcf_bootstrap.sh <json> --only <phase>`
+runs one phase. Both ignore `stop_before_phase`. A phase name that is not in the list below (a typo in the field, `--from` or `--only`) stops
+the script before anything runs, with the list of valid names. Typical use: build everything up to `nsx-bootstrap` and pause before
+`avi-bootstrap` while the Avi licence pool has no free service units. The vApp CRD limits the field to the phase names (an enum).
+
 Phases are self-contained and idempotent (re-runnable): each re-sources the variables, re-logs in, and skips what already
 exists. Phases marked **soft-fail** log an ERROR and exit 0, so an optional feature never aborts the pipeline.
 
