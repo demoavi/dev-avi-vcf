@@ -608,8 +608,9 @@ do
     # harbor_registry_fqdn stays shared/global
     # ("harbor.${avi_subdomain}.${domain}") since Harbor is a single
     # shared Supervisor Service instance, not per-org - only the routing
-    # domain needs to be unique. Output goes to org's own account's home
-    # dir (/home/${org_name}/${yaml_folder}/) rather than a shared
+    # domain needs to be unique. Output goes to the org's home dir
+    # (org_home_dir: /home/${org_name} in the vApp use case, /home/ubuntu/${org_name}
+    # in the sddc use case, which has no per-org accounts) rather than a shared
     # ubuntu-owned folder, so each org's differently-rendered files don't
     # overwrite each other AND the org's own SSH login (see
     # gw-accounts.sh, which always runs before this script and guarantees
@@ -682,7 +683,7 @@ do
     harbor_deployed="false"
     [ -s "${HARBOR_CA_CERT_PATH:-/home/ubuntu/harbor-ca.crt}" ] && harbor_deployed="true"
     if [ -d /home/ubuntu/dev-avi-vcf/yamls ]; then
-      org_yaml_folder="/home/${org_name}/${yaml_folder}"
+      org_yaml_folder="$(org_home_dir "${org_name}")/${yaml_folder}"
       sudo mkdir -p "${org_yaml_folder}"
       sudo chown ubuntu:ubuntu "${org_yaml_folder}"
       org_full_domain="${org_name}-vks.${domain}"
@@ -700,12 +701,12 @@ do
     # dev-avi-vcf/gitops/<subdir>/*.yaml - the manifests an org commits to its own Git repo (ArgoCD in its VKS cluster
     # syncs them): rendered with the same rules as the demo yamls above but for the org's own GitOps domain
     # (<org>-gitops.<domain>, delegated to Avi like the other two), keeping the sub-directories, into
-    # /home/<org>/gitops/. Images are pointed to Harbor only when Harbor is deployed on this gw (its CA was saved by
+    # <org home>/gitops/ (org_home_dir). Images are pointed to Harbor only when Harbor is deployed on this gw (its CA was saved by
     # supervisor-bootstrap.sh) - else the files keep their upstream images. A file that already exists is kept: the org
     # may have edited it, a rerun must not wipe that.
     #
     if [ -d /home/ubuntu/dev-avi-vcf/gitops ]; then
-      org_gitops_folder="/home/${org_name}/gitops"
+      org_gitops_folder="$(org_home_dir "${org_name}")/gitops"
       org_gitops_domain="${org_name}-gitops.${domain}"
       harbor_registry_fqdn="harbor.${avi_subdomain}.${domain}"
       gitops_images="${harbor_deployed}"

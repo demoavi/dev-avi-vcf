@@ -539,6 +539,17 @@ find_org_manifest() {
   return 1
 }
 
+# Directory that holds one org's rendered files (demo yamls, gitops manifests, .kube): the org's own gw home in the vApp
+# use case (gw-accounts.sh creates the account and /home/<org>), /home/ubuntu/<org> otherwise - the sddc use case has no
+# per-org accounts and no /home/<org>, so everything lives under the ubuntu home.
+org_home_dir() { # org
+  if [ "${deployment_kind}" == "vApp" ]; then
+    echo "/home/${1}"
+  else
+    echo "/home/ubuntu/${1}"
+  fi
+}
+
 # chown a path (recursively) to the org's own gw account when it exists (vApp use case: gw-accounts.sh creates one per org);
 # otherwise to ubuntu - the sddc use case has no per-org accounts, and "chown <org>:<org>" would print "invalid user".
 chown_org_or_ubuntu() { # org path...

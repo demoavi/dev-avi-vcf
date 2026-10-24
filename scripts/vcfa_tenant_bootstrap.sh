@@ -569,13 +569,13 @@ ARGOCD_GATEWAY_EOF
             # content across reruns for the same cluster, no idempotency
             # check needed.
             #
-            org_kube_dir="/home/${org_name}/.kube"
+            org_kube_dir="$(org_home_dir "${org_name}")/.kube"
             sudo mkdir -p "${org_kube_dir}"
             sudo cp "${vks_kubeconfig}" "${org_kube_dir}/config"
             chown_org_or_ubuntu "${org_name}" "${org_kube_dir}"
             sudo chmod 700 "${org_kube_dir}"
             sudo chmod 600 "${org_kube_dir}/config"
-            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: kubeconfig for VKS cluster ${vks_name} copied to /home/${org_name}/.kube/config" "${log_file}" "" ""
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: kubeconfig for VKS cluster ${vks_name} copied to ${org_kube_dir}/config" "${log_file}" "" ""
           fi
           rm -f "${vks_kubeconfig}"
           break
@@ -797,7 +797,7 @@ ARGOCD_GATEWAY_EOF
         # only ever worked by coincidence, since secret_vault.yaml/
         # vault_issuer.yaml are byte-identical raw templates for every
         # org regardless of whose copy gets read).
-        org_yaml_folder="/home/${org_name}/${yaml_folder}"
+        org_yaml_folder="$(org_home_dir "${org_name}")/${yaml_folder}"
 
         # org_yaml_folder is owned by ${org_name} now (handed off at the
         # end of the rendering loop in vcfa_provider_bootstrap.sh), not
