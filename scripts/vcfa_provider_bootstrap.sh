@@ -690,7 +690,7 @@ do
       for yaml_src in /home/ubuntu/dev-avi-vcf/yamls/*.yaml; do
         render_org_yaml "${yaml_src}" "${org_yaml_folder}/$(basename "${yaml_src}")" "${org_full_domain}" "${harbor_deployed}"
       done
-      sudo chown -R "${org_name}:${org_name}" "${org_yaml_folder}"
+      chown_org_or_ubuntu "${org_name}" "${org_yaml_folder}"
       if [ "${harbor_deployed}" != "true" ]; then
         log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${org_name}: Harbor is not deployed on this gw (no ${HARBOR_CA_CERT_PATH:-/home/ubuntu/harbor-ca.crt}), the demo yamls in ${org_yaml_folder} keep their upstream images" "${log_file}" "" ""
       fi
@@ -729,7 +729,7 @@ do
         install -m 0755 "${gitops_script}" "${org_gitops_folder}/$(basename "${gitops_script}")"
         gitops_scripts=$((gitops_scripts + 1))
       done < <(find /home/ubuntu/dev-avi-vcf/gitops -maxdepth 1 -type f -name '*.sh' | sort)
-      sudo chown -R "${org_name}:${org_name}" "${org_gitops_folder}"
+      chown_org_or_ubuntu "${org_name}" "${org_gitops_folder}"
       log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${org_name}: GitOps manifests rendered into ${org_gitops_folder} for ${org_gitops_domain} (${gitops_new} new, ${gitops_kept} kept as they were; images: ${gitops_images_label}; ${gitops_scripts} script(s) copied as is)" "${log_file}" "" ""
     fi
 

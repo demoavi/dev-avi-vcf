@@ -19,7 +19,7 @@ gw-accounts -> gw-org-api -> gw-blueprint-api -> vault-pki-bootstrap -> esxi-boo
 
 ## Phases
 
-### 1. `gw-accounts.sh`
+### 1. `gw-accounts.sh` (vApp only; skipped when `deployment_kind` is not `vApp`)
 Creates one Linux account per VCF-A org on the gw (`org-1`, `org-2`, ...), SSH + password login. The password is
 `VMware1!<4 hex of sha256(gw_accounts_secret + org_name)>VMware1!` (20 chars exactly: vCenter SSO caps at 20, VCFA
 requires mixed character classes). The same derivation is used for the org's vCenter SSO, NSX, Avi, VCF-A, Git and
@@ -87,6 +87,12 @@ cloud integration, service engine group(s), IPAM (VIP network and pool), the **D
 subdomain plus three per org: `<org>.<domain>`, `<org>-vks.<domain>`, `<org>-gitops.<domain>`), the DNS virtual
 service, license/JWT, the traffic-generator helper, system WAF policies (`clone_waf_policy`, including
 `System-WAF-Policy-Enforcement-Php2shell` with the pre-CRS rules from Broadcom KB 460068), and the Avi upgrade.
+Rerun behaviour: the DNS and IPAM profiles are created only when missing, and the Avi cloud-services (Pulse) step skips the
+registration when the controller is already `ALBSERVICES_REGISTERED` and the pool subscription when a license refresh is already
+recorded. A subscription that fails (`Error(018011): not enough service units in pool`) aborts the phase by default; with the
+environment variable `avi_license_soft_fail=true` it logs a warning and continues unlicensed (subscribe later with
+`POST api/licensing/v1/cloud/subscribe {pool_id}`). The sections after the license step (availability zones, service engine
+groups, `dns-VsVip`/`dns-vs`) are not re-runnable once they have completed.
 
 ### 11. `nsx-project-vpc.sh`
 NSX multi-tenancy: per non-default project the Tier-0/edge-cluster project settings, transit-gateway attachments,
@@ -143,7 +149,9 @@ the namespace and VKS cluster, and releases the cleaned orgs (an org whose clean
 `/home/ubuntu/vcfa_tenant_cleaning.log`.
 
 ### Helpers
-`functions.sh` (log_notify, vcd_login, vcfa_login/vcfa_api, avi/nsx/vcenter API helpers, `find_org_manifest`).
+`functions.sh` (log_notify, vcd_login, vcfa_login/vcfa_api, `vcfa_health_gate`, `chown_org_or_ubuntu`, avi/nsx/vcenter API helpers, `find_org_manifest`). Sourcing it also
+fails the phase at once when `gw_accounts_secret` is empty or the text `null` (what `jq -r` prints for a missing key): every per-org
+password is derived from that secret, so without it they would be guessable from the public scripts.
 `gw-org-api.py`, `gw-blueprint-api.py`, `supervisor-blueprint-watcher.py`: the runtimes behind phases 2, 3 and 16.
 
 ## VCF-A stability (nested lab)

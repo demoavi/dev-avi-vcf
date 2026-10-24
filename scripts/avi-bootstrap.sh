@@ -310,9 +310,15 @@ avi_dns_domains_json=$(jq -n --arg base "${avi_subdomain}.${domain}" --argjson o
    + ($orgs | map({domain_name: (.name + "." + $domain), pass_through: true}))
    + ($orgs | map({domain_name: (.name + "-vks." + $domain), pass_through: true}))
    + ($orgs | map({domain_name: (.name + "-gitops." + $domain), pass_through: true}))')
-avi_api 2 2 POST "$(jq -n --argjson dsd "${avi_dns_domains_json}" '{name: "dns-avi", type: "IPAMDNS_TYPE_INTERNAL_DNS", internal_profile: {dns_service_domain: $dsd}}')" api/ipamdnsproviderprofile
-log_only "configure Avi - waiting 120 seconds"
-sleep 120
+# Created once: a rerun of this phase must not POST the same profile name again (Avi rejects duplicates).
+avi_api 2 2 GET "" "api/ipamdnsproviderprofile?name=dns-avi"
+if [ "$(echo ${response_body} | jq -c -r '.count // 0')" -gt 0 ]; then
+  log_only "DNS profile dns-avi already exists, skipping creation"
+else
+  avi_api 2 2 POST "$(jq -n --argjson dsd "${avi_dns_domains_json}" '{name: "dns-avi", type: "IPAMDNS_TYPE_INTERNAL_DNS", internal_profile: {dns_service_domain: $dsd}}')" api/ipamdnsproviderprofile
+  log_only "configure Avi - waiting 120 seconds"
+  sleep 120
+fi
 avi_login
 
 #
@@ -320,7 +326,12 @@ avi_login
 #
 avi_api 2 2 GET "" api/network
 vip_uuid=$(echo ${response_body} | jq -c -r --arg arg "$(echo ${nsx_segments_overlay} | jq -c -r '.[] | select(has("avi_ipam_vip")) | .display_name')" '.results[] | select(.name == $arg) | .uuid')
-avi_api 2 2 POST "$(jq -n --arg ref "/api/network/${vip_uuid}" '{name: "ipam-avi", type: "IPAMDNS_TYPE_INTERNAL", internal_profile: {usable_networks: [{nw_ref: $ref}]}}')" api/ipamdnsproviderprofile
+avi_api 2 2 GET "" "api/ipamdnsproviderprofile?name=ipam-avi"
+if [ "$(echo ${response_body} | jq -c -r '.count // 0')" -gt 0 ]; then
+  log_only "IPAM profile ipam-avi already exists, skipping creation"
+else
+  avi_api 2 2 POST "$(jq -n --arg ref "/api/network/${vip_uuid}" '{name: "ipam-avi", type: "IPAMDNS_TYPE_INTERNAL", internal_profile: {usable_networks: [{nw_ref: $ref}]}}')" api/ipamdnsproviderprofile
+fi
 avi_api 2 2 PATCH '{"add": {"ipam_provider_ref": "/api/ipamdnsproviderprofile/?name=ipam-avi", "dns_provider_ref": "/api/ipamdnsproviderprofile/?name=dns-avi"}}' "api/cloud/${cloud_uuid}"
 
 #
@@ -342,18 +353,40 @@ avi_api 2 2 PATCH "${network_update_json}" "api/network/${vip_uuid}"
 #
 if [ -n "${avi_jwt_token}" ] && [ -n "${avi_account_id}" ]; then
   avi_api 2 2 GET "" api/albservices/status
-  avi_api 2 2 POST "$(jq -n --arg t "${avi_jwt_token}" '{jwt_token: $t}')" api/portal/refresh-access-token
-  log_only "waiting 20 seconds"
-  sleep 20
-  random_string=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 10 | head -n 1)
-  avi_api 2 2 POST "$(jq -n --arg n "workshop-demo-${random_string}" --arg acct "${avi_account_id}" '{name: $n, description: "Registration and deregistration", email: "avi.workshop@broadcom.com", account_id: $acct}')" api/albservices/register
-  log_only "waiting 20 seconds"
-  sleep 20
+  alb_registration=$(echo ${response_body} | jq -c -r '.registration_status // ""')
+  alb_license_refreshed=$(echo ${response_body} | jq -c -r '.tenant_status.license_refreshed_at // ""')
+  # A rerun of this phase must not register a second controller (each registration is a new asset, and nothing
+  # deregisters it): skip the token refresh + registration when the controller already shows as registered.
+  if [ "${alb_registration}" == "ALBSERVICES_REGISTERED" ]; then
+    log_only "controller already registered with Avi cloud services, skipping the registration"
+  else
+    avi_api 2 2 POST "$(jq -n --arg t "${avi_jwt_token}" '{jwt_token: $t}')" api/portal/refresh-access-token
+    log_only "waiting 20 seconds"
+    sleep 20
+    random_string=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 10 | head -n 1)
+    avi_api 2 2 POST "$(jq -n --arg n "workshop-demo-${random_string}" --arg acct "${avi_account_id}" '{name: $n, description: "Registration and deregistration", email: "avi.workshop@broadcom.com", account_id: $acct}')" api/albservices/register
+    log_only "waiting 20 seconds"
+    sleep 20
+  fi
   avi_api 2 2 PATCH '{"replace": {"feature_opt_in_status": {"enable_appsignature_sync": true, "enable_ip_reputation": true, "enable_pulse_case_management": false, "enable_pulse_waf_management": true, "enable_user_agent_db_sync": false}, "waf_config": {"enable_auto_download_waf_signatures": true, "enable_waf_signatures_notifications": true}}}' api/albservicesconfig
   log_only "waiting 10 seconds"
   sleep 10
-  avi_api 2 2 GET "" api/albservices/pool
-  avi_api 2 2 POST "$(jq -n --arg id "$(echo ${response_body} | jq -c -r '.results[0].pool_id')" '{pool_id: $id}')" api/licensing/v1/cloud/subscribe
+  if [ -n "${alb_license_refreshed}" ]; then
+    log_only "license already refreshed at ${alb_license_refreshed}, skipping the pool subscription"
+  else
+    avi_api 2 2 GET "" api/albservices/pool
+    # Not enough free service units in the pool (Error 018011) fails this call with a 500. avi_api exits the process on
+    # failure, so it runs in a subshell and the result decides: abort (default) or, with avi_license_soft_fail=true,
+    # warn and continue unlicensed - subscribe later by rerunning this phase once the pool has units.
+    if ( avi_api 2 2 POST "$(jq -n --arg id "$(echo ${response_body} | jq -c -r '.results[0].pool_id')" '{pool_id: $id}')" api/licensing/v1/cloud/subscribe ); then
+      log_only "Avi license pool subscribed"
+    elif [ "${avi_license_soft_fail:-false}" == "true" ]; then
+      log_notify "WARNING: Avi license subscription failed, continuing unlicensed because avi_license_soft_fail=true - once the pool has free service units, subscribe it with POST api/licensing/v1/cloud/subscribe {pool_id} (pool id: GET api/albservices/pool); do not rerun this whole phase after it completed, the DNS virtual service etc. are created without an existence check"
+    else
+      log_notify "ERROR: Avi license subscription failed (no free service units in the pool?), aborting - set avi_license_soft_fail=true to continue unlicensed"
+      exit 100
+    fi
+  fi
 else
   log_only "avi_jwt_token/avi_account_id not set, skipping Pulse cloud-services registration"
 fi

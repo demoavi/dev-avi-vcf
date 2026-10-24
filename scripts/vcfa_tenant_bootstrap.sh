@@ -572,7 +572,7 @@ ARGOCD_GATEWAY_EOF
             org_kube_dir="/home/${org_name}/.kube"
             sudo mkdir -p "${org_kube_dir}"
             sudo cp "${vks_kubeconfig}" "${org_kube_dir}/config"
-            sudo chown -R "${org_name}:${org_name}" "${org_kube_dir}"
+            chown_org_or_ubuntu "${org_name}" "${org_kube_dir}"
             sudo chmod 700 "${org_kube_dir}"
             sudo chmod 600 "${org_kube_dir}/config"
             log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: kubeconfig for VKS cluster ${vks_name} copied to /home/${org_name}/.kube/config" "${log_file}" "" ""

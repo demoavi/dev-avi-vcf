@@ -39,6 +39,15 @@ jsonFile="${1}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
+# Per-org Linux accounts on gw are a vApp use-case feature (student desktops log in to gw with them, the org API hands the
+# credentials out, WireGuard keys live in their homes). The sddc use case has neither, so there is nothing to do: the later
+# phases still create /home/<org>/... themselves (sudo mkdir -p) and, with no <org> account, leave those files to ubuntu
+# (chown_org_or_ubuntu in functions.sh). The per-org logins in vCenter, Avi, VCF-A, Git and Argo CD are created by their own
+# phases from gw_accounts_secret and are not affected.
+if [ "${deployment_kind}" != "vApp" ]; then
+  log_only "gw-accounts.sh skipped (deployment_kind=${deployment_kind}: no per-org gw accounts outside the vApp use case)"
+  exit 0
+fi
 # sddc use case has no VCD at all - vcd_login (and everything it sets:
 # vcd_host/vcd_auth_token/vcd_api_version/gw_vm_href) only makes sense for
 # the vApp use case. log_notify below tolerates gw_vm_href being unset

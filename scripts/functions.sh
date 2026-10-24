@@ -531,3 +531,29 @@ find_org_manifest() {
   done
   return 1
 }
+
+# chown a path (recursively) to the org's own gw account when it exists (vApp use case: gw-accounts.sh creates one per org);
+# otherwise to ubuntu - the sddc use case has no per-org accounts, and "chown <org>:<org>" would print "invalid user".
+chown_org_or_ubuntu() { # org path...
+  local org="$1"; shift
+  if id "${org}" >/dev/null 2>&1; then
+    sudo chown -R "${org}:${org}" "$@"
+  else
+    sudo chown -R ubuntu:ubuntu "$@"
+  fi
+}
+
+#
+# Fail fast when gw_accounts_secret is missing. Every per-org password (gw Linux accounts, vCenter SSO, Avi tenant admin,
+# VCF-A org admin, Gitea, Argo CD, and the shared NSX read-only user) is "VMware1!<4 hex of sha256(gw_accounts_secret + name)>
+# VMware1!", and this repo is public: with no secret those passwords can be computed by anyone from the org name. The vApp CRD
+# makes the secret required; on the SDDC side bash/variables.sh reads it with `jq -r`, which prints the TEXT "null" (not an
+# empty string) when the spec has no such key - so both "" and "null" are rejected. Runs when functions.sh is sourced, i.e.
+# at the top of every phase, so a missing secret stops the pipeline before anything is created.
+#
+case "${gw_accounts_secret:-}" in
+  ""|null)
+    log_notify "ERROR: gw_accounts_secret is empty or \"null\" (not set in the deployment spec). Every per-org password is derived from it and would be guessable from the public scripts. Add gw_accounts_secret to the spec and re-run."
+    exit 1
+    ;;
+esac
