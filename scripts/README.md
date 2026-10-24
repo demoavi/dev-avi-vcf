@@ -62,7 +62,15 @@ the kickstart ISOs; it talks to the external vCenter through govc.)
 Patches the VCF Installer appliance (lcm/domainmanager config -> staging depot + license service, through `su -` +
 expect), exchanges license credentials for an activation code, downloads the INSTALL bundles (only those whose
 `toVersion` starts with `<vcf_version_full>.`, i.e. base `9.1.1.0.*`), validates the SDDC spec (`POST /v1/sddcs/validations`),
-then submits and polls the SDDC build until `COMPLETED_WITH_SUCCESS`. The build itself can take many hours; silence is normal.
+then submits and polls the SDDC build until `COMPLETED_WITH_SUCCESS`. The build itself can take many hours.
+
+**Build progress (milestones).** The installer reports the build as 8 milestones (Deploy vCenter, Deploy SDDC Manager, Configure vSphere
+cluster, Deploy and configure NSX, ...the VCF Management Platform, the operations appliance, VCF Management Services, VCF Automation), each
+`NOT_STARTED`, `IN_PROGRESS` or `COMPLETED_WITH_SUCCESS`, with completed/total tasks (`GET /v1/sddcs/<id>`). The phase polls it every minute
+and sends one `log_notify` (the chat webhook, plus the VCD metadata in the vApp use case) for each milestone that starts, completes or ends in
+another status, e.g. `VCF-I: build milestone completed - Deploy SDDC Manager (2/8 milestones done, 71 min into the build)`. The first poll only
+sends one summary line (`VCF-I: build milestones (N/8 done): ...`), so restarting the phase does not replay what was already done. A response
+without milestones is ignored.
 
 **Patch levels (`highest_patch_version`).** The release comes from the ESX ISO file name: its first three numbers are the family
 (`vcf_version`, `9.1.1`). A patched ISO (`...9.1.1.0100...`) carries its patch level in the fourth number; that only says which ESX

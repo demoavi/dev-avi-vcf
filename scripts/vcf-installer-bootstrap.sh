@@ -473,12 +473,49 @@ done
 sddc_manager_api 3 2 POST "@/home/ubuntu/json/${basename_sddc}.json" "${ip_vcf_installer}" v1/sddcs $(jq -c -r .accessToken /tmp/token_vcfi.json)
 sddc_id=$(echo ${response_body} | jq -c -r .id)
 log_notify "VCF-I: starting building sddc id ${sddc_id}"
-retry_build=180 ; pause_build=300 ; attempt_build=1 ; count_retry=1
+# The build takes hours and the installer reports its progress as milestones (Deploy vCenter, Deploy SDDC Manager, Configure vSphere
+# cluster, Deploy and configure NSX, ...; each with a status NOT_STARTED / IN_PROGRESS / COMPLETED_WITH_SUCCESS and completed/total
+# tasks). Every poll compares them with the previous one and sends one log_notify (chat, plus the VCD metadata in the vApp use case)
+# per milestone whose status changed. The first poll only seeds the state and sends one summary line, so restarting this phase does
+# not replay milestones that were already done. A response without milestones (older installer, API hiccup) is ignored.
+declare -A milestone_state
+milestones_seeded="false"
+build_start_epoch=$(date +%s)
+notify_build_milestones() {
+  local total_ms done_ms elapsed mname mstatus mdone mtotal prev summary=""
+  total_ms=$(echo "${response_body}" | jq -r '.milestones | length' 2> /dev/null)
+  case "${total_ms}" in ''|*[!0-9]*|0) return 0 ;; esac
+  done_ms=$(echo "${response_body}" | jq -r '[.milestones[] | select(.status == "COMPLETED_WITH_SUCCESS")] | length' 2> /dev/null)
+  elapsed=$(( ($(date +%s) - build_start_epoch) / 60 ))
+  while IFS=$'\t' read -r mname mstatus mdone mtotal; do
+    [ -z "${mname}" ] && continue
+    prev="${milestone_state["${mname}"]:-NOT_STARTED}"
+    milestone_state["${mname}"]="${mstatus}"
+    if [ "${milestones_seeded}" != "true" ]; then
+      [ "${mstatus}" != "NOT_STARTED" ] && summary="${summary}${summary:+; }${mname} ${mstatus} (${mdone}/${mtotal})"
+      continue
+    fi
+    [ "${mstatus}" == "${prev}" ] && continue
+    case "${mstatus}" in
+      NOT_STARTED) ;;
+      IN_PROGRESS) log_notify "VCF-I: build milestone started - ${mname} (${done_ms}/${total_ms} milestones done, ${elapsed} min into the build)" ;;
+      COMPLETED_WITH_SUCCESS) log_notify "VCF-I: build milestone completed - ${mname} (${done_ms}/${total_ms} milestones done, ${elapsed} min into the build)" ;;
+      *) log_notify "VCF-I: build milestone ${mname} is ${mstatus} (${mdone}/${mtotal} tasks, ${done_ms}/${total_ms} milestones done, ${elapsed} min into the build)" ;;
+    esac
+  done < <(echo "${response_body}" | jq -r '.milestones[]? | [.name, .status, (.completedTasks // "-"), (.totalTasks // "-")] | @tsv' 2> /dev/null)
+  if [ "${milestones_seeded}" != "true" ]; then
+    milestones_seeded="true"
+    log_notify "VCF-I: build milestones (${done_ms}/${total_ms} done): ${summary:-none started yet}"
+  fi
+}
+# Polled every minute (was every 5) so a milestone is announced within about a minute; retry_build keeps the same overall limit.
+retry_build=900 ; pause_build=60 ; attempt_build=1 ; count_retry=1
 while true ; do
   create_api_session "admin@local" "$(jq -c -r .generic_password $jsonFile)" "${ip_vcf_installer}" /tmp/token_vcfi.json
-  log_only "attempt ${attempt_build} to verify SDDC ${sddc_id} creation"
+  [ $(( (attempt_build - 1) % 5 )) -eq 0 ] && log_only "attempt ${attempt_build} to verify SDDC ${sddc_id} creation"
   sddc_manager_api 3 2 GET "" "${ip_vcf_installer}" v1/sddcs/${sddc_id} $(jq -c -r .accessToken /tmp/token_vcfi.json)
   sddc_status=$(echo ${response_body} | jq -c -r .status)
+  notify_build_milestones
   if [[ ${sddc_status} != "IN_PROGRESS" ]]; then
     log_notify "SDDC ${sddc_id} creation status: ${sddc_status} after attempt ${attempt_build}, go to https://${ip_vcf_installer}"
     if [[ ${sddc_status} != "COMPLETED_WITH_SUCCESS" ]]; then
