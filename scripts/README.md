@@ -56,6 +56,21 @@ expect), exchanges license credentials for an activation code, downloads the INS
 `toVersion` starts with `<vcf_version_full>.`, i.e. base `9.1.1.0.*`), validates the SDDC spec (`POST /v1/sddcs/validations`),
 then submits and polls the SDDC build until `COMPLETED_WITH_SUCCESS`. The build itself can take many hours; silence is normal.
 
+**Patch levels (`highest_patch_version`).** The release comes from the ESX ISO file name (first three numbers = family `vcf_version`,
+`9.1.1`; first four = `vcf_version_full`, `9.1.1.0`). Patch releases (`9.1.1.0100`, `9.1.1.0200`) only rebuild some components, so a
+deployment can legitimately mix levels. `sddc.highest_patch_version` (CR field, boolean, default `false`; variable
+`highest_patch_version` in `variables.sh`) chooses the bundles: `false` keeps the base release only (the filter above, unchanged);
+`true` takes, for every component, the highest patch level that exists for the same family (compared on the patch number, then the
+build), ignoring the patch level in the ISO name - e.g. SDDC Manager and the depot service at `0200`, vCenter and NSX at `0100`.
+The versions picked are logged (`VCF-I: bundle <component> <toVersion>`), because the depot catalog changes over time. Not changed by
+the flag: the ESX hosts (they come from the ISO) and the spec's own `"version"` (still `vcf_version_full`); whether the installer
+accepts a patched mix under that version is not verified - the spec validation (before the long build) is the test.
+
+**Alignment check.** The VCF Installer image and the ESX ISO must be the same X.Y.Z release (the patch level may differ). In the
+vApp CRD this is a CEL rule on `spec.vms` (compares the first `N.N.N` of `vms.vcf_installer.template` with the one in the file name
+of `vms.esx.template_url`); `kubectl apply` rejects a mismatch with a message naming both versions. A name without any version
+number is not checked. The same rule, with the sddc spec's own paths (`vcf_installer.ova_url`, `esxi.iso_url`), can be put in the sddc CRD.
+
 ### 7. `vcfa-stabilize.sh` (soft-fail) + `vcfa-stabilize-node.sh`
 Runs right after the SDDC build, as soon as VCF Automation exists and before anything talks to it. Finds the single VCF-A
 node (the address of `spec.vcf_automation.ip_pool` that answers SSH and has the control-plane static pod manifests; the

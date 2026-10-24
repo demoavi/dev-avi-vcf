@@ -364,8 +364,27 @@ sddc_manager_api 3 2 GET '' "${ip_vcf_installer}" v1/bundles $(jq -c -r .accessT
 # matched here with vcf_version_full ("9.1.1.0", from the ESX ISO name) plus a dot - without the dot "9.1.1.0" would also
 # match "9.1.1.0100". When vcf_version_full is empty the match falls back to the old .version prefix.
 bundle_select='select ((.components[0].imageType == "INSTALL") and (if $full != "" then (.components[0].toVersion | startswith($full + ".")) else (.version | startswith($arg)) end))'
-depots_ids=$(echo ${response_body} | jq --arg arg "${vcf_version}" --arg full "${vcf_version_full}" "[.elements[] | ${bundle_select} | .id]")
-depots_to_download=$(echo ${response_body} | jq --arg arg "${vcf_version}" --arg full "${vcf_version_full}" "[.elements[] | ${bundle_select} | .id ] | length")
+if [ "${highest_patch_version:-false}" == "true" ] && [ -n "${vcf_version}" ]; then
+  # highest_patch_version (CR sddc.highest_patch_version): instead of the one release named by the ESX ISO, take for every
+  # component the highest patch level that exists for the same X.Y.Z family (vcf_version, e.g. 9.1.1): toVersion is
+  # "<X.Y.Z>.<patch>.<build>" (base "9.1.1.0.<build>", then "9.1.1.0100.<build>", "9.1.1.0200.<build>"), compared on the patch
+  # number, then on the build. A patch release only rebuilds some components, so the result is usually a mix.
+  depots_ids=$(echo ${response_body} | jq -c --arg fam "${vcf_version}" '
+    [.elements[] | select(.components[0].imageType == "INSTALL" and (.components[0].toVersion | startswith($fam + ".")))
+      | {id: .id, component: .components[0].description,
+         key: [((.components[0].toVersion | split(".") | .[3]) | ltrimstr("0") | if . == "" then 0 else (tonumber? // 0) end), ((.components[0].toVersion | split(".") | .[4]) | tonumber? // 0)]}]
+    | group_by(.component) | map(max_by(.key)) | [.[].id]')
+  log_only "VCF-I: highest_patch_version=true, highest patch level of ${vcf_version} for every component"
+else
+  [ "${highest_patch_version:-false}" == "true" ] && log_only "VCF-I: highest_patch_version=true but vcf_version is empty (no ESX ISO name to take the release from), using the default selection"
+  depots_ids=$(echo ${response_body} | jq --arg arg "${vcf_version}" --arg full "${vcf_version_full}" "[.elements[] | ${bundle_select} | .id]")
+fi
+depots_to_download=$(echo ${depots_ids} | jq 'length')
+# What was chosen, per component, so each deployment records exactly which versions it got (the depot catalog changes over time).
+echo ${response_body} | jq -r --argjson ids "${depots_ids}" '.elements[] | select(.id as $i | $ids | index($i)) | "VCF-I: bundle \(.components[0].description) \(.components[0].toVersion)"' | sort | while read -r bundle_line
+do
+  log_only "${bundle_line}"
+done
 echo ${depots_ids} | jq -c -r .[] | while read depot_id
 do
   sddc_manager_api 3 2 PATCH '{"bundleDownloadSpec":{"downloadNow":true}}' "${ip_vcf_installer}" v1/bundles/${depot_id} $(jq -c -r .accessToken /tmp/token_vcfi.json)
@@ -381,7 +400,7 @@ retry_download=60 ; pause_download=20 ; attempt_download=1
 while true
 do
   sddc_manager_api 3 2 GET '' "${ip_vcf_installer}" v1/bundles $(jq -c -r .accessToken /tmp/token_vcfi.json)
-  depot_downloaded=$(echo ${response_body} | jq --arg arg "${vcf_version}" --arg full "${vcf_version_full}" "[.elements[] | ${bundle_select} | select (.downloadStatus == \"SUCCESSFUL\") ] | length")
+  depot_downloaded=$(echo ${response_body} | jq --argjson ids "${depots_ids}" '[.elements[] | select(.id as $i | $ids | index($i)) | select(.downloadStatus == "SUCCESSFUL")] | length')
   if [[ ${depot_downloaded} == ${depots_to_download} ]]; then
     log_notify "VCF-I: all bundles downloaded"
     break
