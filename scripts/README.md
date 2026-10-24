@@ -56,18 +56,17 @@ expect), exchanges license credentials for an activation code, downloads the INS
 `toVersion` starts with `<vcf_version_full>.`, i.e. base `9.1.1.0.*`), validates the SDDC spec (`POST /v1/sddcs/validations`),
 then submits and polls the SDDC build until `COMPLETED_WITH_SUCCESS`. The build itself can take many hours; silence is normal.
 
-**Patch levels (`highest_patch_version`).** The release comes from the ESX ISO file name (first three numbers = family `vcf_version`,
-`9.1.1`; first four = `vcf_version_full`, `9.1.1.0`). Patch releases (`9.1.1.0100`, `9.1.1.0200`) only rebuild some components, so a
+**Patch levels (`highest_patch_version`).** The release comes from the ESX ISO file name: its first three numbers are the family
+(`vcf_version`, `9.1.1`). A patched ISO (`...9.1.1.0100...`) carries its patch level in the fourth number; that only says which ESX
+build the hosts are. The spec's `"version"` is always the base release `<family>.0` (`9.1.1.0`, the value every build has run with),
+whatever the ISO's patch level (logged when they differ). Patch releases (`9.1.1.0100`, `9.1.1.0200`) only rebuild some components, so a
 deployment can legitimately mix levels. `sddc.highest_patch_version` (CR field, boolean, default `false`; variable
-`highest_patch_version` in `variables.sh`) chooses the bundles: `false` keeps the base release only (the filter above, unchanged);
+`highest_patch_version` in `variables.sh`) chooses the bundles: `false` takes the base release only (`9.1.1.0.<build>`);
 `true` takes, for every component, the highest patch level that exists for the same family (compared on the patch number, then the
-build), ignoring the patch level in the ISO name - e.g. SDDC Manager and the depot service at `0200`, vCenter and NSX at `0100`.
-The versions picked are logged (`VCF-I: bundle <component> <toVersion>`), because the depot catalog changes over time. The spec's own
-`"version"` is sent as the base release `<family>.0` (e.g. `9.1.1.0`) when the flag is on, even if the ISO name carries a patch level
-(`...9.1.1.0100...` would otherwise give `9.1.1.0100`, a value no build has run with): the patch levels come from the downloaded
-bundles. With the flag off it stays `vcf_version_full`, as before. Not changed by the flag: the ESX hosts (they come from the ISO).
-Whether the installer accepts a patched mix under the base `"version"` is not verified - the spec validation (before the long
-build) is the test.
+build) - e.g. SDDC Manager and the depot service at `0200`, vCenter and NSX at `0100`. The versions picked are logged
+(`VCF-I: bundle <component> <toVersion>`), because the depot catalog changes over time. Whether the installer accepts a patched mix
+under the base `"version"` is not verified - the spec validation (before the long build) is the test; likewise a patched ESX with
+base management components is not checked against Broadcom's interoperability matrix.
 
 **Alignment check.** The VCF Installer image and the ESX ISO must be the same X.Y.Z release (the patch level may differ). In the
 vApp CRD this is a CEL rule on `spec.vms` (compares the first `N.N.N` of `vms.vcf_installer.template` with the one in the file name
