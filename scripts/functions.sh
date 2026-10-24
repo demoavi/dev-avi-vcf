@@ -46,7 +46,9 @@ vcd_find_vm_href() {
     # resultTotal isn't reliably present in this API's response, so don't
     # depend on it - a short page (fewer records than requested) is the
     # actual "last page" signal.
-    local record_count=$(echo "${resp}" | jq -r '.record | length')
+    local record_count=$(echo "${resp}" | jq -r '.record | length' 2> /dev/null)
+    # No answer / not JSON (no VCD to talk to): not a number, so stop instead of paging forever.
+    case "${record_count}" in ''|*[!0-9]*) return 1 ;; esac
     if [ "${record_count}" -lt "${page_size}" ]; then
       return 1
     fi
@@ -136,6 +138,11 @@ govc_wait_vm_powered_on() {
 # google_webhook + stdout echo, which work regardless) calls this once
 # near its own top, right after sourcing variables.sh/functions.sh.
 vcd_login() {
+  # The sddc use case has no VCD (no .vcd in its spec): nothing to log in to, and gw_vm_href stays unset, which log_notify
+  # tolerates. Without this every phase hung here, paging a VCD that does not exist.
+  if [ "${deployment_kind}" != "vApp" ]; then
+    return 0
+  fi
   vcd_host=$(jq -r .vcd.host $jsonFile)
   vcd_user=$(jq -r .vcd.user $jsonFile)
   vcd_password=$(jq -r .vcd.password $jsonFile)
