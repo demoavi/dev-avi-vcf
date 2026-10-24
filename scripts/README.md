@@ -62,9 +62,12 @@ deployment can legitimately mix levels. `sddc.highest_patch_version` (CR field, 
 `highest_patch_version` in `variables.sh`) chooses the bundles: `false` keeps the base release only (the filter above, unchanged);
 `true` takes, for every component, the highest patch level that exists for the same family (compared on the patch number, then the
 build), ignoring the patch level in the ISO name - e.g. SDDC Manager and the depot service at `0200`, vCenter and NSX at `0100`.
-The versions picked are logged (`VCF-I: bundle <component> <toVersion>`), because the depot catalog changes over time. Not changed by
-the flag: the ESX hosts (they come from the ISO) and the spec's own `"version"` (still `vcf_version_full`); whether the installer
-accepts a patched mix under that version is not verified - the spec validation (before the long build) is the test.
+The versions picked are logged (`VCF-I: bundle <component> <toVersion>`), because the depot catalog changes over time. The spec's own
+`"version"` is sent as the base release `<family>.0` (e.g. `9.1.1.0`) when the flag is on, even if the ISO name carries a patch level
+(`...9.1.1.0100...` would otherwise give `9.1.1.0100`, a value no build has run with): the patch levels come from the downloaded
+bundles. With the flag off it stays `vcf_version_full`, as before. Not changed by the flag: the ESX hosts (they come from the ISO).
+Whether the installer accepts a patched mix under the base `"version"` is not verified - the spec validation (before the long
+build) is the test.
 
 **Alignment check.** The VCF Installer image and the ESX ISO must be the same X.Y.Z release (the patch level may differ). In the
 vApp CRD this is a CEL rule on `spec.vms` (compares the first `N.N.N` of `vms.vcf_installer.template` with the one in the file name

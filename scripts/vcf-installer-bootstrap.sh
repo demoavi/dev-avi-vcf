@@ -40,6 +40,14 @@ done
 #
 #
 json_template_file="${templates_dir}/sddc_vcf_installer_trunk_9.1.json.template"
+# The spec's "version" has always been the base release named by the ESX ISO (vcf_version_full, e.g. 9.1.1.0). With
+# highest_patch_version=true the ISO may be a patched one (e.g. ...9.1.1.0100...), which would turn that into 9.1.1.0100 - a
+# value no build has been run with; the patch levels come from the bundles that were downloaded (see the bundle selection below),
+# so the spec keeps the release: <X.Y.Z>.0. Without the flag nothing changes.
+if [ "${highest_patch_version:-false}" == "true" ] && [ -n "${vcf_version}" ]; then
+  [ "${vcf_version_full}" != "${vcf_version}.0" ] && log_only "VCF-I: highest_patch_version=true, spec version ${vcf_version}.0 (the ESX ISO name says ${vcf_version_full})"
+  vcf_version_full="${vcf_version}.0"
+fi
 sed -e "s/\${basename_sddc}/${basename_sddc}/" \
     -e "s/\${SDDC_MANAGER_PASSWORD}/$(jq -c -r .generic_password $jsonFile)/" \
     -e "s/\${VCFA_PASSWORD}/$(jq -c -r .generic_password $jsonFile)/" \
