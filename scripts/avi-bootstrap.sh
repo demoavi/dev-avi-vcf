@@ -401,6 +401,14 @@ fi
 # availability zones (one per nested ESXi host, via Avi's NSX-T transport
 # node discovery) and the default Service Engine Group
 #
+# Re-run support for the objects created below: looks <endpoint>?name=<name> up and sets found_uuid/found_url (empty when
+# missing), so a phase interrupted half way can be run again without POSTing what already exists.
+avi_lookup() { # endpoint name
+  avi_api 2 2 GET "" "$1?name=$2"
+  found_uuid=$(echo ${response_body} | jq -c -r '.results[0].uuid // empty')
+  found_url=$(echo ${response_body} | jq -c -r '.results[0].url // empty')
+}
+
 avi_api 2 2 GET "" api/vcenterserver
 vcenter_uuid=$(echo ${response_body} | jq -c -r '.results[0].uuid')
 log_only "waiting 10 seconds"
@@ -422,6 +430,12 @@ while read -r item
 do
   az_json=$(jq -n --arg hid "$(echo ${item} | jq -c -r '.vc_mobj_id')" --arg vc "${vcenter_uuid}" --arg cloud "${cloud_uuid}" --arg n "az-$(echo ${item} | jq -c -r '.name')" \
     '{az_hosts: [{host_ids: [$hid], vcenter_ref: $vc}], cloud_ref: $cloud, name: $n}')
+  avi_lookup api/availabilityzone "az-$(echo ${item} | jq -c -r '.name')"
+  if [ -n "${found_uuid}" ]; then
+    log_only "availability zone az-$(echo ${item} | jq -c -r '.name') already exists, skipping creation"
+    list_az_uuids=$(echo ${list_az_uuids} | jq -c --arg id "${found_uuid}" '. + [$id]')
+    continue
+  fi
   log_only "waiting 10 seconds"
   sleep 10
   avi_api 2 2 POST "${az_json}" api/availabilityzone
@@ -447,6 +461,11 @@ else
   while read -r item
   do
     json_data=$(echo ${item} | jq -c --arg cloud_url "${cloud_url}" '. + {cloud_ref: $cloud_url}')
+    avi_lookup api/serviceenginegroup "$(echo ${item} | jq -c -r '.name')"
+    if [ -n "${found_uuid}" ]; then
+      log_only "service engine group $(echo ${item} | jq -c -r '.name') already exists, skipping creation"
+      continue
+    fi
     avi_api 2 2 POST "${json_data}" api/serviceenginegroup
   done < <(echo "${service_engine_groups}" | jq -c -r '.[]')
 fi
@@ -459,9 +478,20 @@ vsvip_json=$(jq -n --arg cloud "${cloud_url}" --arg fqdn "dns.${avi_subdomain}.$
   '{cloud_ref: $cloud, dns_info: [{algorithm: "DNS_RECORD_RESPONSE_CONSISTENT_HASH", fqdn: $fqdn, ttl: 30, type: "DNS_RECORD_A"}],
     name: "dns-VsVip", vip: [{auto_allocate_ip: true, ipam_network_subnet: {network_ref: $ref, subnet: {ip_addr: {addr: $addr, type: "V4"}, mask: $mask}}}],
     vrf_context_ref: $vrf}')
-avi_api 2 2 POST "${vsvip_json}" api/vsvip
-vsvip_url=$(echo ${response_body} | jq -c -r '.url')
+avi_lookup api/vsvip "dns-VsVip"
+if [ -n "${found_uuid}" ]; then
+  log_only "dns-VsVip already exists, skipping creation"
+  vsvip_url="${found_url}"
+else
+  avi_api 2 2 POST "${vsvip_json}" api/vsvip
+  vsvip_url=$(echo ${response_body} | jq -c -r '.url')
+fi
+avi_lookup api/virtualservice "dns-vs"
+if [ -n "${found_uuid}" ]; then
+  log_only "dns-vs already exists, skipping creation"
+else
 avi_api 2 2 POST "$(jq -n --arg cloud "${cloud_url}" --arg vsvip "${vsvip_url}" '{cloud_ref: $cloud, name: "dns-vs", vsvip_ref: $vsvip, application_profile_ref: "/api/applicationprofile/?name=System-DNS", network_profile_ref: "/api/networkprofile/?name=System-UDP-Per-Pkt", services: [{port: 53, enable_ssl: false}]}')" api/virtualservice
+fi
 
 avi_api 2 2 GET "" api/systemconfiguration
 avi_api 2 2 PUT "$(echo ${response_body} | jq -c '. + {dns_virtualservice_refs: ["/api/virtualservice/?name=dns-vs"]}')" api/systemconfiguration
@@ -473,6 +503,9 @@ do
   dns_vs_status=$(echo ${response_body} | jq -c -r '.results[0].runtime.oper_status.state')
   if [[ ${dns_vs_status} == "OPER_UP" ]]; then
     break
+  fi
+  if (( count_dns % 6 == 0 )); then
+    log_only "DNS VS state: ${dns_vs_status:-unknown} (attempt ${count_dns} of 120)"
   fi
   sleep ${pause_dns}
   ((count_dns++))
