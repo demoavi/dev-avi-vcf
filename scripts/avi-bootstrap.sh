@@ -467,8 +467,8 @@ if [ -z "${service_engine_groups}" ] || [ "${service_engine_groups}" == "null" ]
 else
   while read -r item
   do
-    # mem_reserve defaults to false (no memory reservation for the SEs - lighter on the nested hosts); an entry can set it to true
-    json_data=$(echo ${item} | jq -c --arg cloud_url "${cloud_url}" '{mem_reserve: false} + . + {cloud_ref: $cloud_url}')
+    # mem_reserve is always false (no memory reservation for the SEs - lighter on the nested hosts), like Default-Group above
+    json_data=$(echo ${item} | jq -c --arg cloud_url "${cloud_url}" '. + {cloud_ref: $cloud_url, mem_reserve: false}')
     avi_lookup api/serviceenginegroup "$(echo ${item} | jq -c -r '.name')"
     if [ -n "${found_uuid}" ]; then
       log_only "service engine group $(echo ${item} | jq -c -r '.name') already exists, skipping creation"

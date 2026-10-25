@@ -129,7 +129,7 @@ environment variable `avi_license_soft_fail=true` it logs a warning and continue
 groups, `dns-VsVip`/`dns-vs`) are not re-runnable once they have completed.
 
 **Service engine memory reservation:** `Default-Group` is patched with `mem_reserve: false` and `cpu_reserve: false`, and every extra group
-of `spec.sddc.avi.service_engine_groups` is created with `mem_reserve: false` unless its entry sets `mem_reserve: true`.
+of `spec.sddc.avi.service_engine_groups` is created with `mem_reserve: false` (fixed in the script, not a CR field).
 
 **Licensing mode** (`spec.sddc.avi.vmware_cloud_service`, default `true`; the gw variable is `avi_vmware_cloud_service`, and an unset
 variable counts as `true`). `true`: the license tier is `ENTERPRISE_WITH_CLOUD_SERVICES` and the Service Engines are licensed through
