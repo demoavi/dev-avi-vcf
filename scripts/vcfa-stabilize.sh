@@ -49,16 +49,25 @@ node_root() { # ip command...
 }
 
 #
-# Find the node: the pool address that answers SSH and carries the control-plane static pod manifests.
+# Find the node: the pool address that answers SSH and carries the control-plane static pod manifests. Nodes are counted by
+# machine, not by address: the control-plane VIP (kube-vip, a /32 on the node's NIC) answers SSH as the very node that holds it,
+# so two pool addresses can be one node. Per machine id the node's own address is kept (the VIP only if nothing else answers),
+# because the VIP can move.
 #
-nodes=""
+declare -A node_ip_of_id node_is_vip
 for ip in $(echo "${pool_ip_vcf_auto:-[]}" | jq -r '.[]'); do
-  if node_root "${ip}" "test -f /etc/kubernetes/manifests/etcd.yaml" >/dev/null 2>&1; then
-    nodes="${nodes} ${ip}"
+  node_root "${ip}" "test -f /etc/kubernetes/manifests/etcd.yaml" >/dev/null 2>&1 || continue
+  machine_id=$(node_root "${ip}" "cat /etc/machine-id" 2>/dev/null | tr -d '[:space:]')
+  [ -n "${machine_id}" ] || machine_id="address-${ip}"
+  is_vip="false"
+  node_root "${ip}" "ip -4 -o addr show" 2>/dev/null | grep -q " ${ip}/32" && is_vip="true"
+  if [ -z "${node_ip_of_id[${machine_id}]:-}" ] || { [ "${node_is_vip[${machine_id}]}" == "true" ] && [ "${is_vip}" == "false" ]; }; then
+    node_ip_of_id[${machine_id}]="${ip}"
+    node_is_vip[${machine_id}]="${is_vip}"
   fi
 done
-nodes=$(echo ${nodes})
-node_count=$(echo ${nodes} | wc -w)
+nodes=$(echo ${node_ip_of_id[@]})
+node_count=${#node_ip_of_id[@]}
 if [ "${node_count}" -eq 0 ]; then
   warn "no VCF Automation node found in the pool ${pool_ip_vcf_auto:-?} (SSH as ${ssh_user} with the admin password failed, or the node has no control-plane manifests), skipped - the platform runs without the stabilization"
   exit 0

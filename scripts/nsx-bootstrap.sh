@@ -172,7 +172,9 @@ do
     done < <(echo ${hs} | jq -c -r '.transport_zone_names[]')
 
     hs_built=$(echo ${hs} | jq -c --argjson p "${profile_ids}" --argjson t "${tz_endpoints}" --arg v "$(jq -c -r --arg arg "HOST_OVERLAY" '.sddc.vcenter.networks[] | select( .type == $arg).vlan_id' $jsonFile)" \
-      '. + {host_switch_profile_ids:$p, transport_zone_endpoints:$t, vlan:$v} | del(.host_switch_profile_names, .transport_zone_names)')
+      '. + {host_switch_profile_ids:$p, transport_zone_endpoints:$t, vlan:$v} | del(.host_switch_profile_names, .transport_zone_names, .ip_pool_name)')
+    # ip_pool_name is the NSX 9.0 key some variables.json files still carry next to ip_pool_name_9_1 (the nested-vcf one does): NSX 9.1
+    # rejects it ("property ip_pool_name is unrecognized"), so it is dropped above and only ip_assignment_spec is sent.
     if [ "$(echo ${hs} | jq -r '.ip_pool_name_9_1 // empty')" != "" ]; then
       nsx_get_object "api/v1/infra/ip-pools"
       ip_pool_id=$(echo ${response_body} | jq -c -r --arg arg "$(echo ${hs} | jq -r .ip_pool_name_9_1)" '.results[] | select(.display_name == $arg).realization_id')

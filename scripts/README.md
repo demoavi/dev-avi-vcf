@@ -91,8 +91,9 @@ number is not checked. The same rule, with the sddc spec's own paths (`vcf_insta
 
 ### 7. `vcfa-stabilize.sh` (soft-fail) + `vcfa-stabilize-node.sh`
 Runs right after the SDDC build, as soon as VCF Automation exists and before anything talks to it. Finds the single VCF-A
-node (the address of `spec.vcf_automation.ip_pool` that answers SSH and has the control-plane static pod manifests; the
-control-plane VIP takes one of the pool addresses too), logs in as `vmware-system-user` (override with
+node: the addresses of `spec.vcf_automation.ip_pool` that answer SSH and have the control-plane static pod manifests, counted
+by machine (`/etc/machine-id`), not by address - the control-plane VIP (kube-vip, a /32 on the node's NIC) answers SSH as the node that
+holds it, so two addresses can be one node; the node's own address is kept, the VIP only if nothing else answers. Logs in as `vmware-system-user` (override with
 `vcfa_ssh_user`) with the VCF-A admin password (`generic_password`; sshpass environment variable and sudo stdin, never a
 command line), copies `vcfa-stabilize-node.sh` over and runs it as root. The node script (idempotent; `status` is
 read-only, `apply` waits a bounded time for load1 < 20 first) sets what was measured to keep VCF-A up through its own CPU
