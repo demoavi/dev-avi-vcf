@@ -128,8 +128,8 @@ environment variable `avi_license_soft_fail=true` it logs a warning and continue
 `POST api/licensing/v1/cloud/subscribe {pool_id}`). The sections after the license step (availability zones, service engine
 groups, `dns-VsVip`/`dns-vs`) are not re-runnable once they have completed.
 
-**Service engine memory reservation:** `Default-Group` is patched with `mem_reserve: false` and `cpu_reserve: false`, and every extra group
-of `spec.sddc.avi.service_engine_groups` is created with `mem_reserve: false` (fixed in the script, not a CR field).
+**Service engine sizing:** the NSX cloud's `Default-Group` is patched with 4 vCPU, 4096 MiB memory and 15 GB disk per SE (fixed in the script), `mem_reserve: false` and `cpu_reserve: false`; every extra group
+of `spec.sddc.avi.service_engine_groups` takes its sizing from the CR and is created with `mem_reserve: false` (fixed in the script, not a CR field).
 
 **Licensing mode** (`spec.sddc.avi.vmware_cloud_service`, default `true`; the gw variable is `avi_vmware_cloud_service`, and an unset
 variable counts as `true`). `true`: the license tier is `ENTERPRISE_WITH_CLOUD_SERVICES` and the Service Engines are licensed through

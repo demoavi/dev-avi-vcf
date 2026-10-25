@@ -452,7 +452,7 @@ done < <(echo ${response_body} | jq -c -r '.resource.nsxt_transportnodes[]')
 avi_api 2 2 GET "" "api/serviceenginegroup?name=Default-Group&cloud_ref=${cloud_uuid}"
 serviceenginegroup_uuid=$(echo ${response_body} | jq -c -r '.results[0].uuid')
 seg_update_json=$(jq -n --argjson azs "$(echo ${list_az_uuids} | jq -c '.[-3:]')" \
-  '{replace: {availability_zone_refs: $azs, cpu_reserve: false, mem_reserve: false, se_deprovision_delay: 120, buffer_se: 0, min_scaleout_per_vs: 1, algo: "PLACEMENT_ALGO_PACKED", ha_mode: "HA_MODE_SHARED", vcpus_per_se: 1, memory_per_se: 2048, disk_per_se: 15, realtime_se_metrics: {duration: 30, enable: false}}}')
+  '{replace: {availability_zone_refs: $azs, cpu_reserve: false, mem_reserve: false, se_deprovision_delay: 120, buffer_se: 0, min_scaleout_per_vs: 1, algo: "PLACEMENT_ALGO_PACKED", ha_mode: "HA_MODE_SHARED", vcpus_per_se: 4, memory_per_se: 4096, disk_per_se: 15, realtime_se_metrics: {duration: 30, enable: false}}}')
 avi_api 2 2 PATCH "${seg_update_json}" "api/serviceenginegroup/${serviceenginegroup_uuid}"
 
 #
