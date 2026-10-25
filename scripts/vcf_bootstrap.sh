@@ -14,8 +14,11 @@ export HOME=/home/ubuntu
 # back and never surfaced before this script ran as ubuntu. Pinning CWD
 # somewhere ubuntu-writable with no coincidentally-named files sidesteps it
 # entirely, regardless of whatever CWD cloud-init happened to launch us in.
+# The script's own directory and the json file are resolved BEFORE the cd below: run as "bash vcf_bootstrap.sh <json> --only <phase>" from the
+# scripts directory (relative paths), they would otherwise be looked up under /home/ubuntu.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+jsonFile="$(readlink -f "${1}" 2> /dev/null || echo "${1}")"
 cd /home/ubuntu || exit 1
-jsonFile=${1}
 shift
 # Optional manual control: --from <phase> runs that phase and every phase after it, --only <phase> runs that one phase.
 # Both ignore sddc.stop_before_phase (below), which only applies to an automatic run.
@@ -28,7 +31,6 @@ while [ $# -gt 0 ]; do
     *) echo "usage: vcf_bootstrap.sh <json file> [--from <phase> | --only <phase>]" >&2; exit 2 ;;
   esac
 done
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 templates_dir="${script_dir}/../templates"
 mkdir -p /home/ubuntu/html /home/ubuntu/json
 source /home/ubuntu/bash/variables.sh
@@ -128,7 +130,7 @@ for phase in ${phases}; do
       [ "${phase}" == "${start_from}" ] && started="true" || continue
     fi
     if [ -z "${start_from}" ] && [ "${phase}" == "${stop_before_phase:-}" ]; then
-      log_notify "vcf_bootstrap.sh paused before ${phase}.sh (stop_before_phase=${phase}). Resume: cd ${script_dir} && bash vcf_bootstrap.sh ${jsonFile} --from ${phase} (or --only <phase> for a single phase)"
+      log_notify "vcf_bootstrap.sh paused before ${phase}.sh (stop_before_phase=${phase}). Resume: bash ${script_dir}/vcf_bootstrap.sh ${jsonFile} --from ${phase} (or --only <phase> for a single phase)"
       exit 0
     fi
   fi
