@@ -234,7 +234,12 @@ avi_api 2 2 PATCH "${backup_json}" "api/backupconfiguration/${backupconfiguratio
 # system config, fault config, controller properties
 #
 avi_api 2 2 GET "" api/systemconfiguration
-avi_api 2 2 PUT "$(echo ${response_body} | jq -c '. + {welcome_workflow_complete: true, default_license_tier: "ENTERPRISE_WITH_CLOUD_SERVICES"}')" api/systemconfiguration
+# avi_vmware_cloud_service (CR sddc.avi.vmware_cloud_service, default true; anything but "false" counts as true): true = tier
+# ENTERPRISE_WITH_CLOUD_SERVICES, the SEs are licensed through the Pulse registration below; false = tier ENTERPRISE, the on-prem
+# License Hub (built-in 30-day evaluation, 20 service units, valid from the controller's first boot), no registration at all.
+# Set here, before the first SE is created for the DNS virtual service.
+if [ "${avi_vmware_cloud_service:-true}" == "false" ]; then avi_license_tier="ENTERPRISE"; else avi_license_tier="ENTERPRISE_WITH_CLOUD_SERVICES"; fi
+avi_api 2 2 PUT "$(echo ${response_body} | jq -c --arg tier "${avi_license_tier}" '. + {welcome_workflow_complete: true, default_license_tier: $tier}')" api/systemconfiguration
 avi_api 2 2 GET "" api/inventoryfaultconfig
 avi_api 2 2 PUT "$(echo ${response_body} | jq -c '. + {controller_faults: {sslprofile_faults: false, license_faults: false}}')" api/inventoryfaultconfig
 avi_api 2 2 GET "" api/controllerproperties
@@ -355,9 +360,11 @@ avi_api 2 2 PATCH "${network_update_json}" "api/network/${vip_uuid}"
 
 #
 # Pulse cloud-services registration - optional, skipped entirely unless
-# spec.sddc.avi.jwt_token/account_id are set.
+# spec.sddc.avi.jwt_token/account_id are set, or when spec.sddc.avi.vmware_cloud_service is false.
 #
-if [ -n "${avi_jwt_token}" ] && [ -n "${avi_account_id}" ]; then
+if [ "${avi_license_tier}" == "ENTERPRISE" ]; then
+  log_only "avi_vmware_cloud_service=false: tier ENTERPRISE (on-prem License Hub), skipping the Pulse cloud-services registration even if jwt_token/account_id are set"
+elif [ -n "${avi_jwt_token}" ] && [ -n "${avi_account_id}" ]; then
   avi_api 2 2 GET "" api/albservices/status
   alb_registration=$(echo ${response_body} | jq -c -r '.registration_status // ""')
   alb_license_refreshed=$(echo ${response_body} | jq -c -r '.tenant_status.license_refreshed_at // ""')

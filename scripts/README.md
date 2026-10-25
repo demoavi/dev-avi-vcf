@@ -128,6 +128,13 @@ environment variable `avi_license_soft_fail=true` it logs a warning and continue
 `POST api/licensing/v1/cloud/subscribe {pool_id}`). The sections after the license step (availability zones, service engine
 groups, `dns-VsVip`/`dns-vs`) are not re-runnable once they have completed.
 
+**Licensing mode** (`spec.sddc.avi.vmware_cloud_service`, default `true`; the gw variable is `avi_vmware_cloud_service`, and an unset
+variable counts as `true`). `true`: the license tier is `ENTERPRISE_WITH_CLOUD_SERVICES` and the Service Engines are licensed through
+the Pulse registration above (`jwt_token` + `account_id`). `false`: the tier is `ENTERPRISE`, the Controller uses the on-prem License
+Hub (the built-in evaluation: 20 service units, valid 30 days from the Controller's first boot) and the registration, token refresh
+and pool subscription are skipped even if the token and account id are set. The tier is written to `api/systemconfiguration`
+(`default_license_tier`) before the first Service Engine is created for the DNS virtual service.
+
 ### 11. `nsx-project-vpc.sh`
 NSX multi-tenancy: per non-default project the Tier-0/edge-cluster project settings, transit-gateway attachments,
 inter-VPC transit gateway IP blocks, VPC connectivity profiles and VPC service profiles (VCF 9.1 only; the Avi
