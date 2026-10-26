@@ -257,8 +257,14 @@ else
             # (e.g. the plain busybox demo containers) from starting in
             # the default namespace - relax it to "privileged" there.
             #
-            kubectl --kubeconfig="${vks_kubeconfig}" label --overwrite ns default pod-security.kubernetes.io/enforce=privileged
-            if [ $? -eq 0 ]; then
+            # A few tries: right after the cluster comes up its API server can fail a single call (seen once on org-12, which the
+            # catch-up pass would not redo because the org counts as done as soon as the cluster is Available).
+            label_rc=1
+            for label_attempt in 1 2 3 4 5; do
+              kubectl --kubeconfig="${vks_kubeconfig}" label --overwrite ns default pod-security.kubernetes.io/enforce=privileged && { label_rc=0; break; }
+              sleep 10
+            done
+            if [ ${label_rc} -eq 0 ]; then
               log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: default namespace pod-security.kubernetes.io/enforce=privileged applied for ${org_name}'s VKS cluster ${vks_name}" "${log_file}" "" ""
             else
               log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: failed to label default namespace pod-security.kubernetes.io/enforce=privileged for ${org_name}'s VKS cluster ${vks_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
@@ -1208,6 +1214,11 @@ else
         user_error=$(govc sso.user.create -p "${org_password}" "${org_name}" 2>&1)
         user_rc=$?
         account_action="created"
+      fi
+      # A re-run sets the same derived password again, which vCenter refuses as a reuse: the account already has it.
+      if [ ${user_rc} -ne 0 ] && [ "${account_action}" == "password re-synced" ] && echo "${user_error}" | grep -q "PWD_HISTORY_RESTRICTION"; then
+        user_rc=0
+        account_action="password already current"
       fi
       if [ ${user_rc} -ne 0 ]; then
         log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: vCenter SSO account ${org_name}@${sso_domain} FAILED (${account_action}): ${user_error}" "${log_file}" "${slack_webhook}" "${google_webhook}"
