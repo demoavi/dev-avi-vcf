@@ -56,12 +56,17 @@ hostSpecs="[]"
 for esxi in $(seq 1 $(echo ${ips_esxi} | jq -c -r '. | length'))
 do
   [ "${deployment_kind}" == "sddc" ] && govc_underlay_env
-  group=$(( (esxi-1)/4 ))
-  if [[ ${group} -eq 0 ]] ; then
-    name_esxi="${basename_sddc}-mgmt-esx0${esxi}"
+  if [ "${deployment_kind}" == "vApp" ]; then
+    # names decided once by the operator (the dedicated host is not named by an index), see functions.sh
+    name_esxi="$(esxi_host_name ${esxi})"
   else
-    pos_in_group=$(( esxi - group*4 ))
-    name_esxi="${basename_sddc}-wld0${group}-esx0${pos_in_group}"
+    group=$(( (esxi-1)/4 ))
+    if [[ ${group} -eq 0 ]] ; then
+      name_esxi="${basename_sddc}-mgmt-esx0${esxi}"
+    else
+      pos_in_group=$(( esxi - group*4 ))
+      name_esxi="${basename_sddc}-wld0${group}-esx0${pos_in_group}"
+    fi
   fi
   ip_esxi="$(echo ${ips_esxi} | jq -r .[$(expr ${esxi} - 1)])"
 

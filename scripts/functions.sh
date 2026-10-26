@@ -382,6 +382,12 @@ vcfa_health_gate() {
   return 0
 }
 
+# vApp use case only: name of the ESX host at a 1-based position of ips_esxi, read from names_esxi - decided once by the
+# operator (the mgmt hosts, any workload hosts, the dedicated host), so nothing re-derives it from an index.
+esxi_host_name() {
+  echo "${names_esxi}" | jq -r ".[$(($1-1))]"
+}
+
 vcfa_login() {
   # A single failed answer is not final: VCF-A can miss a login for a few seconds under load (seen on 2026-10-26, it answered
   # fine again 40 s later), so try 5 times, 20 s apart, with a timeout per call, before giving up.
