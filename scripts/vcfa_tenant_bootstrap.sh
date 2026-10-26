@@ -977,7 +977,7 @@ ARGOCD_GATEWAY_EOF
               log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster creation for ${org_name} FAILED after retries, response was: ${response_body}" "${log_file}" "${slack_webhook}" "${google_webhook}"
             else
               vks_name=$(echo ${response_body} | jq -c -r '.metadata.name')
-              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster ${vks_name} for ${org_name} created, will check Available status in a later pass (see below) once every org's cluster has been created" "${log_file}" "" ""
+              log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VKS cluster ${vks_name} for ${org_name} created, waiting for it to become Available before the next org is touched" "${log_file}" "" ""
             fi
           fi
         fi
