@@ -383,16 +383,22 @@ vcfa_health_gate() {
 }
 
 vcfa_login() {
-  local creds
+  # A single failed answer is not final: VCF-A can miss a login for a few seconds under load (seen on 2026-10-26, it answered
+  # fine again 40 s later), so try 5 times, 20 s apart, with a timeout per call, before giving up.
+  local creds resp login_attempt
   creds=$(printf '%s@system:%s' "admin" "${generic_password}" | base64 -w0)
-  local resp
-  resp=$(curl -sk -i -X POST "${VCFA_HOST}/cloudapi/1.0.0/sessions/provider" \
-    -H "$ACCEPT" -H "$CONTENT_TYPE" -H "Authorization: Basic ${creds}")
-  vcfa_token=$(printf '%s' "$resp" | grep -i '^x-vmware-vcloud-access-token:' | awk '{print $2}' | tr -d '\r')
-  if [ -z "${vcfa_token}" ]; then
-    log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VCF-A provider login FAILED" "${log_file}" "${slack_webhook}" "${google_webhook}"
-    exit 100
-  fi
+  for login_attempt in 1 2 3 4 5; do
+    resp=$(curl -sk -m 30 -i -X POST "${VCFA_HOST}/cloudapi/1.0.0/sessions/provider" \
+      -H "$ACCEPT" -H "$CONTENT_TYPE" -H "Authorization: Basic ${creds}")
+    vcfa_token=$(printf '%s' "$resp" | grep -i '^x-vmware-vcloud-access-token:' | awk '{print $2}' | tr -d '\r')
+    [ -n "${vcfa_token}" ] && return 0
+    if [ ${login_attempt} -lt 5 ]; then
+      log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VCF-A provider login failed (attempt ${login_attempt} of 5), retrying in 20 seconds" "${log_file}" "" ""
+      sleep 20
+    fi
+  done
+  log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: VCF-A provider login FAILED after 5 attempts" "${log_file}" "${slack_webhook}" "${google_webhook}"
+  exit 100
 }
 vcfa_api() {
   # $1 method, $2 endpoint (relative to /), $3 data, $4 retries, $5 pause,
