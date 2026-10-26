@@ -98,3 +98,10 @@ expect eof
 VSAN_EXPECT_EOF
 unset VC_ROOT_PASSWORD VC_SSO_USER VC_HOST VC_DC VC_CLUSTER
 log_notify "vSAN health alarm silencing applied on ${basename_sddc}-vc01.${domain}"
+
+# vApp use case with vms.esx.dedicated_host (names_esxi then lists <basename>-mgmt-esx05): vCenter and VCF Automation on that host and
+# every other VM off it (DRS rules, vMotion done and waited for here), then a cron keeps the VM groups right. Soft-fail inside.
+if [ "${deployment_kind}" == "vApp" ] && echo "${names_esxi:-[]}" | jq -e --arg n "${basename_sddc}-mgmt-esx05" 'index($n) != null' > /dev/null 2>&1; then
+  bash "${script_dir}/dedicated-host-placement.sh" "${jsonFile}" --place
+  bash "${script_dir}/dedicated-host-placement.sh" "${jsonFile}" --install-cron
+fi

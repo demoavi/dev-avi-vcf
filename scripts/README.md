@@ -110,6 +110,18 @@ Not done here: any VM CPU/memory resize (the results below were measured at 32 v
 Against the newly built nested vCenter (govc): creates the extra port groups and silences the vSAN health alarms a
 nested vSAN can never pass (they block Supervisor enablement).
 
+vApp use case with `vms.esx.dedicated_host` (a fifth management host, `<basename>-mgmt-esx05`, 48 vCPU / 224 GiB by default):
+calls `dedicated-host-placement.sh`. It creates the host group `dedicated-host` and the VM groups `specific-VMs` (vCenter and
+the VCF Automation VM, matched by name) and `other-VMs` (every other VM except templates, vCLS and ESX agent VMs), vMotions
+each VM where it belongs and waits until they are there (30 minutes at most, then an ERROR and the pipeline goes on), then
+creates two mandatory DRS rules (`specific-VMs` must run on the dedicated host, `other-VMs` must not). It finally installs a
+crontab entry (every minute, `--cron`, log `/home/ubuntu/dedicated-host-placement.log`) that moves new VMs into `other-VMs`;
+DRS does the moves. If the dedicated host stays disconnected or not responding for 3 runs the cron disables the two rules
+(a mandatory rule would stop vCenter and VCF Automation from restarting elsewhere) and enables them again when it is back.
+For planned maintenance of that host, disable the two rules first (`govc cluster.rule.change -name <rule> -enable=false`): a host
+cannot enter maintenance mode while a mandatory rule pins VMs to it.
+`--dry-run` prints what a first pass would change without touching anything.
+
 ### 9. `nsx-bootstrap.sh`
 NSX Manager readiness, uplink profile for the edge, transport zones, the external VLAN segment, the host transport
 node profile update, disables the OVF validation flag, deploys the edge nodes (fp-eth0 = overlay, fp-eth1 = external),
