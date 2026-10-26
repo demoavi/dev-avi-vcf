@@ -662,7 +662,8 @@ ARGOCD_GATEWAY_EOF
         fi
         ns_name=$(echo ${response_body} | jq -c -r '.metadata.name')
 
-        retry_ns=12 ; pause_ns=15 ; attempt_ns=1
+        # Raised from 12 (3 min): under load a namespace needed about 10 minutes to reach Created
+        retry_ns=60 ; pause_ns=15 ; attempt_ns=1
         while true
         do
           sleep ${pause_ns}

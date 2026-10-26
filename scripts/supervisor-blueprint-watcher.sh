@@ -98,7 +98,8 @@ if [ "$(vc -o /dev/null -w '%{http_code}' "${vc_host}/api/vcenter/namespaces/ins
   log_notify "supervisor-blueprint-watcher: vSphere namespace ${ns} created (provider-only)"
 fi
 ns_phase=""
-for attempt in $(seq 1 30); do
+# 10 minutes (was 2.5): under load the namespace took longer than that to become Active
+for attempt in $(seq 1 120); do
   ns_phase=$(kc get namespace "${ns}" -o jsonpath='{.status.phase}' 2> /dev/null)
   [ "${ns_phase}" == "Active" ] && break
   sleep 5
