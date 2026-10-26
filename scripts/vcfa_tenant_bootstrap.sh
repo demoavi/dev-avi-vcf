@@ -188,13 +188,13 @@ else
         continue
       fi
 
-      retry_vks=40 ; pause_vks=30 ; attempt_vks=1
+      retry_vks=60 ; pause_vks=30 ; attempt_vks=1
       while true
       do
         ns_k8s_api GET "${ns_endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns_name}/clusters/${vks_name}" "" "${org_token}"
         vks_available=$(echo ${response_body} | jq -c -r '.status.conditions[]? | select(.type=="Available") | .status')
         #
-        # This loop can silently wait up to retry_vks*pause_vks (20
+        # This loop can silently wait up to retry_vks*pause_vks (30
         # minutes) per org with zero log output otherwise - confirmed
         # live this reads as "the script looks stuck" from the log
         # alone, even when it's working correctly. One progress line
