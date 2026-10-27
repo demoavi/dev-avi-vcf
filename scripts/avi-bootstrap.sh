@@ -110,20 +110,30 @@ avi_cluster_json=$(jq -n --arg pw "${generic_password}" --arg bundle "${avi_bund
     nodes: [{ipAddress: $ip}], nsxIds: [$nsx], vcfopsAdminPassword: $pw}')
 sddc_manager_api 3 2 POST "${avi_cluster_json}" "${ip_sddcm}" v1/alb-clusters $(jq -c -r .accessToken /tmp/token_sddcm.json)
 log_notify "single-node Avi controller deployment started"
-log_only "waiting 1800 seconds for Avi controller deployment"
-sleep 1800
-
-create_api_session "administrator@$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)" "${generic_password}" "${ip_sddcm}" /tmp/token_sddcm.json
-retry_avi_deploy=60 ; pause_avi_deploy=10 ; attempt_avi_deploy=1
+#
+# Poll from the start (the deployment took 30 to 43 minutes on the two lab builds: OVA transfer, then first boot) up to 90 minutes.
+# A plain curl, not sddc_manager_api: that helper exits the phase after one failed call, and a blip of SDDC Manager must only
+# mean "not yet" here. The token is renewed every 5 minutes (a failed renewal keeps the old one).
+#
+log_only "waiting for the Avi controller deployment (polling every 10 seconds, 90 minutes at most)"
+retry_avi_deploy=540 ; pause_avi_deploy=10 ; attempt_avi_deploy=1
 while true ; do
-  sddc_manager_api 3 2 GET '' "${ip_sddcm}" v1/alb-clusters $(jq -c -r .accessToken /tmp/token_sddcm.json)
-  avi_deploy_status=$(echo ${response_body} | jq -c -r '.elements[0].deploymentStatus')
+  if [ $(( (attempt_avi_deploy - 1) % 30 )) -eq 0 ]; then
+    avi_new_token=$(curl -k -s -X POST -d '{"username" : "administrator@'$(jq -c -r .sddc.vcenter.ssoDomain $jsonFile)'", "password" : "'${generic_password}'"}' "https://${ip_sddcm}/v1/tokens" -H "Content-Type: application/json" -H "Accept: application/json" | jq -c -r .)
+    if echo "${avi_new_token}" | jq -e '.accessToken' > /dev/null 2>&1; then
+      echo "${avi_new_token}" > /tmp/token_sddcm.json
+    fi
+  fi
+  avi_deploy_status=$(curl -k -s -H 'Accept: application/json' -H "Authorization: Bearer $(jq -c -r .accessToken /tmp/token_sddcm.json)" "https://${ip_sddcm}/v1/alb-clusters" | jq -c -r '.elements[0].deploymentStatus // empty' 2>/dev/null)
   if [[ ${avi_deploy_status} == "ACTIVE" ]]; then
     log_notify "Avi controller deployed"
     break
   fi
+  if [ $(( attempt_avi_deploy % 30 )) -eq 0 ]; then
+    log_only "Avi controller deployment status: ${avi_deploy_status:-unknown} (attempt ${attempt_avi_deploy} of ${retry_avi_deploy})"
+  fi
   if [ ${attempt_avi_deploy} -eq ${retry_avi_deploy} ]; then
-    log_notify "ERROR: Avi controller not deployed after ${attempt_avi_deploy} attempts of ${pause_avi_deploy} seconds"
+    log_notify "ERROR: Avi controller not deployed after ${attempt_avi_deploy} attempts of ${pause_avi_deploy} seconds (last status: ${avi_deploy_status:-unknown})"
     exit 100
   fi
   sleep ${pause_avi_deploy}
