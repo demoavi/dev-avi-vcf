@@ -68,7 +68,7 @@ vcd_find_vm_href() {
 # "POWERED_ON"/"POWERED_OFF" (not a numeric/XML status code).
 vcd_wait_vm_powered_on() {
   local target_name="$1"
-  local retry=180 pause=20 attempt=1
+  local retry=300 pause=20 attempt=1
   while true; do
     local page=1
     local page_size=128
@@ -106,7 +106,7 @@ vcd_wait_vm_powered_on() {
 # vApp.
 govc_wait_vm_powered_on() {
   local target_name="$1"
-  local retry=180 pause=20 attempt=1
+  local retry=300 pause=20 attempt=1
   while true; do
     local power_state=$(govc vm.info -json "${target_name}" 2>/dev/null | jq -r '.virtualMachines[0].runtime.powerState // empty')
     if [ "${power_state}" == "poweredOn" ]; then
