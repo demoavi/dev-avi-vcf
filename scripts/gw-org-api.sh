@@ -139,7 +139,7 @@ if [ "${git_enabled}" == "true" ] \
   add_bookmark "${app_type}" "ArgoCD" "https://${argocd_fqdn_prefix}.{org_name}-vks.${domain}" "admin"
 fi
 # Harbor: deployed as a supervisor_services entry of type harbor (supervisor-bootstrap.sh)
-echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor")' >/dev/null 2>&1 \
+echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor" and .enabled != false)' >/dev/null 2>&1 \
   && add_bookmark "${app_type}" "Harbor registry" "https://harbor.${avi_subdomain}.${domain}" "{org_name}"
 # Vault (vault-pki-bootstrap.sh's own condition: an org with vault_integration, or the k8s cluster): by its name
 # vault.<domain> (A record of the gw in bind, gw-setup.sh.tpl; also a SAN of Vault's certificate), Vault's listener port, on

@@ -1312,7 +1312,7 @@ else
       # no push). The role is checked by NAME before it is granted, so another Harbor release can never silently hand out a
       # writing role. Soft-fails: a problem only logs a warning, never aborts the other orgs.
       #
-      if echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor")' > /dev/null 2>&1; then
+      if echo "${supervisor_services}" | jq -e 'any(.[]; .type == "harbor" and .enabled != false)' > /dev/null 2>&1; then
         harbor_url="https://harbor.${avi_subdomain}.${domain}"
         harbor_curl() { curl -sk -m 30 -u "admin:${generic_password}" -H 'Content-Type: application/json' "$@"; }
         harbor_mode=$(harbor_curl "${harbor_url}/api/v2.0/systeminfo" | jq -r '.auth_mode // empty')

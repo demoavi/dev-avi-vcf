@@ -1186,6 +1186,10 @@ if [ -z "${supervisor_services}" ] || [ "${supervisor_services}" == "null" ] || 
 else
   while read -r item
   do
+    if [ "$(echo ${item} | jq -c -r '.enabled == false')" == "true" ]; then
+      log_notify "supervisor service $(echo ${item} | jq -c -r '.name // "(no name)"') has enabled: false, skipping"
+      continue
+    fi
     svc_type="$(echo ${item} | jq -c -r '.type // "carvel-yaml"')"
 
     if [ "${svc_type}" == "harbor" ]; then
