@@ -387,7 +387,8 @@ p_nsx() {
   hit nsx '200' -u "admin:${generic_password}" "https://${nsx_host}/api/v1/cluster/status"
 }
 p_avi() {
-  local csrf ver jar="${out}/.state/avi.cookies"
+  # temp names use ${BASHPID} taken HERE: inside $( ) or ( ) it would be the subshell's own pid and the file would not be found
+  local csrf ver jar="${out}/.state/avi.cookies" tmpjar="${out}/.state/avi.cookies.${BASHPID}"
   csrf=$(st_get avi_csrf); ver=$(st_get avi_ver); [ -z "${ver}" ] && ver="${avi_version:-}"
   if [ -z "${csrf}" ]; then
     if [ -z "${ver}" ]; then
@@ -395,12 +396,12 @@ p_avi() {
       [ -n "${ver}" ] && st_set avi_ver "${ver}"
     fi
     local t0l; t0l=$(date +%s.%N)
-    rm -f "${jar}.${BASHPID}"
-    "${CURL[@]}" -X POST -H 'Content-Type: application/json' -c "${jar}.${BASHPID}" \
+    rm -f "${tmpjar}"
+    "${CURL[@]}" -X POST -H 'Content-Type: application/json' -c "${tmpjar}" \
       -d "{\"username\":\"admin\",\"password\":\"${generic_password}\"}" "https://${avi_host}/login" > /dev/null 2>&1
-    csrf=$(awk '$6=="csrftoken"{print $7}' "${jar}.${BASHPID}" 2>/dev/null)
-    if [ -z "${csrf}" ]; then rm -f "${jar}.${BASHPID}"; rec avi-login 000 "$(secs_since "${t0l}")" 'x'; return; fi
-    mv -f "${jar}.${BASHPID}" "${jar}"; st_set avi_csrf "${csrf}"
+    csrf=$(awk '$6=="csrftoken"{print $7}' "${tmpjar}" 2>/dev/null)
+    if [ -z "${csrf}" ]; then rm -f "${tmpjar}"; rec avi-login 000 "$(secs_since "${t0l}")" 'x'; return; fi
+    mv -f "${tmpjar}" "${jar}"; st_set avi_csrf "${csrf}"
   fi
   hit avi '200' -b "${jar}" -H "X-CSRFToken: ${csrf}" -H "X-Avi-Tenant: admin" -H "X-Avi-Version: ${ver:-22.1.4}" \
     -H "Referer: https://${avi_host}" "https://${avi_host}/api/cluster/runtime"
@@ -498,14 +499,14 @@ kube_nodes() { # target kubeconfig
   return 0
 }
 p_k8s_supervisor() {
-  local ep kc="${out}/.state/sup.kubeconfig" tok
+  local ep kc="${out}/.state/sup.kubeconfig" tok tmpkc="${out}/.state/sup.kubeconfig.${BASHPID}"
   ep=$(sup_endpoint)
   [ -z "${ep}" ] && { rec k8s-supervisor 000 5.000 'x'; return; }
   if [ ! -s "${kc}" ]; then
     hit k8s-supervisor-login '200' -m 8 -X POST -u "${vc_user}:${generic_password}" "https://${ep}/wcp/login"
     tok=$(jq -r '.session_id // empty' "${body_file}" 2>/dev/null)
     [ -z "${tok}" ] && return
-    ( umask 077; printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: sup\n  cluster: {server: "https://%s:6443", insecure-skip-tls-verify: true}\nusers:\n- name: u\n  user: {token: "%s"}\ncontexts:\n- name: c\n  context: {cluster: sup, user: u}\ncurrent-context: c\n' "${ep}" "${tok}" > "${kc}.${BASHPID}" ) && mv -f "${kc}.${BASHPID}" "${kc}"
+    ( umask 077; printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: sup\n  cluster: {server: "https://%s:6443", insecure-skip-tls-verify: true}\nusers:\n- name: u\n  user: {token: "%s"}\ncontexts:\n- name: c\n  context: {cluster: sup, user: u}\ncurrent-context: c\n' "${ep}" "${tok}" > "${tmpkc}" ) && mv -f "${tmpkc}" "${kc}"
   fi
   kube_nodes k8s-supervisor "${kc}" || rm -f "${kc}"
 }
