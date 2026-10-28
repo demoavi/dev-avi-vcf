@@ -252,7 +252,7 @@ if wins:
 else:
     h.append("<p>None - no two targets were down at the same time.</p>")
 h.append("<p class='muted'>Code 000:N = no HTTP answer, N is curl's exit code (28 timeout, 7 refused, 6 DNS, 35/60 TLS). A skipped tick means the previous call of that target was still running, so no new call was made. "
-         "Raw data: <a href='samples.csv'>samples.csv</a>, <a href='skipped.csv'>skipped.csv</a>, <a href='monitor.log'>monitor.log</a>, <a href='report.md'>report.md</a>.</p></body></html>")
+         "Raw data: <a href='samples.csv'>samples.csv</a>, <a href='errors.log'>errors.log</a> (kubectl error texts), <a href='skipped.csv'>skipped.csv</a>, <a href='monitor.log'>monitor.log</a>, <a href='report.md'>report.md</a>.</p></body></html>")
 open(os.path.join(d, "report.html"), "w").write("\n".join(h))
 print(text)
 PYEOF
@@ -265,7 +265,7 @@ publish() {
   run=$(basename "${d}"); web="/var/www/html/api-monitor/${run}"
   [ -d /var/www/html ] || return 1
   sudo mkdir -p "${web}" || return 1
-  for f in report.html report.md samples.csv skipped.csv monitor.log meta.txt targets.tsv; do
+  for f in report.html report.md samples.csv skipped.csv monitor.log meta.txt targets.tsv errors.log; do
     [ -f "${d}/${f}" ] && sudo cp "${d}/${f}" "${web}/"
   done
   sudo chmod -R a+rX /var/www/html/api-monitor
@@ -454,18 +454,55 @@ p_vcfa_org_cci() {
   [[ "${last_code}" =~ ^(401|403)$ ]] && st_clear cci_token
 }
 p_vcfa_ui() { hit vcfa-ui '200|30[0-9]|401|403' "https://${vcfa_host}/"; }
-p_supervisor() {
+# Supervisor API endpoint, read once from vCenter (namespace-management) and kept in the state; prints it, empty when not found
+sup_endpoint() {
   local ep tok cid; ep=$(st_get sup_ep)
   if [ -z "${ep}" ]; then
     tok=$("${CURL[@]}" -X POST -u "${vc_user}:${generic_password}" "https://${vc_host}/api/session" | tr -d '"')
     cid=$("${CURL[@]}" -H "vmware-api-session-id: ${tok}" "https://${vc_host}/api/vcenter/namespace-management/clusters" | jq -r '.[0].cluster // empty')
     [ -n "${cid}" ] && ep=$("${CURL[@]}" -H "vmware-api-session-id: ${tok}" "https://${vc_host}/api/vcenter/namespace-management/clusters/${cid}" | jq -r '.api_server_cluster_endpoint // empty')
-    [ -z "${ep}" ] && { rec supervisor 000 5.000 'x'; return; }
-    st_set sup_ep "${ep}"; mlog "supervisor endpoint ${ep}"
+    [ -n "${ep}" ] && { st_set sup_ep "${ep}"; mlog "supervisor endpoint ${ep}" >&2; }
   fi
+  printf '%s' "${ep}"
+}
+p_supervisor() {
+  local ep; ep=$(sup_endpoint)
+  [ -z "${ep}" ] && { rec supervisor 000 5.000 'x'; return; }
   # anonymous readiness of the Supervisor's Kubernetes API (401/403 = answered but anonymous access is off: still reachable)
   hit supervisor '200|401|403' "https://${ep}:6443/readyz"
 }
+# kubectl get nodes with a given kubeconfig, recorded as <target>: code 200 = exit 0 and every node Ready; NotReady:<n>; 401 =
+# Unauthorized/Forbidden (the session is dropped so the next call logs in again); 000:<reason> = no answer. The error text goes to errors.log.
+kube_nodes() { # target kubeconfig
+  local t="$1" kc="$2" t0l outp rc code nr
+  t0l=$(date +%s.%N)
+  outp=$(KUBECONFIG="${kc}" timeout 8 kubectl --request-timeout=5s get nodes --no-headers 2>&1)
+  rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    nr=$(printf '%s\n' "${outp}" | awk '$2 != "Ready" {n++} END{print n+0}')
+    [ "${nr}" -eq 0 ] && code=200 || code="NotReady:${nr}"
+  elif grep -qiE 'unauthorized|forbidden|must be logged in' <<< "${outp}"; then code=401
+  elif grep -qiE 'timeout|deadline|timed out' <<< "${outp}" || [ "${rc}" -eq 124 ]; then code="000:timeout"
+  elif grep -qi 'refused' <<< "${outp}"; then code="000:refused"
+  else code="000:error"; fi
+  [ "${code}" != 200 ] && printf '%s|%s|%s\n' "$(date +%T)" "${t}" "$(printf '%s' "${outp}" | tr '\n' ' ' | cut -c1-200)" >> "${out}/errors.log"
+  rec "${t}" "${code}" "$(secs_since "${t0l}")" '200'
+  [ "${code}" == 401 ] && return 1
+  return 0
+}
+p_k8s_supervisor() {
+  local ep kc="${out}/.state/sup.kubeconfig" tok
+  ep=$(sup_endpoint)
+  [ -z "${ep}" ] && { rec k8s-supervisor 000 5.000 'x'; return; }
+  if [ ! -s "${kc}" ]; then
+    hit k8s-supervisor-login '200' -m 8 -X POST -u "${vc_user}:${generic_password}" "https://${ep}/wcp/login"
+    tok=$(jq -r '.session_id // empty' "${body_file}" 2>/dev/null)
+    [ -z "${tok}" ] && return
+    ( umask 077; printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: sup\n  cluster: {server: "https://%s:6443", insecure-skip-tls-verify: true}\nusers:\n- name: u\n  user: {token: "%s"}\ncontexts:\n- name: c\n  context: {cluster: sup, user: u}\ncurrent-context: c\n' "${ep}" "${tok}" > "${kc}.$$" ) && mv -f "${kc}.$$" "${kc}"
+  fi
+  kube_nodes k8s-supervisor "${kc}" || rm -f "${kc}"
+}
+p_k8s_vks() { kube_nodes k8s-vks "${out}/.state/vks.kubeconfig"; }
 p_installer() { hit installer '200|30[0-9]|401|403' "https://${ip_vcf_installer}/"; }
 p_vault() { hit vault '200|429' "https://127.0.0.1:8200/v1/sys/health"; }
 p_harbor() { hit harbor '200' "https://harbor.${sub}.${domain}/api/v2.0/health"; }
@@ -497,6 +534,22 @@ start() { # name function address-to-test [request] [auth] [ok meaning]   (skipp
   echo "deployment=${deployment_kind} ${basename_sddc}.${domain}"
 } > "${out}/meta.txt"
 mlog "api-monitor: ${duration}s, every ${interval}s, output ${out}"
+# VKS cluster of the first org: its admin kubeconfig is the one vcfa_tenant_bootstrap.sh hands to the org (client certificate, so no
+# login and no kubectl context of the gw is touched). Copied once into the state (mode 600, deleted when the run ends).
+vks_kc=""; vks_server=""
+if command -v kubectl >/dev/null 2>&1 && [ -n "${first_org}" ]; then
+  org_kc_src="$(org_home_dir "${first_org}")/.kube/config"
+  if sudo -n test -s "${org_kc_src}" 2>/dev/null; then
+    ( umask 077; sudo -n cat "${org_kc_src}" > "${out}/.state/vks.kubeconfig" )
+    vks_kc="${out}/.state/vks.kubeconfig"
+    vks_server=$(kubectl --kubeconfig "${vks_kc}" config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null)
+  else
+    mlog "skipped k8s-vks: no kubeconfig at ${org_kc_src}"
+  fi
+else
+  mlog "skipped k8s-supervisor and k8s-vks: kubectl not installed"
+fi
+cleanup_secrets() { rm -f "${out}"/.state/*kubeconfig* "${out}"/.state/avi.cookies* ; }
 start vcenter      p_vcenter       "${vc_host}" "GET https://${vc_host}/api/appliance/system/version" "session id from POST /api/session as ${vc_user} (new login only on 401/403, logged as vcenter-login)" "200"
 start nsx          p_nsx           "${nsx_host}" "GET https://${nsx_host}/api/v1/cluster/status (NSX Manager VIP)" "basic auth, admin" "200"
 start avi          p_avi           "${avi_host}" "GET https://${avi_host}/api/cluster/runtime (first controller, tenant admin)" "POST /login as admin, csrf cookie (new login only on 401/403/419, logged as avi-login)" "200"
@@ -505,6 +558,8 @@ start vcfa-org     p_vcfa_org      "${first_org}" "GET https://${vcfa_host}/clou
 start vcfa-org-cci p_vcfa_org_cci  "${first_org}" "GET https://${vcfa_host}/cci/kubernetes/apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/default-project/supervisornamespaces (org ${first_org})" "org-scoped OIDC token: provider token exchanged at /oidc/oauth2/token (logged as vcfa-cci-login)" "200"
 start vcfa-ui      p_vcfa_ui       "${vcfa_host}" "GET https://${vcfa_host}/ (web front end only)" "none" "200, 3xx, 401 or 403 (it answers)"
 start supervisor   p_supervisor    "${vc_host}" "GET https://<Supervisor endpoint>:6443/readyz (endpoint read once from vCenter: api/vcenter/namespace-management/clusters, see monitor.log)" "anonymous" "200, 401 or 403 (the Kubernetes API answers)"
+[ -n "$(command -v kubectl)" ] && start k8s-supervisor p_k8s_supervisor "${vc_host}" "kubectl get nodes against the Supervisor Kubernetes API (https://<Supervisor endpoint>:6443, kubectl --request-timeout=5s)" "vSphere session token from POST https://<Supervisor endpoint>/wcp/login as ${vc_user}, written to a private kubeconfig (new login only on Unauthorized/Forbidden, logged as k8s-supervisor-login); the gw's own kubectl contexts are not touched" "kubectl exits 0 and every node is Ready (code NotReady:<n> otherwise)"
+start k8s-vks      p_k8s_vks       "${vks_kc}" "kubectl get nodes against the VKS cluster of ${first_org} (${vks_server}, kubectl --request-timeout=5s)" "admin client-certificate kubeconfig of ${first_org} (the one vcfa_tenant_bootstrap.sh copies to $(org_home_dir "${first_org}")/.kube/config)" "kubectl exits 0 and every node is Ready (code NotReady:<n> otherwise)"
 start installer    p_installer     "${ip_vcf_installer}" "GET https://${ip_vcf_installer}/ (VCF Installer)" "none" "200, 3xx, 401 or 403 (it answers)"
 [ -x "$(command -v vault)" ] || [ -n "$(ss -ltn 2>/dev/null | grep ':8200 ')" ] && start vault p_vault "x" "GET https://127.0.0.1:8200/v1/sys/health (Vault on the gw)" "none" "200 or 429 (active or standby, unsealed)"
 start harbor       p_harbor        "${sub}" "GET https://harbor.${sub}.${domain}/api/v2.0/health (through Avi/AKO, name resolved by the gw)" "none" "200"
@@ -532,9 +587,10 @@ echo '<p>api-monitor started, the first report is written within a minute (reloa
 link=$(publish "${out}" 2>/dev/null); [ -n "${link}" ] && mlog "html report (refreshed every 60 s): ${link}"
 
 stop_all() { kill "${pids[@]}" "${live_pid}" 2>/dev/null; wait 2>/dev/null; }
-trap 'mlog "interrupted, writing the report"; stop_all; make_report "${out}" > /dev/null; mlog "report: ${out}/report.md"; link=$(publish "${out}") && mlog "html report: ${link}"; exit 0' INT TERM
+trap 'mlog "interrupted, writing the report"; stop_all; cleanup_secrets; make_report "${out}" > /dev/null; mlog "report: ${out}/report.md"; link=$(publish "${out}") && mlog "html report: ${link}"; exit 0' INT TERM
 wait "${pids[@]}"
 kill "${live_pid}" 2>/dev/null
+cleanup_secrets
 make_report "${out}"
 mlog "report: ${out}/report.md"
 link=$(publish "${out}") && mlog "html report: ${link}"

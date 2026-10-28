@@ -208,7 +208,7 @@ the namespace and VKS cluster, and releases the cleaned orgs (an org whose clean
 ### Manual tool: `api-monitor.sh` (not part of the pipeline)
 Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 3] [--out dir]`
 calls vCenter, NSX, Avi, VCF-A (provider login + orgs list, first org's login + session, the org CCI API through the token exchange,
-the UI), the Supervisor's `:6443/readyz`, the VCF Installer, each ESX host, Vault, Harbor, Git, the gw and Avi DNS and (vApp) VCD, with
+the UI), the Supervisor's `:6443/readyz`, `kubectl get nodes` on the Supervisor and on the first org's VKS cluster (private kubeconfigs, the gw's own kubectl contexts are not touched; ok = every node Ready), the VCF Installer, each ESX host, Vault, Harbor, Git, the gw and Avi DNS and (vApp) VCD, with
 credentials derived from `variables.sh`. Targets run in parallel; within a target one call is made every interval (3 s) **only if the
 previous call of that target has finished**, so a hanging API is never hit again while it is still being asked (no cascade). Such a skipped
 tick is counted (`skipped.csv`, "skipped ticks" in the report), not a sample. Output in `/home/ubuntu/api-monitor/<timestamp>/`:
