@@ -22,7 +22,8 @@
 # to this one (same login/password across gw SSH, vCenter SSO, Avi,
 # NSX, and the VCF-A org user, all for the same org).
 #
-# WireGuard part, vApp use case only (deployment_kind == "vApp"): first generates gw's own
+# WireGuard part (both use cases; the tunnel subnet, routed ranges, port and endpoint can be overridden with gw_wg_allowed_ips, gw_wg_port
+# and gw_wg_endpoint in variables.sh): first generates gw's own
 # WireGuard keypair (/home/ubuntu/wireguard, kept in gw_wg_private_key /
 # gw_wg_public_key), then also creates
 # /home/<org>/wireguard per org, owned by that org's account (mode 700), as
@@ -67,18 +68,18 @@ if ! grep -qE '^\s*PasswordAuthentication\s+yes\s*$' /etc/ssh/sshd_config; then
   log_notify "enabled PasswordAuthentication in sshd_config"
 fi
 
-# vApp use case only: wg (wireguard-tools) generates gw's own keypair right
+# Both use cases: wg (wireguard-tools) generates gw's own keypair right
 # below and each org's keypair inside the loop. Also in variables.json's
 # apt_packages (installed at gw boot) - this is only the recovery path if
 # that install silently failed or never happened (e.g. a gw built before the
 # package was added), same pattern as skopeo in supervisor-bootstrap.sh. Key
 # generation is skipped, with an error notification, if wg still isn't
 # available.
-if [ "${deployment_kind}" == "vApp" ] && ! command -v wg >/dev/null 2>&1; then
+if ! command -v wg >/dev/null 2>&1; then
   sudo apt-get install -y wireguard-tools || log_notify "ERROR: apt-get install wireguard-tools failed, skipping WireGuard key generation"
 fi
 
-# vApp use case only: gw's own WireGuard keypair, left in gw_wg_private_key /
+# Both use cases: gw's own WireGuard keypair, left in gw_wg_private_key /
 # gw_wg_public_key for the rest of this script (nothing consumes them yet).
 # Generated as ubuntu into /home/ubuntu/wireguard (700, ubuntu-owned): unlike
 # the per-org directories below, ubuntu owns this one, so no sudo hop is
@@ -93,7 +94,7 @@ fi
 # nothing here ever logs key material - only a generic state word.
 gw_wg_private_key=""
 gw_wg_public_key=""
-if [ "${deployment_kind}" == "vApp" ] && command -v wg >/dev/null 2>&1; then
+if command -v wg >/dev/null 2>&1; then
   gw_wireguard_dir="/home/ubuntu/wireguard"
   mkdir -p "${gw_wireguard_dir}"
   chmod 700 "${gw_wireguard_dir}"
@@ -121,7 +122,7 @@ if [ "${deployment_kind}" == "vApp" ] && command -v wg >/dev/null 2>&1; then
   fi
 fi
 
-# vApp use case only: values for each org's wg0.conf (rendered inside the
+# Both use cases: values for each org's wg0.conf (rendered inside the
 # loop below). The tunnel subnet, the routed ranges and the port are fixed
 # choices, not CR-driven. Each org's own tunnel address is
 # <prefix>.<N>/24, N being the trailing number of the org's name (org-2 ->
@@ -133,8 +134,8 @@ fi
 # than a made-up address.
 wg_org_tunnel_prefix="10.8.0"
 wg_gw_tunnel_address="${wg_org_tunnel_prefix}.254/24"
-wg_allowed_ips="192.168.0.0/16, 172.16.0.0/17"
-wg_endpoint_port="51820"
+wg_allowed_ips="${gw_wg_allowed_ips:-192.168.0.0/16, 172.16.0.0/17}"   # override: gw_wg_allowed_ips in variables.sh
+wg_endpoint_port="${gw_wg_port:-51820}"                      # override: gw_wg_port in variables.sh
 org_tunnel_number() {
   local digits n
   [[ "$1" =~ ([0-9]+)$ ]] || return 1
@@ -153,8 +154,8 @@ org_tunnel_number() {
 # with ONE error notification here instead of one per org.
 wg0_conf_ready="false"
 gw_peers_conf=""
-if [ "${deployment_kind}" == "vApp" ]; then
-  gw_wg_endpoint_ip=$(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1)
+if :; then   # WireGuard runs in both use cases
+  gw_wg_endpoint_ip="${gw_wg_endpoint:-$(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1)}"   # override: gw_wg_endpoint
   if [ -n "${gw_wg_public_key}" ] && [ -n "${gw_wg_endpoint_ip}" ]; then
     wg0_conf_ready="true"
   else
@@ -190,7 +191,7 @@ do
   org_password="VMware1!$(echo -n "${gw_accounts_secret}${org_name}" | sha256sum | cut -c1-4)VMware1!"
   echo "${org_name}:${org_password}" | sudo chpasswd
 
-  # vApp use case only: per-org directory for the files the student vApp
+  # Both use cases: per-org directory for the files the student vApp
   # will later consume (e.g. /home/org-3/wireguard). This script runs as
   # ubuntu, which has no write access inside /home/${org_name} (owned by
   # that org's own account, o+x above only grants traverse), so every step
@@ -201,7 +202,7 @@ do
   # the files later will have to write into it. Re-applied every run
   # (chown/chmod are no-ops once correct), same convergence approach as
   # the password above.
-  if [ "${deployment_kind}" == "vApp" ]; then
+  if :; then
     wireguard_dir="/home/${org_name}/wireguard"
     if [ ! -d "${wireguard_dir}" ]; then
       sudo mkdir -p "${wireguard_dir}"
@@ -347,7 +348,7 @@ AllowedIPs = ${wg_org_tunnel_prefix}.${org_tunnel_n}/32
   fi
 done < <(echo "${vcf_a_organizations}" | jq -c -r .[])
 
-# vApp use case only: the gw's own WireGuard server config, consumed on the gw
+# Both use cases: the gw's own WireGuard server config, consumed on the gw
 # itself: /etc/wireguard/wg0.conf (root-owned, 600) with the gw's tunnel
 # address (.254), listen port and private key, plus one [Peer] per org
 # collected above. Rendered from the orgs currently in the CR, so an org that
@@ -359,7 +360,7 @@ done < <(echo "${vcf_a_organizations}" | jq -c -r .[])
 # config changed, the new peers are applied live with `wg syncconf` (existing
 # tunnels stay up; unlike a restart); if the live wg0 address differs from
 # the configured one (syncconf can't change it) it is restarted instead.
-if [ "${deployment_kind}" == "vApp" ] && [ -n "${gw_wg_private_key}" ]; then
+if [ -n "${gw_wg_private_key}" ]; then
   gw_wg0_conf="[Interface]
 Address = ${wg_gw_tunnel_address}
 ListenPort = ${wg_endpoint_port}
@@ -408,7 +409,7 @@ ${gw_peers_conf}"
       log_notify "ERROR: systemctl enable --now wg-quick@wg0 failed"
     fi
   fi
-elif [ "${deployment_kind}" == "vApp" ]; then
+else
   log_notify "ERROR: skipping /etc/wireguard/wg0.conf - no gw WireGuard private key"
 fi
 

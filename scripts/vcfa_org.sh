@@ -301,14 +301,10 @@ add_gw_account() {
   if [ "${deployment_kind}" == "vApp" ]; then
     run_phase gw-accounts all; run_phase gw-org-api all
   elif others_have_accounts; then
-    if org_has_account; then say "gw account ${org} already exists"; else
-      do_it "create the gw account ${org}" sudo useradd -m -s /bin/bash "${org}"
-      do_it "chmod o+x /home/${org}" sudo chmod o+x "/home/${org}"
-      do_it "set the password" bash -c 'echo "$1:$2" | sudo chpasswd' _ "${org}" "${org_password}"
-      say "gw account ${org} created"
-    fi
+    # the account, its WireGuard keys and the gw's wg0.conf peers are rebuilt from ALL orgs (a run limited to one org would drop the others' peers)
+    run_phase gw-accounts all
   else
-    say "the other orgs have no gw account (sddc use case): none created, files stay under /home/ubuntu/${org}"
+    say "the other orgs have no gw account (sddc gw built before gw-accounts ran there): none created, files stay under /home/ubuntu/${org}; run gw-accounts.sh to enable accounts and WireGuard"
   fi
 }
 add_vault() {
@@ -543,7 +539,8 @@ del_files_and_account() {
       warn "deleting the gw account ${org} failed: $(tr '\n' ' ' < "${tmpdir}/userdel.err")"
     fi
   fi
-  if [ "${deployment_kind}" == "vApp" ]; then run_phase gw-org-api exclude; run_phase gw-accounts exclude; fi
+  if [ "${deployment_kind}" == "vApp" ]; then run_phase gw-org-api exclude; run_phase gw-accounts exclude
+  elif others_have_accounts; then run_phase gw-accounts exclude; fi   # rebuilds the gw's WireGuard peers without the org
 }
 do_delete() {
   check_idle

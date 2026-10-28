@@ -27,13 +27,13 @@ gw-accounts -> gw-org-api -> gw-blueprint-api -> vault-pki-bootstrap -> esxi-boo
 
 ## Phases
 
-### 1. `gw-accounts.sh` (both use cases; the WireGuard part is vApp only)
+### 1. `gw-accounts.sh` (both use cases, WireGuard included)
 Creates one Linux account per VCF-A org on the gw (`org-1`, `org-2`, ...), SSH + password login. The password is
 `VMware1!<4 hex of sha256(gw_accounts_secret + org_name)>VMware1!` (20 chars exactly: vCenter SSO caps at 20, VCFA
 requires mixed character classes). The same derivation is used for the org's vCenter SSO, NSX, Avi, VCF-A, Git and
-Argo accounts, so it must stay identical in every script that copies it. Both use cases: password SSH login and the accounts. vApp use case only: generates the gw's WireGuard
+Argo accounts, so it must stay identical in every script that copies it. Password SSH login and the accounts, then the WireGuard part: generates the gw's WireGuard
 keypair (once, never regenerated) and, per org, `/home/<org>/wireguard` (keypair + `wg0.conf`, tunnel address
-`10.8.0.<N>/24`, the gw as peer). No dependency on anything else, hence first.
+`10.8.0.<N>/24`, the gw as peer), and the gw's own `/etc/wireguard/wg0.conf` with one peer per org (applied live with `wg syncconf`). The routed ranges (`192.168.0.0/16, 172.16.0.0/17`), the port (51820) and the gw endpoint (the source address of its default route) can be overridden with `gw_wg_allowed_ips`, `gw_wg_port` and `gw_wg_endpoint` in `variables.sh`. No dependency on anything else, hence first.
 
 ### 2. `gw-org-api.sh` (vApp only, opt-in, soft-fail)
 Installs `gw-org-api.py` as a systemd HTTPS service (self-signed cert, basic auth) with `GET /orgs` and `POST /org`,
@@ -265,7 +265,7 @@ Every phase not named in the second table behaves identically in both.
 |---|---|---|
 | `functions.sh` `vcd_login` | Logs in to VCD and looks up the gw VM (`vcd_find_vm_href`). | Returns immediately. Before this was added, a spec without `.vcd` made `vcd_find_vm_href` page a nonexistent VCD forever (a log of hundreds of `integer expected` lines per second): every phase that calls `vcd_login` at its top, and `vcf_bootstrap.sh` itself, hung. `vcd_find_vm_href` now also gives up when the answer is not a number. |
 | `log_notify` | Message prefix `nested-<basename> (vApp)`, plus the VCD metadata post. | Prefix `nested-<basename> (sddc)`, no metadata post. |
-| `gw-accounts` | Runs: one Linux account per org, the gw's WireGuard keys and per-org `wg0.conf`. | Runs the account part only (accounts, `/home/<org>`, password SSH); no WireGuard. |
+| `gw-accounts` | Runs: one Linux account per org, the gw's WireGuard keys and per-org `wg0.conf`. | Runs the same, WireGuard included (tested on the SDDC gw). |
 | `gw-org-api` | Runs when `spec.vms.gw.org_api` is set. | Exits at once, before it reads any `org_api_*` variable. |
 | `gw-blueprint-api`, `supervisor-blueprint-watcher` | Run when an org has `blueprints.auto_update.enabled`. | Same, as long as the `blueprint_apps_*` variables exist in `variables.sh`. |
 | `esxi-bootstrap` | `vcd_login`; waits for the ESXi VMs through VCD (`vcd_wait_vm_powered_on`) and power-cycles them with the VCD power API. | No VCD login; talks to the external vCenter with govc (`GOVC_*` from `vsphere_underlay_*`): `govc_wait_vm_powered_on`, `govc vm.power -s` / `-on`. At the end it also ejects the kickstart ISOs from the ESXi VMs and deletes them from the datastore (`nested-vcf/...iso`); the vApp case has nothing to eject. |
