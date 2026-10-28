@@ -246,6 +246,32 @@ VCD by this repo's operator) and `sddc` (the nested lab built on an external vCe
 (`: "${deployment_kind:=sddc}"`); the operator always renders `vApp`, and the reference `bash/variables.sh` sets `sddc`.
 Every phase not named in the second table behaves identically in both.
 
+### Phase by phase: vApp vs sddc at a glance
+
+"same" = the same code and behaviour in both use cases (only the values of `variables.sh` differ). Details of every difference are in the tables below.
+
+| # | Phase | vApp | sddc |
+|---|---|---|---|
+| 0 | `vcf_bootstrap.sh` itself (`vcd_login`, DNS/NTP check) | VCD login, progress also written into the gw VM's VCD metadata | no VCD: `vcd_login` returns at once, messages only to the chat webhook and stdout |
+| 1 | `gw-accounts` | runs (accounts, password SSH, WireGuard) | runs, same (WireGuard needs `wireguard-tools`, installed if missing) |
+| 2 | `gw-org-api` | runs when `spec.vms.gw.org_api` is set | runs when `.gw.org_api` is set in the spec; the reference `variables.sh` must not reset `org_api_*` afterwards |
+| 3 | `gw-blueprint-api` | same | same |
+| 4 | `vault-pki-bootstrap` | same | same |
+| 5 | `esxi-bootstrap` | ESXi VMs through VCD; host names from the operator (`names_esxi`, so a dedicated fifth host is possible); VCD power API; nothing to clean up | ESXi VMs on the external vCenter through govc; host names computed in the script; govc power cycle; ejects and deletes the kickstart ISOs at the end |
+| 6 | `vcf-installer-bootstrap` | VCD login; licence activation relayed through the gw VM's VCD metadata by the operator | no VCD login; the gw calls the licence service itself |
+| 7 | `vcfa-stabilize` | same | same |
+| 8 | `vcenter-bootstrap` | vSAN alarms, plus `dedicated-host-placement.sh` (DRS rules, vMotion, cron) when the dedicated host `<basename>-mgmt-esx05` exists | vSAN alarms only |
+| 9 | `nsx-bootstrap` | same | same |
+| 10 | `avi-bootstrap` | same | same |
+| 11 | `nsx-project-vpc` | same | same |
+| 12 | `supervisor-bootstrap` | same (message prefix `(vApp)`) | same (message prefix `(sddc)`) |
+| 13 | `k8s-bootstrap` | same | same |
+| 14 | `git-bootstrap` | same | same |
+| 15 | `vcfa_provider_bootstrap` | content-library items by `name` (already delivered by the gw ISO); files in `/home/<org>` | items by `ova_url` (downloaded); files in `/home/<org>` once the org has a gw account, else `/home/ubuntu/<org>` |
+| 16 | `vcfa_tenant_bootstrap` | files in `/home/<org>` | same as 15 for the folders |
+| 17 | `supervisor-blueprint-watcher` | same | same |
+| - | `vcfa_tenant_cleaning.sh`, `vcfa_org.sh`, `api-monitor.sh` (manual tools) | work in both; `vcfa_org.sh` also reruns `gw-accounts` / `gw-org-api` | work in both; the same reruns once accounts / the org API exist on the gw |
+
 ### Around the scripts (who builds and feeds the gw)
 
 | | vApp | sddc |
@@ -272,7 +298,8 @@ Every phase not named in the second table behaves identically in both.
 | `vcf-installer-bootstrap` (license) | The gw cannot reach the license service, so the machine id is posted to the gw VM's VCD metadata (`vcfi_machineId`), the operator (`relay_vcf_installer_activation`) exchanges it and writes `vcfi_activation_code` back, and the script clears both afterwards. | The gw calls the license service itself (client-credentials token, then the machine id for an activation code). No metadata, nothing to clear. |
 | `vcfa_provider_bootstrap`, `vcfa_tenant_bootstrap` (per-org files) | Per-org Linux accounts exist (`gw-accounts`, both use cases): the rendered demo yamls (`<yaml_folder>/`), the GitOps manifests (`gitops/`) and the VKS kubeconfig (`.kube/`) go to `/home/<org>/` and are owned by the org account. | Same, now that `gw-accounts` runs here too. `org_home_dir` (functions.sh) returns `/home/<org>` whenever the account exists and only falls back to `/home/ubuntu/<org>/` (owned by `ubuntu`) when it does not. Blueprints are never written to disk in either kind: the tenant script substitutes `avi_subdomain`/`domain` in memory and uploads them through the API. |
 | `vcfa_tenant_cleaning.sh` (manual) | Without `--org` it takes the free orgs from `gw-org-api`. | Works the same once `gw-org-api` is enabled there (it needs `spec .gw.org_api`); without it only `--org <name>` has anything to work with. |
-| All other phases (`vault-pki-bootstrap`, `vcfa-stabilize`, `vcenter-bootstrap`, `nsx-bootstrap`, `avi-bootstrap`, `nsx-project-vpc`, `supervisor-bootstrap`, `k8s-bootstrap`, `git-bootstrap`) | No branch on the kind. | Same code. They differ only through the values of `variables.sh` and the guard below. |
+| `vcenter-bootstrap` | After the vSAN alarms, with `vms.esx.dedicated_host` (names_esxi lists `<basename>-mgmt-esx05`): `dedicated-host-placement.sh --place` and `--install-cron`. | Only the vSAN alarms (the placement script exits at once outside the vApp). |
+| All other phases (`vault-pki-bootstrap`, `vcfa-stabilize`, `nsx-bootstrap`, `avi-bootstrap`, `nsx-project-vpc`, `supervisor-bootstrap`, `k8s-bootstrap`, `git-bootstrap`) | No branch on the kind. | Same code. They differ only through the values of `variables.sh` and the guard below. |
 
 Common to both: sourcing `functions.sh` aborts when `gw_accounts_secret` is empty or `null` (so the spec JSON must carry that
 key in the sddc use case too, as `gw-accounts` now runs there); the `vcfa-stabilize` and `vcfa_health_gate`
