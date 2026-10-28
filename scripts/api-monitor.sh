@@ -309,6 +309,9 @@ first_org="$(echo "${vcf_a_organizations:-[]}" | jq -r '.[0].name // empty')"
 org_pw=""
 [ -n "${first_org}" ] && org_pw="VMware1!$(echo -n "${gw_accounts_secret}${first_org}" | sha256sum | cut -c1-4)VMware1!"
 sub="${avi_subdomain:-}"
+# Avi DNS virtual service address: variables.sh of the sddc gw defines ip_avi_dns, the vApp's does not (only its cloud-init template does),
+# so it is derived the same way - the first address of the Avi VIP pool in nsx_segments_overlay.
+[ -z "${ip_avi_dns:-}" ] && ip_avi_dns=$(echo "${nsx_segments_overlay:-[]}" | jq -r '[.[] | select(has("avi_ipam_vip"))][0].avi_ipam_vip.pool // empty' 2>/dev/null | cut -d- -f1)
 vcd_host=$(jq -r '.vcd.host // empty' "${jsonFile}" 2>/dev/null)
 
 # --- probe plumbing --------------------------------------------------------------------------------------------------
