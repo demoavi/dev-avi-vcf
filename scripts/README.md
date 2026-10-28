@@ -206,12 +206,17 @@ the namespace and VKS cluster, and releases the cleaned orgs (an org whose clean
 `/home/ubuntu/vcfa_tenant_cleaning.log`.
 
 ### Manual tool: `api-monitor.sh` (not part of the pipeline)
-Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 1] [--out dir]`
-calls, once per second and in parallel, vCenter, NSX, Avi, VCF-A (provider login + orgs list, first org's login + session, the org
-CCI API through the token exchange, the UI), the Supervisor's `:6443/readyz`, the VCF Installer, each ESX host, Vault, Harbor, Git, the gw
-and Avi DNS and (vApp) VCD, with credentials derived from `variables.sh`. Output in `/home/ubuntu/api-monitor/<timestamp>/`:
-`samples.csv`, `monitor.log` and `report.md` (availability and latency per target, every outage window with its HTTP codes, and the
-windows where several targets were down together). `--report <dir>` rebuilds a report. Read-only except for the sessions it logs in to.
+Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 3] [--out dir]`
+calls vCenter, NSX, Avi, VCF-A (provider login + orgs list, first org's login + session, the org CCI API through the token exchange,
+the UI), the Supervisor's `:6443/readyz`, the VCF Installer, each ESX host, Vault, Harbor, Git, the gw and Avi DNS and (vApp) VCD, with
+credentials derived from `variables.sh`. Targets run in parallel; within a target one call is made every interval (3 s) **only if the
+previous call of that target has finished**, so a hanging API is never hit again while it is still being asked (no cascade). Such a skipped
+tick is counted (`skipped.csv`, "skipped ticks" in the report), not a sample. Output in `/home/ubuntu/api-monitor/<timestamp>/`:
+`samples.csv`, `skipped.csv`, `monitor.log`, `report.md`, and `report.html` (how it was tested - request, authentication and success criterion per target -, timeline per target, tables). The html report and the raw
+files are also copied to nginx (`/var/www/html/api-monitor/<timestamp>/`, needs sudo) every 60 s, so the run can be watched; the link
+(`http://<gw address>/api-monitor/<timestamp>/report.html`) is printed at the start and the end and logged in `monitor.log`. A failed
+sample's code is `000:<curl exit code>` (28 timeout, 7 refused, 6 DNS, 35/60 TLS). `--report <dir>` rebuilds and republishes a report.
+Read-only except for the sessions it logs in to.
 
 ### Helpers
 `functions.sh` (log_notify, vcd_login, vcfa_login/vcfa_api, `vcfa_health_gate`, `chown_org_or_ubuntu`, avi/nsx/vcenter API helpers, `find_org_manifest`). Sourcing it also
