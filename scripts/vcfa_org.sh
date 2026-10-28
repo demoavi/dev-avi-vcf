@@ -302,7 +302,7 @@ add_gw_account() {
     run_phase gw-accounts all; run_phase gw-org-api all
   elif others_have_accounts; then
     # the account, its WireGuard keys and the gw's wg0.conf peers are rebuilt from ALL orgs (a run limited to one org would drop the others' peers)
-    run_phase gw-accounts all
+    run_phase gw-accounts all; run_phase gw-org-api all   # gw-org-api.sh skips itself when spec gw.org_api is not set
   else
     say "the other orgs have no gw account (sddc gw built before gw-accounts ran there): none created, files stay under /home/ubuntu/${org}; run gw-accounts.sh to enable accounts and WireGuard"
   fi
@@ -540,7 +540,7 @@ del_files_and_account() {
     fi
   fi
   if [ "${deployment_kind}" == "vApp" ]; then run_phase gw-org-api exclude; run_phase gw-accounts exclude
-  elif others_have_accounts; then run_phase gw-accounts exclude; fi   # rebuilds the gw's WireGuard peers without the org
+  elif others_have_accounts; then run_phase gw-org-api exclude; run_phase gw-accounts exclude; fi   # the org leaves the list handed out and the gw's WireGuard peers
 }
 do_delete() {
   check_idle

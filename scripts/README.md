@@ -35,10 +35,10 @@ Argo accounts, so it must stay identical in every script that copies it. Passwor
 keypair (once, never regenerated) and, per org, `/home/<org>/wireguard` (keypair + `wg0.conf`, tunnel address
 `10.8.0.<N>/24`, the gw as peer), and the gw's own `/etc/wireguard/wg0.conf` with one peer per org (applied live with `wg syncconf`). The routed ranges (`192.168.0.0/16, 172.16.0.0/17`), the port (51820) and the gw endpoint (the source address of its default route) can be overridden with `gw_wg_allowed_ips`, `gw_wg_port` and `gw_wg_endpoint` in `variables.sh`. No dependency on anything else, hence first.
 
-### 2. `gw-org-api.sh` (vApp only, opt-in, soft-fail)
+### 2. `gw-org-api.sh` (both use cases, opt-in, soft-fail)
 Installs `gw-org-api.py` as a systemd HTTPS service (self-signed cert, basic auth) with `GET /orgs` and `POST /org`,
 which hands an unassigned org (name, password, SSO domain, bookmarks of the SDDC/application services, folders to copy,
-`WAF_DEMO_HOST`) to a student desktop. Enabled by `spec.vms.gw.org_api`; not set -> skipped. Config is re-read per request.
+`WAF_DEMO_HOST`) to a student desktop. Enabled by `spec.vms.gw.org_api` (vApp) or `.gw.org_api.*` of the spec (sddc: `username`, `password`, `port`, read by the reference `bash/variables.sh`); not set -> skipped. Config is re-read per request. In the sddc use case the reference `variables.sh` must not reset `org_api_username`/`org_api_password`/`org_api_port` after reading them (lines at the end of the file did that on 2026-10-28), or the phase always skips.
 `WAF_DEMO_HOST` is derived from the `metadata.name` of the first `HTTPRoute` under `gitops/` (`<name>.<org>-gitops.<domain>`).
 
 ### 3. `gw-blueprint-api.sh` (both use cases, soft-fail)
@@ -266,12 +266,12 @@ Every phase not named in the second table behaves identically in both.
 | `functions.sh` `vcd_login` | Logs in to VCD and looks up the gw VM (`vcd_find_vm_href`). | Returns immediately. Before this was added, a spec without `.vcd` made `vcd_find_vm_href` page a nonexistent VCD forever (a log of hundreds of `integer expected` lines per second): every phase that calls `vcd_login` at its top, and `vcf_bootstrap.sh` itself, hung. `vcd_find_vm_href` now also gives up when the answer is not a number. |
 | `log_notify` | Message prefix `nested-<basename> (vApp)`, plus the VCD metadata post. | Prefix `nested-<basename> (sddc)`, no metadata post. |
 | `gw-accounts` | Runs: one Linux account per org, the gw's WireGuard keys and per-org `wg0.conf`. | Runs the same, WireGuard included (tested on the SDDC gw). |
-| `gw-org-api` | Runs when `spec.vms.gw.org_api` is set. | Exits at once, before it reads any `org_api_*` variable. |
+| `gw-org-api` | Runs when `spec.vms.gw.org_api` is set. | Runs when `.gw.org_api` is set in the spec (tested on the SDDC gw: service up, basic auth, `POST /org` hands out an org with the SDDC bookmarks). |
 | `gw-blueprint-api`, `supervisor-blueprint-watcher` | Run when an org has `blueprints.auto_update.enabled`. | Same, as long as the `blueprint_apps_*` variables exist in `variables.sh`. |
 | `esxi-bootstrap` | `vcd_login`; waits for the ESXi VMs through VCD (`vcd_wait_vm_powered_on`) and power-cycles them with the VCD power API. | No VCD login; talks to the external vCenter with govc (`GOVC_*` from `vsphere_underlay_*`): `govc_wait_vm_powered_on`, `govc vm.power -s` / `-on`. At the end it also ejects the kickstart ISOs from the ESXi VMs and deletes them from the datastore (`nested-vcf/...iso`); the vApp case has nothing to eject. |
 | `vcf-installer-bootstrap` (license) | The gw cannot reach the license service, so the machine id is posted to the gw VM's VCD metadata (`vcfi_machineId`), the operator (`relay_vcf_installer_activation`) exchanges it and writes `vcfi_activation_code` back, and the script clears both afterwards. | The gw calls the license service itself (client-credentials token, then the machine id for an activation code). No metadata, nothing to clear. |
 | `vcfa_provider_bootstrap`, `vcfa_tenant_bootstrap` (per-org files) | Per-org Linux accounts exist (`gw-accounts`, both use cases): the rendered demo yamls (`<yaml_folder>/`), the GitOps manifests (`gitops/`) and the VKS kubeconfig (`.kube/`) go to `/home/<org>/` and are owned by the org account. | Same, now that `gw-accounts` runs here too. `org_home_dir` (functions.sh) returns `/home/<org>` whenever the account exists and only falls back to `/home/ubuntu/<org>/` (owned by `ubuntu`) when it does not. Blueprints are never written to disk in either kind: the tenant script substitutes `avi_subdomain`/`domain` in memory and uploads them through the API. |
-| `vcfa_tenant_cleaning.sh` (manual) | Without `--org` it takes the free orgs from `gw-org-api`. | `gw-org-api` does not run, so only `--org <name>` has anything to work with. |
+| `vcfa_tenant_cleaning.sh` (manual) | Without `--org` it takes the free orgs from `gw-org-api`. | Works the same once `gw-org-api` is enabled there (it needs `spec .gw.org_api`); without it only `--org <name>` has anything to work with. |
 | All other phases (`vault-pki-bootstrap`, `vcfa-stabilize`, `vcenter-bootstrap`, `nsx-bootstrap`, `avi-bootstrap`, `nsx-project-vpc`, `supervisor-bootstrap`, `k8s-bootstrap`, `git-bootstrap`) | No branch on the kind. | Same code. They differ only through the values of `variables.sh` and the guard below. |
 
 Common to both: sourcing `functions.sh` aborts when `gw_accounts_secret` is empty or `null` (so the spec JSON must carry that

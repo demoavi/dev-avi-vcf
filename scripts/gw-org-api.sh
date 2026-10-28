@@ -1,13 +1,14 @@
 #!/bin/bash
 #
-# vApp use case only: installs/refreshes the gw's org-assignment API (see
+# Both use cases (vApp and sddc): installs/refreshes the gw's org-assignment API (see
 # gw-org-api.py for the endpoints) as a systemd service on its own HTTPS
 # port with a self-signed certificate and HTTP basic auth. Runs right after
 # gw-accounts.sh, which creates the per-org accounts this API hands out.
 #
 # Opt-in via the CR's spec.vms.gw.org_api (username/password, optional
 # port), rendered into variables.sh as org_api_username/org_api_password/
-# org_api_port by userdata.py. Not set -> skipped (an unauthenticated
+# org_api_port by userdata.py (vApp) or, in the sddc use case, read from .gw.org_api.* of the spec by the reference
+# bash/variables.sh. Not set -> skipped (an unauthenticated
 # credential-handing API is never started). Idempotent: the server, unit,
 # certificate and config are only rewritten when their content changed, and
 # the service is only restarted when something it can't re-read at runtime
@@ -22,9 +23,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 
-if [ "${deployment_kind}" != "vApp" ]; then
-  exit 0
-fi
+# vcd_login returns at once in the sddc use case (no VCD)
 vcd_login
 log_notify "gw-org-api.sh started"
 
