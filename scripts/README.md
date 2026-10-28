@@ -27,11 +27,11 @@ gw-accounts -> gw-org-api -> gw-blueprint-api -> vault-pki-bootstrap -> esxi-boo
 
 ## Phases
 
-### 1. `gw-accounts.sh` (vApp only; skipped when `deployment_kind` is not `vApp`)
+### 1. `gw-accounts.sh` (both use cases; the WireGuard part is vApp only)
 Creates one Linux account per VCF-A org on the gw (`org-1`, `org-2`, ...), SSH + password login. The password is
 `VMware1!<4 hex of sha256(gw_accounts_secret + org_name)>VMware1!` (20 chars exactly: vCenter SSO caps at 20, VCFA
 requires mixed character classes). The same derivation is used for the org's vCenter SSO, NSX, Avi, VCF-A, Git and
-Argo accounts, so it must stay identical in every script that copies it. vApp use case only: generates the gw's WireGuard
+Argo accounts, so it must stay identical in every script that copies it. Both use cases: password SSH login and the accounts. vApp use case only: generates the gw's WireGuard
 keypair (once, never regenerated) and, per org, `/home/<org>/wireguard` (keypair + `wg0.conf`, tunnel address
 `10.8.0.<N>/24`, the gw as peer). No dependency on anything else, hence first.
 
@@ -205,6 +205,14 @@ blueprint deployments, the VKS cluster(s) and all namespaces. Then it reruns `vc
 the namespace and VKS cluster, and releases the cleaned orgs (an org whose cleaning failed stays claimed). Log:
 `/home/ubuntu/vcfa_tenant_cleaning.log`.
 
+### Manual tool: `api-monitor.sh` (not part of the pipeline)
+Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 1] [--out dir]`
+calls, once per second and in parallel, vCenter, NSX, Avi, VCF-A (provider login + orgs list, first org's login + session, the org
+CCI API through the token exchange, the UI), the Supervisor's `:6443/readyz`, the VCF Installer, each ESX host, Vault, Harbor, Git, the gw
+and Avi DNS and (vApp) VCD, with credentials derived from `variables.sh`. Output in `/home/ubuntu/api-monitor/<timestamp>/`:
+`samples.csv`, `monitor.log` and `report.md` (availability and latency per target, every outage window with its HTTP codes, and the
+windows where several targets were down together). `--report <dir>` rebuilds a report. Read-only except for the sessions it logs in to.
+
 ### Helpers
 `functions.sh` (log_notify, vcd_login, vcfa_login/vcfa_api, `vcfa_health_gate`, `chown_org_or_ubuntu`, avi/nsx/vcenter API helpers, `find_org_manifest`). Sourcing it also
 fails the phase at once when `gw_accounts_secret` is empty or the text `null` (what `jq -r` prints for a missing key): every per-org
@@ -238,17 +246,17 @@ Every phase not named in the second table behaves identically in both.
 |---|---|---|
 | `functions.sh` `vcd_login` | Logs in to VCD and looks up the gw VM (`vcd_find_vm_href`). | Returns immediately. Before this was added, a spec without `.vcd` made `vcd_find_vm_href` page a nonexistent VCD forever (a log of hundreds of `integer expected` lines per second): every phase that calls `vcd_login` at its top, and `vcf_bootstrap.sh` itself, hung. `vcd_find_vm_href` now also gives up when the answer is not a number. |
 | `log_notify` | Message prefix `nested-<basename> (vApp)`, plus the VCD metadata post. | Prefix `nested-<basename> (sddc)`, no metadata post. |
-| `gw-accounts` | Runs: one Linux account per org, the gw's WireGuard keys and per-org `wg0.conf`. | Skipped at once (`gw-accounts.sh skipped (deployment_kind=sddc ...)`). |
+| `gw-accounts` | Runs: one Linux account per org, the gw's WireGuard keys and per-org `wg0.conf`. | Runs the account part only (accounts, `/home/<org>`, password SSH); no WireGuard. |
 | `gw-org-api` | Runs when `spec.vms.gw.org_api` is set. | Exits at once, before it reads any `org_api_*` variable. |
 | `gw-blueprint-api`, `supervisor-blueprint-watcher` | Run when an org has `blueprints.auto_update.enabled`. | Same, as long as the `blueprint_apps_*` variables exist in `variables.sh`. |
 | `esxi-bootstrap` | `vcd_login`; waits for the ESXi VMs through VCD (`vcd_wait_vm_powered_on`) and power-cycles them with the VCD power API. | No VCD login; talks to the external vCenter with govc (`GOVC_*` from `vsphere_underlay_*`): `govc_wait_vm_powered_on`, `govc vm.power -s` / `-on`. At the end it also ejects the kickstart ISOs from the ESXi VMs and deletes them from the datastore (`nested-vcf/...iso`); the vApp case has nothing to eject. |
 | `vcf-installer-bootstrap` (license) | The gw cannot reach the license service, so the machine id is posted to the gw VM's VCD metadata (`vcfi_machineId`), the operator (`relay_vcf_installer_activation`) exchanges it and writes `vcfi_activation_code` back, and the script clears both afterwards. | The gw calls the license service itself (client-credentials token, then the machine id for an activation code). No metadata, nothing to clear. |
-| `vcfa_provider_bootstrap`, `vcfa_tenant_bootstrap` (per-org files) | Per-org Linux accounts exist (`gw-accounts`): the rendered demo yamls (`<yaml_folder>/`), the GitOps manifests (`gitops/`) and the VKS kubeconfig (`.kube/`) go to `/home/<org>/` and are owned by the org account. | No such accounts and no `/home/<org>`: `org_home_dir` (functions.sh) puts the same three under `/home/ubuntu/<org>/`, owned by `ubuntu` (`chown_org_or_ubuntu` falls back to `ubuntu:ubuntu`). Blueprints are never written to disk in either kind: the tenant script substitutes `avi_subdomain`/`domain` in memory and uploads them through the API. |
+| `vcfa_provider_bootstrap`, `vcfa_tenant_bootstrap` (per-org files) | Per-org Linux accounts exist (`gw-accounts`, both use cases): the rendered demo yamls (`<yaml_folder>/`), the GitOps manifests (`gitops/`) and the VKS kubeconfig (`.kube/`) go to `/home/<org>/` and are owned by the org account. | Same, now that `gw-accounts` runs here too. `org_home_dir` (functions.sh) returns `/home/<org>` whenever the account exists and only falls back to `/home/ubuntu/<org>/` (owned by `ubuntu`) when it does not. Blueprints are never written to disk in either kind: the tenant script substitutes `avi_subdomain`/`domain` in memory and uploads them through the API. |
 | `vcfa_tenant_cleaning.sh` (manual) | Without `--org` it takes the free orgs from `gw-org-api`. | `gw-org-api` does not run, so only `--org <name>` has anything to work with. |
 | All other phases (`vault-pki-bootstrap`, `vcfa-stabilize`, `vcenter-bootstrap`, `nsx-bootstrap`, `avi-bootstrap`, `nsx-project-vpc`, `supervisor-bootstrap`, `k8s-bootstrap`, `git-bootstrap`) | No branch on the kind. | Same code. They differ only through the values of `variables.sh` and the guard below. |
 
 Common to both: sourcing `functions.sh` aborts when `gw_accounts_secret` is empty or `null` (so the spec JSON must carry that
-key in the sddc use case too, even though `gw-accounts` is skipped there); the `vcfa-stabilize` and `vcfa_health_gate`
+key in the sddc use case too, as `gw-accounts` now runs there); the `vcfa-stabilize` and `vcfa_health_gate`
 steps are the same; `avi-bootstrap` is re-runnable in both.
 
 ## VCF-A stability (nested lab)

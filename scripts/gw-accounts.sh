@@ -22,7 +22,7 @@
 # to this one (same login/password across gw SSH, vCenter SSO, Avi,
 # NSX, and the VCF-A org user, all for the same org).
 #
-# vApp use case only (deployment_kind == "vApp"): first generates gw's own
+# WireGuard part, vApp use case only (deployment_kind == "vApp"): first generates gw's own
 # WireGuard keypair (/home/ubuntu/wireguard, kept in gw_wg_private_key /
 # gw_wg_public_key), then also creates
 # /home/<org>/wireguard per org, owned by that org's account (mode 700), as
@@ -39,13 +39,12 @@ jsonFile="${1}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
-# Per-org Linux accounts on gw are a vApp use-case feature (student desktops log in to gw with them, the org API hands the
-# credentials out, WireGuard keys live in their homes). The sddc use case has neither, so there is nothing to do: the later
-# phases still create /home/<org>/... themselves (sudo mkdir -p) and, with no <org> account, leave those files to ubuntu
-# (chown_org_or_ubuntu in functions.sh). The per-org logins in vCenter, Avi, VCF-A, Git and Argo CD are created by their own
-# phases from gw_accounts_secret and are not affected.
-if [ "${deployment_kind}" != "vApp" ]; then
-  log_only "gw-accounts.sh skipped (deployment_kind=${deployment_kind}: no per-org gw accounts outside the vApp use case)"
+# Per-org Linux accounts on gw (SSH login, /home/<org>) are created in both use cases. The WireGuard part (gw and per-org keys,
+# wg0.conf, the gw's own wireguard server) stays vApp-only: it serves the student vApp, which the sddc use case does not have.
+# The sddc use case needs gw_accounts_secret in variables.sh (the same secret the per-org logins in vCenter, Avi, VCF-A, Git and
+# Argo CD are derived from); without it the phase is skipped rather than creating accounts with a guessable password.
+if [ "${deployment_kind}" != "vApp" ] && [ -z "${gw_accounts_secret:-}" ]; then
+  log_only "gw-accounts.sh skipped (deployment_kind=${deployment_kind}: gw_accounts_secret is not set)"
   exit 0
 fi
 # sddc use case has no VCD at all - vcd_login (and everything it sets:
