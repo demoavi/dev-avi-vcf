@@ -98,7 +98,10 @@ def pct(vals, q):
     vals = sorted(vals)
     return vals[min(len(vals) - 1, int(round(q * (len(vals) - 1))))]
 
-GAP = 3.0  # failures closer than this belong to the same outage
+try:
+    IV = float(meta.get("interval") or 1)  # one sample stands for this many seconds
+except ValueError:
+    IV = 1.0
 all_start = min(r[0][0] for r in rows.values())
 all_end = max(r[-1][0] for r in rows.values())
 outages = []  # (target, start, end, n_fail, codes)
@@ -111,26 +114,27 @@ for name in sorted(rows):
     cur = None
     own = []
     for x in s:
+        # an outage is a run of consecutive failed samples; one successful sample ends it (a skipped tick is not a sample)
         if x[3]:
-            continue
-        if cur and x[0] - cur[1] <= GAP + 1.0:
-            cur[1] = x[0]; cur[2] += 1; cur[3][x[1]] += 1
-        else:
             if cur:
                 own.append(cur)
+                cur = None
+        elif cur:
+            cur[1] = x[0]; cur[2] += 1; cur[3][x[1]] += 1
+        else:
             cur = [x[0], x[0], 1, collections.Counter({x[1]: 1})]
     if cur:
         own.append(cur)
     for o in own:
         outages.append((name, o[0], o[1], o[2], o[3]))
-    longest = max((o[1] - o[0] + 1 for o in own), default=0)
+    longest = max((o[1] - o[0] + IV for o in own), default=0)
     summary.append((name, n, len(bad), 100.0 * (n - len(bad)) / n, len(own), longest,
                     pct(lat, .5), pct(lat, .95), max(lat, default=0.0)))
 
 L = []
 L.append("# API availability report")
 L.append("")
-L.append(f"Window: {hms(all_start)} - {hms(all_end)} ({(all_end-all_start)/60:.1f} min), outage = failed samples less than {GAP:.0f} s apart.")
+L.append(f"Window: {hms(all_start)} - {hms(all_end)} ({(all_end-all_start)/60:.1f} min), outage = consecutive failed samples (one successful sample ends it), duration = first to last failure + one interval ({IV:g} s).")
 L.append("")
 ivl = meta.get("interval", "?")
 L.append("## How it was tested")
@@ -158,7 +162,7 @@ if outages:
     L.append("|---|---|---|---|---|---|")
     for o in sorted(outages, key=lambda o: o[1]):
         codes = ", ".join(f"{k} x{v}" for k, v in o[4].most_common())
-        L.append(f"| {o[0]} | {hms(o[1])} | {hms(o[2])} | {o[2]-o[1]+1:.0f} | {o[3]} | {codes} |")
+        L.append(f"| {o[0]} | {hms(o[1])} | {hms(o[2])} | {o[2]-o[1]+IV:.0f} | {o[3]} | {codes} |")
 else:
     L.append("None - every sample of every target was ok.")
 L.append("")
@@ -211,7 +215,7 @@ h.append("<!doctype html><html><head><meta charset='utf-8'><title>API availabili
          "td:first-child,th:first-child{text-align:left}.good{background:#d8f3dc}.warn{background:#fff3bf}.bad{background:#ffc9c9}"
          ".tl{font:12px monospace}.muted{color:#666}</style></head><body>")
 h.append("<h1>API availability report</h1>")
-h.append(f"<p>Window {hms(all_start)} - {hms(all_end)} ({(all_end-all_start)/60:.1f} min). An outage is a run of failed samples less than {GAP:.0f} s apart. Generated {datetime.datetime.now().strftime('%H:%M:%S')}.</p>")
+h.append(f"<p>Window {hms(all_start)} - {hms(all_end)} ({(all_end-all_start)/60:.1f} min). An outage is a run of consecutive failed samples (one successful sample ends it); its duration is first to last failure plus one interval ({IV:g} s). Generated {datetime.datetime.now().strftime('%H:%M:%S')}.</p>")
 h.append("<h2>How it was tested</h2><ul>"
          f"<li>From <b>{H.escape(meta.get('host', '?'))}</b>, deployment <b>{H.escape(meta.get('deployment', '?'))}</b>, started {H.escape(meta.get('started', '?'))}, planned duration {H.escape(meta.get('duration', '?'))} s.</li>"
          f"<li>One call per target every <b>{H.escape(ivl)} s</b>, all targets in parallel. A new call is made only when the previous call of the same target has finished (no cascade); a tick skipped for that reason is counted as <i>skipped ticks</i>, not as a sample.</li>"
@@ -229,7 +233,7 @@ for i, r in enumerate(sorted(summary, key=lambda r: r[0])):
     h.append(f"<rect x='4' y='{y+3}' width='{W:.0f}' height='14' fill='#d8f3dc' stroke='#9c9' stroke-width='0.5'/>")
     for o in outages:
         if o[0] == r[0]:
-            h.append(f"<rect x='{x(o[1]):.1f}' y='{y+3}' width='{max(x(o[2]+1)-x(o[1]),2):.1f}' height='14' fill='#e03131'><title>{H.escape(r[0])} {hms(o[1])}-{hms(o[2])} ({o[2]-o[1]+1:.0f} s)</title></rect>")
+            h.append(f"<rect x='{x(o[1]):.1f}' y='{y+3}' width='{max(x(o[2]+IV)-x(o[1]),2):.1f}' height='14' fill='#e03131'><title>{H.escape(r[0])} {hms(o[1])}-{hms(o[2])} ({o[2]-o[1]+1:.0f} s)</title></rect>")
 h.append(f"<text x='4' y='{22*len(summary)+16}'>{hms(all_start)}</text><text x='{W-30:.0f}' y='{22*len(summary)+16}'>{hms(all_end)}</text></svg>")
 h.append("<h2>Per target (worst availability first)</h2><table><tr><th>target</th><th>samples</th><th>failed</th><th>skipped ticks</th><th>availability %</th><th>outages</th><th>longest outage (s)</th><th>p50 s</th><th>p95 s</th><th>max s</th></tr>")
 for r in sorted(summary, key=lambda r: (r[3], -r[4])):
@@ -239,7 +243,7 @@ if outages:
     h.append("<table><tr><th>target</th><th>from</th><th>to</th><th>duration (s)</th><th>failed samples</th><th>codes</th></tr>")
     for o in sorted(outages, key=lambda o: o[1]):
         codes = ", ".join(f"{k} x{v}" for k, v in o[4].most_common())
-        h.append(f"<tr><td>{H.escape(o[0])}</td><td>{hms(o[1])}</td><td>{hms(o[2])}</td><td>{o[2]-o[1]+1:.0f}</td><td>{o[3]}</td><td>{H.escape(codes)}</td></tr>")
+        h.append(f"<tr><td>{H.escape(o[0])}</td><td>{hms(o[1])}</td><td>{hms(o[2])}</td><td>{o[2]-o[1]+IV:.0f}</td><td>{o[3]}</td><td>{H.escape(codes)}</td></tr>")
     h.append("</table>")
 else:
     h.append("<p>None - every sample of every target was ok.</p>")
