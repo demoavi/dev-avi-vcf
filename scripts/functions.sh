@@ -587,3 +587,16 @@ case "${gw_accounts_secret:-}" in
     exit 1
     ;;
 esac
+
+# Org filter for the phases, set only by vcfa_org.sh (never by the pipeline): VCFA_ORG_ONLY=<org> narrows vcf_a_organizations (and
+# blueprint_apps_orgs) to that one org, so a phase that loops over the orgs only touches it; VCFA_ORG_EXCLUDE=<org> removes one org
+# from the lists (what a phase that rebuilds a list from all orgs must see after that org was deleted). Said loudly, once per phase.
+if [ -n "${VCFA_ORG_ONLY:-}" ]; then
+  vcf_a_organizations=$(echo "${vcf_a_organizations:-[]}" | jq -c --arg o "${VCFA_ORG_ONLY}" '[.[] | select(.name == $o)]')
+  blueprint_apps_orgs=$(echo "${blueprint_apps_orgs:-[]}" | jq -c --arg o "${VCFA_ORG_ONLY}" '[.[] | select(. == $o)]')
+  echo "NOTE: VCFA_ORG_ONLY=${VCFA_ORG_ONLY}: this phase only sees the org ${VCFA_ORG_ONLY}" >&2
+elif [ -n "${VCFA_ORG_EXCLUDE:-}" ]; then
+  vcf_a_organizations=$(echo "${vcf_a_organizations:-[]}" | jq -c --arg o "${VCFA_ORG_EXCLUDE}" '[.[] | select(.name != $o)]')
+  blueprint_apps_orgs=$(echo "${blueprint_apps_orgs:-[]}" | jq -c --arg o "${VCFA_ORG_EXCLUDE}" '[.[] | select(. != $o)]')
+  echo "NOTE: VCFA_ORG_EXCLUDE=${VCFA_ORG_EXCLUDE}: this phase does not see the org ${VCFA_ORG_EXCLUDE}" >&2
+fi

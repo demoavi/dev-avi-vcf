@@ -323,7 +323,7 @@ vcd_host=$(jq -r '.vcd.host // empty' "${jsonFile}" 2>/dev/null)
 # ${out}/.state, written by the call that needed to log in.
 mkdir -p "${out}/.state"
 st_get() { cat "${out}/.state/${1}" 2>/dev/null; }                               # st_get <key>
-st_set() { printf '%s' "$2" > "${out}/.state/${1}.$$" && mv -f "${out}/.state/${1}.$$" "${out}/.state/${1}"; }   # st_set <key> <value>
+st_set() { printf '%s' "$2" > "${out}/.state/${1}.${BASHPID}" && mv -f "${out}/.state/${1}.${BASHPID}" "${out}/.state/${1}"; }   # st_set <key> <value>
 st_clear() { rm -f "${out}/.state/${1}"; }
 # rec <target> <code> <seconds> <ok regex>: one sample line (also sets ${last_code}). One short append is atomic, so all calls share the file.
 rec() {
@@ -395,12 +395,12 @@ p_avi() {
       [ -n "${ver}" ] && st_set avi_ver "${ver}"
     fi
     local t0l; t0l=$(date +%s.%N)
-    rm -f "${jar}.$$"
-    "${CURL[@]}" -X POST -H 'Content-Type: application/json' -c "${jar}.$$" \
+    rm -f "${jar}.${BASHPID}"
+    "${CURL[@]}" -X POST -H 'Content-Type: application/json' -c "${jar}.${BASHPID}" \
       -d "{\"username\":\"admin\",\"password\":\"${generic_password}\"}" "https://${avi_host}/login" > /dev/null 2>&1
-    csrf=$(awk '$6=="csrftoken"{print $7}' "${jar}.$$" 2>/dev/null)
-    if [ -z "${csrf}" ]; then rm -f "${jar}.$$"; rec avi-login 000 "$(secs_since "${t0l}")" 'x'; return; fi
-    mv -f "${jar}.$$" "${jar}"; st_set avi_csrf "${csrf}"
+    csrf=$(awk '$6=="csrftoken"{print $7}' "${jar}.${BASHPID}" 2>/dev/null)
+    if [ -z "${csrf}" ]; then rm -f "${jar}.${BASHPID}"; rec avi-login 000 "$(secs_since "${t0l}")" 'x'; return; fi
+    mv -f "${jar}.${BASHPID}" "${jar}"; st_set avi_csrf "${csrf}"
   fi
   hit avi '200' -b "${jar}" -H "X-CSRFToken: ${csrf}" -H "X-Avi-Tenant: admin" -H "X-Avi-Version: ${ver:-22.1.4}" \
     -H "Referer: https://${avi_host}" "https://${avi_host}/api/cluster/runtime"
@@ -505,7 +505,7 @@ p_k8s_supervisor() {
     hit k8s-supervisor-login '200' -m 8 -X POST -u "${vc_user}:${generic_password}" "https://${ep}/wcp/login"
     tok=$(jq -r '.session_id // empty' "${body_file}" 2>/dev/null)
     [ -z "${tok}" ] && return
-    ( umask 077; printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: sup\n  cluster: {server: "https://%s:6443", insecure-skip-tls-verify: true}\nusers:\n- name: u\n  user: {token: "%s"}\ncontexts:\n- name: c\n  context: {cluster: sup, user: u}\ncurrent-context: c\n' "${ep}" "${tok}" > "${kc}.$$" ) && mv -f "${kc}.$$" "${kc}"
+    ( umask 077; printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: sup\n  cluster: {server: "https://%s:6443", insecure-skip-tls-verify: true}\nusers:\n- name: u\n  user: {token: "%s"}\ncontexts:\n- name: c\n  context: {cluster: sup, user: u}\ncurrent-context: c\n' "${ep}" "${tok}" > "${kc}.${BASHPID}" ) && mv -f "${kc}.${BASHPID}" "${kc}"
   fi
   kube_nodes k8s-supervisor "${kc}" || rm -f "${kc}"
 }

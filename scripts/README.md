@@ -205,6 +205,20 @@ blueprint deployments, the VKS cluster(s) and all namespaces. Then it reruns `vc
 the namespace and VKS cluster, and releases the cleaned orgs (an org whose cleaning failed stays claimed). Log:
 `/home/ubuntu/vcfa_tenant_cleaning.log`.
 
+### Manual tool: `vcfa_org.sh` (not part of the pipeline)
+Adds, deletes or inspects ONE VCF-A org on a running deployment: `vcfa_org.sh status|add|delete|isolate <org> [--yes] [--dry-run] [--json <file>]`
+(`add` also takes `--no-isolate-others`). `status` prints one line per object (spec, gw account and folders, Vault login, Avi DNS
+domains / tenant / user, Gitea user and repo, Harbor user, vCenter SSO user, permissions and isolation, VCF-A org / vDC / regional
+networking / org user, NSX project, namespaces, VKS clusters, deployments). `add` follows the bootstrap order: gw account, Vault login, Avi
+DNS domains, Gitea user and repo, then `vcfa_provider_bootstrap.sh` and `vcfa_tenant_bootstrap.sh` limited to that org (environment
+variable `VCFA_ORG_ONLY`, read by `functions.sh`; `VCFA_ORG_EXCLUDE` is the opposite), the vCenter isolation, and the blueprint watcher again.
+`delete` is the reverse: Harbor / Avi / vCenter accounts, AKO cleanup (waits for the org's Avi virtual services to go), deployments, VKS
+clusters, namespaces, watcher, then VCF-A (the Avi setting is switched off with `{"active":false}` first, then regional networking, vDC, the
+org), Gitea, Avi DNS domains, Vault login, files, gw account. The org must be in the spec to be added; one that stays in the spec is
+recreated by the next `vcf_bootstrap.sh`. Isolation: an org's vCenter user needs an explicit NoAccess entry on every other org's namespace
+(vCenter shows all namespaces to a user with any grant above them); `add` and `isolate` write them in both directions, `status` checks
+them. Refuses to run while a bootstrap phase runs; `delete` asks for `yes`. Log: `/home/ubuntu/vcfa_org.log`.
+
 ### Manual tool: `api-monitor.sh` (not part of the pipeline)
 Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 3] [--out dir]`
 calls vCenter, NSX, Avi, VCF-A (provider login + orgs list, first org's login + session, the org CCI API through the token exchange,
