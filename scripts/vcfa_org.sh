@@ -547,9 +547,22 @@ del_files_and_account() {
 }
 do_delete() {
   check_idle
-  # vApp use case: an org that gw-org-api handed to a student ("/home/<org>/.assigned") is in use
-  if sudo test -e "/home/${org}/.assigned" && [ "${force}" != "true" ]; then
-    die "${org} is assigned to a student (/home/${org}/.assigned): not deleting it. Use --force to delete it anyway"
+  # vApp use case (the org has a gw account): gw-org-api hands out any org with a home folder and no /home/<org>/.assigned. An org a
+  # student already holds is refused without --force; a free one is claimed FIRST (same marker the API writes, created atomically), so no
+  # student can be given it while it is being deleted. A marker left by an earlier, failed vcfa_org.sh / cleaning run is our own and
+  # is reused. The marker goes with the account at the end; when the delete fails halfway the org stays claimed.
+  if org_has_account; then
+    local marker="/home/${org}/.assigned"
+    if sudo test -e "${marker}"; then
+      if sudo grep -qE "to (vcfa_org delete|vcfa_tenant_cleaning)" "${marker}" 2> /dev/null; then say "${org} is already claimed by an earlier delete/cleaning run"
+      elif [ "${force}" != "true" ]; then die "${org} is assigned to a student ($(sudo cat "${marker}" 2> /dev/null | head -1)): not deleting it. Use --force to delete it anyway"
+      else warn "${org} is assigned to a student: deleting it anyway (--force)"; fi
+    elif [ "${dry_run}" == "true" ]; then say "[dry-run] would: claim ${org} (create ${marker}) so gw-org-api cannot hand it out"
+    else
+      sudo bash -c "set -o noclobber; echo \"assigned \$(date +%Y-%m-%dT%H:%M:%S%z) to vcfa_org delete\" > '${marker}'" 2> /dev/null \
+        && say "claimed ${org} (${marker}): gw-org-api no longer hands it out" \
+        || { [ "${force}" == "true" ] || die "${org} was assigned to a student a moment ago: not deleting it. Use --force to delete it anyway"; }
+    fi
   fi
   org_lookup
   say "ABOUT TO DELETE the org ${org} and everything of it: VKS clusters, namespaces, deployments, accounts, Git repo, Vault and Avi/DNS entries (json ${jsonFile})"
