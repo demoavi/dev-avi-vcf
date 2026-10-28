@@ -6,7 +6,7 @@
 #   vcfa_org.sh status <org>
 #   vcfa_org.sh add    <org> [--yes] [--dry-run] [--no-isolate-others]
 #   vcfa_org.sh isolate <org> [--dry-run]    only the vCenter isolation between <org> and every other org (see below)
-#   vcfa_org.sh delete <org> [--yes] [--dry-run]
+#   vcfa_org.sh delete <org> [--yes] [--dry-run] [--force]   (--force: also an org already handed to a student by gw-org-api)
 #   common: [--json <file>]   the deployment json the pipeline was started with (default $JSON_FILE, else
 #                             /home/ubuntu/json/deployment.json, else the newest /home/ubuntu/json/*_apply.json)
 #
@@ -51,10 +51,11 @@ action="${1:-}"; org="${2:-}"
 case "${action}" in status|add|delete|isolate) ;; -h|--help|"") usage; exit 0 ;; *) echo "unknown action: ${action}" >&2; usage >&2; exit 1 ;; esac
 case "${org}" in ""|-*) echo "an org name is needed: vcfa_org.sh ${action} <org>" >&2; exit 1 ;; esac
 shift 2
-assume_yes="false"; dry_run="false"; isolate_others="true"; jsonFile="${JSON_FILE:-}"
+assume_yes="false"; force="false"; dry_run="false"; isolate_others="true"; jsonFile="${JSON_FILE:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes) assume_yes="true"; shift ;;
+    --force) force="true"; shift ;;
     --dry-run) dry_run="true"; shift ;;
     --no-isolate-others) isolate_others="false"; shift ;;
     --json) jsonFile="${2:?--json needs a file}"; shift 2 ;;
@@ -535,13 +536,21 @@ del_files_and_account() {
   local d
   for d in $(org_dirs); do sudo test -d "${d}" && [ "${d}" != "/home/${org}" ] && do_it "remove ${d}" sudo rm -rf "${d}"; done
   if org_has_account; then
-    do_it "delete the gw account ${org} and /home/${org}" sudo userdel -r "${org}" 2> /dev/null
-    ok_say "gw account ${org} removed"
+    if [ "${dry_run}" == "true" ]; then say "[dry-run] would: delete the gw account ${org} and /home/${org}"
+    elif sudo userdel -r "${org}" 2> "${tmpdir}/userdel.err" || { sudo pkill -KILL -u "${org}" 2> /dev/null; sleep 2; sudo userdel -r "${org}" 2>> "${tmpdir}/userdel.err"; }; then
+      say "gw account ${org} removed"
+    else
+      warn "deleting the gw account ${org} failed: $(tr '\n' ' ' < "${tmpdir}/userdel.err")"
+    fi
   fi
   if [ "${deployment_kind}" == "vApp" ]; then run_phase gw-org-api exclude; run_phase gw-accounts exclude; fi
 }
 do_delete() {
   check_idle
+  # vApp use case: an org that gw-org-api handed to a student ("/home/<org>/.assigned") is in use
+  if sudo test -e "/home/${org}/.assigned" && [ "${force}" != "true" ]; then
+    die "${org} is assigned to a student (/home/${org}/.assigned): not deleting it. Use --force to delete it anyway"
+  fi
   org_lookup
   say "ABOUT TO DELETE the org ${org} and everything of it: VKS clusters, namespaces, deployments, accounts, Git repo, Vault and Avi/DNS entries (json ${jsonFile})"
   [ -n "${org_item}" ] && ok_say "NOTE: ${org} is still in the spec: the next vcf_bootstrap.sh run recreates it"
