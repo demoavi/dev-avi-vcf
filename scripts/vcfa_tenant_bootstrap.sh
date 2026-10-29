@@ -544,6 +544,9 @@ ARGOCD_GATEWAY_EOF
                   argocd_why=$(argocd_kc -n "${argocd_namespace}" get gateway "${argocd_gateway_name}" -o json 2> /dev/null | jq -r '[.status.listeners[]?.conditions[]? | select(.status == "False") | .message] | unique | join("; ")' 2> /dev/null)
                   argocd_fail "the Gateway ${argocd_gateway_name} got no address from AKO/Avi (${argocd_why:-no reason reported}; a 'sub-domains' message means Avi's DNS profile has no ${org_name}-vks.${domain} domain, or AKO has to be restarted to learn it) - kubectl -n ${argocd_namespace} describe gateway ${argocd_gateway_name}"; break
                 fi
+                # AKO may have put this Gateway's virtual services on another Avi SE than the cluster's control-plane VIP: move them
+                # to that SE, so the org needs a vNIC on one SE only (functions.sh; avi_colocate_vs=false turns it off)
+                avi_colocate_org_vs "${org_name}" "${vks_name}"
                 # Through the VIP (not DNS: the name is only resolvable once Avi's DNS knows it)
                 argocd_ui_code=""
                 for argocd_attempt in $(seq 1 18); do

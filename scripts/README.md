@@ -224,6 +224,12 @@ redoes pod security, cert, ArgoCD and `/home/<org>/.kube/config` (about 20 min o
 `<org>-vks-<id>` (generateName), so its nodes are `<org>-vks-<id>-...`; blueprint VMs are `<namespace>-<deployment>-N` and the namespace is
 `<org>-ns-<id>`. Every VM of an org therefore starts with `<org>-` (the dash keeps `org-1-` from matching `org-10-`), which is what a DRS VM
 group per org can match (groups are static lists: something has to refresh them, like the cron of `dedicated-host-placement.sh`).
+Avi placement: an Avi service engine (SE) has 9 data vNICs and needs one per org network it serves, and Avi can put the VKS control-plane VIP
+(made by the Supervisor) and the VSes AKO makes for the org's Gateways on different SEs, so one org takes a vNIC on each. After ArgoCD got its VIP,
+`vcfa_tenant_bootstrap.sh` calls `avi_colocate_org_vs` (functions.sh): it reads the SE of the cluster's control-plane VIP (VS marker
+`GatewayName` = the cluster) and moves every VS AKO made for the cluster (marker `clustername`) that is elsewhere onto it, with
+`POST api/virtualservice/<uuid>/migrate` (`serviceengine_ref`, `to_new_se: false`). Never fatal; `avi_colocate_vs=false` turns it off. Only acts
+when the tenant phase runs for the org (new orgs, `recreate-vks`, a rerun); existing orgs are not moved on their own.
 
 ### Manual tool: `api-monitor.sh` (not part of the pipeline)
 Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 3] [--edge-interval 10] [--out dir]`

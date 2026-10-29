@@ -588,6 +588,50 @@ case "${gw_accounts_secret:-}" in
     ;;
 esac
 
+# Same Avi SE for everything of an org. Every Avi service engine (SE) needs one vNIC per org network it serves (9 data vNICs per SE), and Avi
+# may place the VSes of one org on different SEs (the VKS control-plane VIP, made by the Supervisor, and the VSes AKO makes for the org's
+# Gateways), so that org takes a vNIC on each. avi_colocate_org_vs <org> <vks cluster name> moves the VSes AKO made in the org's Avi tenant
+# (marker "clustername") onto the SE that serves the cluster's control-plane VIP (marker GatewayName = the cluster's name):
+# POST api/virtualservice/<uuid>/migrate. Moving one VS can move siblings that share its VIP, so it looks again after each move. Never fatal
+# (a failure is logged and the caller goes on); the variable avi_colocate_vs=false turns it off. A moved VS is out for a few seconds.
+_avi_org_curl() { # jar token org curl-args...
+  local jar="$1" tok="$2" tenant="$3"; shift 3
+  curl -sk -m 30 -b "${jar}" -H "X-CSRFToken: ${tok}" -H "Referer: https://${ip_avi}" -H "X-Avi-Version: ${avi_version:-32.1.1}" -H "X-Avi-Tenant: ${tenant}" -H 'Content-Type: application/json' "$@"
+}
+avi_colocate_org_vs() {
+  local org="$1" vks="$2" jar tok inv full plan cp_se todo uuid name vip code pass waited
+  [ "${avi_colocate_vs:-true}" == "true" ] || return 0
+  [ -n "${ip_avi:-}" ] && [ -n "${org}" ] && [ -n "${vks}" ] || return 0
+  jar=$(mktemp) || return 0
+  curl -sk -m 20 -c "${jar}" -o /dev/null -X POST -H 'Content-Type: application/json' -d "{\"username\": \"admin\", \"password\": \"${generic_password}\"}" "https://${ip_avi}/login"
+  tok=$(awk '/csrftoken/{print $7}' "${jar}")
+  if [ -z "${tok}" ]; then log_only "Avi: no login, the VS placement of ${org} is not checked"; rm -f "${jar}"; return 0; fi
+  for pass in 1 2 3 4 5 6; do
+    # the inventory has the SE of each VS, only the VS object itself has the markers (clustername = made by AKO, GatewayName = the cluster's control-plane VIP)
+    inv=$(_avi_org_curl "${jar}" "${tok}" "${org}" "https://${ip_avi}/api/virtualservice-inventory?page_size=200")
+    full=$(_avi_org_curl "${jar}" "${tok}" "${org}" "https://${ip_avi}/api/virtualservice?page_size=200")
+    plan=$(jq -n -c --argjson inv "${inv:-null}" --argjson full "${full:-null}" --arg v "${vks}" '
+      ($inv.results // [] | map({key: .uuid, value: {se: (.runtime.vip_summary[0].service_engine[0].uuid // ""), vip: (.runtime.vip_summary[0].vip_id // "0")}}) | from_entries) as $m
+      | ([($full.results // [])[] | select(any(.markers[]?; .key == "GatewayName" and (.values[0] // "") == $v)) | .uuid][0] // "") as $cp
+      | (($m[$cp] // {}).se // "") as $se
+      | {cp_se: $se, todo: [($full.results // [])[] | select(any(.markers[]?; .key == "clustername")) | select((($m[.uuid] // {}).se // "") != "" and (($m[.uuid] // {}).se) != $se) | [.uuid, .name, ($m[.uuid].vip)] | @tsv]}' 2> /dev/null)
+    cp_se=$(echo "${plan}" | jq -r '.cp_se // empty' 2> /dev/null)
+    if [ -z "${cp_se}" ]; then log_only "Avi: no control-plane VIP virtual service of ${vks} in tenant ${org}, its VS placement is not changed"; break; fi
+    todo=$(echo "${plan}" | jq -r '.todo[0] // empty' 2> /dev/null)
+    if [ -z "${todo}" ]; then [ "${pass}" -gt 1 ] && log_only "Avi: every virtual service AKO made for ${vks} is on the SE of its control-plane VIP (${cp_se})"; break; fi
+    IFS=$'\t' read -r uuid name vip <<< "${todo}"
+    code=$(_avi_org_curl "${jar}" "${tok}" "${org}" -o /dev/null -w '%{http_code}' -X POST "https://${ip_avi}/api/virtualservice/${uuid}/migrate" -d "{\"vip_id\": \"${vip}\", \"serviceengine_ref\": \"https://${ip_avi}/api/serviceengine/${cp_se}\", \"to_new_se\": false}")
+    if [[ "${code}" != 2* ]]; then log_only "Avi: moving ${name} (tenant ${org}) to ${cp_se} failed (HTTP ${code}), left where it is"; break; fi
+    log_only "Avi: moving ${name} (tenant ${org}) to the SE ${cp_se} of the control-plane VIP of ${vks}"
+    for waited in $(seq 1 24); do
+      sleep 5
+      [ "$(_avi_org_curl "${jar}" "${tok}" "${org}" "https://${ip_avi}/api/virtualservice-inventory/${uuid}" | jq -r '.runtime.vip_summary[0].service_engine[0].uuid // empty' 2> /dev/null)" == "${cp_se}" ] && break
+    done
+  done
+  rm -f "${jar}"
+  return 0
+}
+
 # Org filter for the phases, set only by vcfa_org.sh (never by the pipeline): VCFA_ORG_ONLY=<org> narrows vcf_a_organizations (and
 # blueprint_apps_orgs) to that one org, so a phase that loops over the orgs only touches it; VCFA_ORG_EXCLUDE=<org> removes one org
 # from the lists (what a phase that rebuilds a list from all orgs must see after that org was deleted). Said loudly, once per phase.
