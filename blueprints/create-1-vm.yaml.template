@@ -49,7 +49,3 @@ resources:
         conditions:
           - type: VirtualMachineCreated
             status: 'True'
-      wait:
-        conditions:
-          - type: VirtualMachineCreated
-            status: 'True'

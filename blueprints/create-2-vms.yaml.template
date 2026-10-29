@@ -30,12 +30,12 @@ resources:
   Virtual_Machine_1:
     type: CCI.Supervisor.Resource
     properties:
-      context: ${resource.Namespace.id}-${env.deploymentName}-1
+      context: ${resource.Namespace.id}
       manifest:
         apiVersion: vmoperator.vmware.com/v1alpha5
         kind: VirtualMachine
         metadata:
-          name: ${env.deploymentName}-1
+          name: ${resource.Namespace.id}-${env.deploymentName}-1
           labels:
             app: ${input.app}
         spec:
