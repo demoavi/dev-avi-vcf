@@ -558,7 +558,18 @@ p_vcenter() {
   [[ "${last_code}" =~ ^(401|403)$ ]] && st_clear vcenter_token
 }
 p_nsx() {
+  # one call, two samples: nsx = the API answers 200 (unchanged), nsx-cluster = what that answer says about the cluster groups
+  # (management and control cluster STABLE), recorded only when the API answered 200 so a timeout is not counted twice
+  local st
   hit nsx '200' -u "admin:${generic_password}" "https://${nsx_host}/api/v1/cluster/status"
+  [ "${last_code}" == "200" ] || return
+  st=$(jq -r '[(.mgmt_cluster_status.status // "?"), (.control_cluster_status.status // "?"), (.detailed_cluster_status.overall_status // "?")] | join(" ")' "${body_file}" 2>/dev/null)
+  set -- ${st}
+  if [ "${1:-?}" == "STABLE" ] && [ "${2:-?}" == "STABLE" ] && [ "${3:-?}" != "DEGRADED" ] && [ "${3:-?}" != "UNSTABLE" ]; then
+    rec nsx-cluster 200 0 '200'
+  else
+    rec nsx-cluster "NotStable:mgmt=${1:-?},ctl=${2:-?},overall=${3:-?}" 0 '200'
+  fi
 }
 p_avi() {
   # temp names use ${BASHPID} taken HERE: inside $( ) or ( ) it would be the subshell's own pid and the file would not be found
@@ -798,6 +809,7 @@ fi
 cleanup_secrets() { rm -f "${out}"/.state/*kubeconfig* "${out}"/.state/avi.cookies* ; }
 start vcenter      p_vcenter       "${vc_host}" "GET https://${vc_host}/api/appliance/system/version" "session id from POST /api/session as ${vc_user} (new login only on 401/403, logged as vcenter-login)" "200"
 start nsx          p_nsx           "${nsx_host}" "GET https://${nsx_host}/api/v1/cluster/status (NSX Manager VIP)" "basic auth, admin" "200"
+[ -n "${nsx_host}" ] && printf '%s\t%s\t%s\t%s\n' "nsx-cluster" "same call as nsx (no extra request): management and control cluster status read from the answer of GET https://${nsx_host}/api/v1/cluster/status" "same as nsx" "both groups STABLE and the overall status not DEGRADED/UNSTABLE (code NotStable:mgmt=..,ctl=..,overall=.. otherwise); only sampled when nsx answered 200" >> "${out}/targets.tsv"
 start avi          p_avi           "${avi_host}" "GET https://${avi_host}/api/cluster/runtime (first controller, tenant admin)" "POST /login as admin, csrf cookie (new login only on 401/403/419, logged as avi-login)" "200"
 start vcfa-system  p_vcfa_system   "${vcfa_host}" "GET https://${vcfa_host}/cloudapi/1.0.0/orgs?pageSize=1 (provider portal)" "bearer token from POST /cloudapi/1.0.0/sessions/provider as admin@system (logged as vcfa-system-login)" "200"
 start vcfa-org     p_vcfa_org      "${first_org}" "GET https://${vcfa_host}/cloudapi/1.0.0/sessions/current (org portal, first org: ${first_org})" "bearer token from POST /cloudapi/1.0.0/sessions as ${first_org}@${first_org} (logged as vcfa-org-login)" "200"

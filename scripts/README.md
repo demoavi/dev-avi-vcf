@@ -241,7 +241,7 @@ tick is counted (`skipped.csv`, "skipped ticks" in the report), not a sample. Ou
 `samples.csv`, `skipped.csv`, `monitor.log`, `report.md`, and `report.html` (how it was tested - request, authentication and success criterion per target -, timeline per target, tables). The html report and the raw
 files are also copied to nginx (`/var/www/html/api-monitor/<timestamp>/`, needs sudo) every 60 s, so the run can be watched; the link
 (`http://<gw address>/api-monitor/<timestamp>/report.html`) is printed at the start and the end and logged in `monitor.log`. A failed
-sample's code is `000:<curl exit code>` (28 timeout, 7 refused, 6 DNS, 35/60 TLS). `--report <dir>` rebuilds and republishes a report.
+sample's code is `000:<curl exit code>` (28 timeout, 7 refused, 6 DNS, 35/60 TLS). The NSX call also yields an `nsx-cluster` sample from the same answer (no extra request): management and control cluster `STABLE`, else code `NotStable:mgmt=..,ctl=..,overall=..`; it is only recorded when `nsx` answered 200. `--report <dir>` rebuilds and republishes a report.
 Read-only except for the sessions it logs in to.
 NSX Edge nodes: besides the targets, a collector reads every Edge transport node from NSX every `--edge-interval` seconds (default 10;
 `/api/v1/transport-nodes/<id>/status` and `/state`: node, tunnel and NIC status, datapath (DPDK) and other CPU, load, memory) into
