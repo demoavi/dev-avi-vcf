@@ -494,6 +494,25 @@ del_workloads() { # deployments, AKO cleanup, VKS clusters, namespaces
     wait_until "namespace ${ns} gone" 1200 ns_gone || return 1
   done
 }
+# certificates left in the org's Avi tenant (AKO's Gateway CA, the Vault intermediate): VCF-A deletes the tenant when the Avi setting is switched
+# off, and Avi refuses ("Cannot delete, object is referred by SSLKeyAndCertificate ...") while any is left, so the setting stays active=true
+# and the regional networking cannot be deleted. Only objects owned by the tenant itself are removed. Two passes, a cert may refer to another.
+avi_clear_tenant_certs() {
+  avi_init
+  local tuuid pass u n certs
+  tuuid=$(avi_get "api/tenant?name=${org}" | jq -r '.results[0].uuid // empty'); [ -n "${tuuid}" ] || return 0
+  for pass in 1 2; do
+    certs=$(curl -sk -m 30 -b /tmp/avi_cookies.txt -H "X-CSRFToken: ${avi_csrftoken}" -H "X-Avi-Tenant: ${org}" -H "X-Avi-Version: ${avi_version}" -H "Referer: https://${ip_avi}" "https://${ip_avi}/api/sslkeyandcertificate?page_size=200" \
+      | jq -r --arg t "${tuuid}" '.results[]? | select((.tenant_ref // "") | endswith("/" + $t)) | "\(.uuid) \(.name)"')
+    [ -n "${certs}" ] || return 0
+    while read -r u n; do
+      [ -n "${u}" ] || continue
+      if [ "${dry_run}" == "true" ]; then say "[dry-run] would: delete the Avi certificate ${n} of tenant ${org}"
+      else ( avi_api 2 3 DELETE "" "api/sslkeyandcertificate/${u}" "${org}" ) > /dev/null 2>&1 && ok_say "Avi certificate ${n} of tenant ${org} deleted" || [ "${pass}" == "1" ] || warn "deleting the Avi certificate ${n} failed"; fi
+    done <<< "${certs}"
+    [ "${dry_run}" == "true" ] && return 0
+  done
+}
 del_vcfa_org() { # regional networking (Avi setting, NSX project), vDC, org user, the org
   org_lookup
   [ -n "${org_id}" ] || { say "VCF-A org ${org}: none"; return 0; }
@@ -510,6 +529,7 @@ del_vcfa_org() { # regional networking (Avi setting, NSX project), vDC, org user
         && ok_say "service engine group assignment ${seg_assign} of ${org} removed" || warn "removing the service engine group assignment failed (${response_code}): ${response_body}"
     done
     [ "${dry_run}" == "true" ] || sleep 5
+    avi_clear_tenant_certs
     # the Avi load-balancer setting has to be switched off first, with exactly this body: a PUT that repeats the mode and limits is
     # refused ("Service Engine Group(s) assigned"); VCF-A then also releases the org's Avi tenant
     do_it "switch off the Avi setting of the regional networking ${id}" vcfa_api PUT "cloudapi/v1/regionalNetworkingSettings/${id}/aviSetting" '{"active":false}' 2 5 || warn "switching off the Avi setting failed (${response_code}): ${response_body}"

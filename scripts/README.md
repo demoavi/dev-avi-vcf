@@ -213,7 +213,7 @@ networking / org user, NSX project, namespaces, VKS clusters, deployments). `add
 DNS domains, Gitea user and repo, then `vcfa_provider_bootstrap.sh` and `vcfa_tenant_bootstrap.sh` limited to that org (environment
 variable `VCFA_ORG_ONLY`, read by `functions.sh`; `VCFA_ORG_EXCLUDE` is the opposite), the vCenter isolation, and the blueprint watcher again.
 `delete` is the reverse: Harbor / Avi / vCenter accounts, AKO cleanup (waits for the org's Avi virtual services to go), deployments, VKS
-clusters, virtual machines still in the namespaces (deleted through the VM Operator API, a namespace with a VM in it can get stuck in Terminating), namespaces, watcher, then VCF-A (the Avi setting is switched off with `{"active":false}` first, then regional networking, vDC, the
+clusters, virtual machines still in the namespaces (deleted through the VM Operator API, a namespace with a VM in it can get stuck in Terminating), namespaces, watcher, then VCF-A (the certificates left in the org's Avi tenant, AKO's Gateway CA and the Vault intermediate, are deleted first, otherwise Avi refuses to delete the tenant and the Avi setting stays active; then the setting is switched off with `{"active":false}`, then regional networking, vDC, the
 org), Gitea, Avi DNS domains, Vault login, files, gw account. The org must be in the spec to be added; one that stays in the spec is
 recreated by the next `vcf_bootstrap.sh`. Isolation: an org's vCenter user needs an explicit NoAccess entry on every other org's namespace
 (vCenter shows all namespaces to a user with any grant above them); `add` and `isolate` write them in both directions, `status` checks
