@@ -5,6 +5,7 @@
 #
 #   vcfa_org.sh status <org>
 #   vcfa_org.sh add    <org> [--yes] [--dry-run] [--no-isolate-others]
+#   vcfa_org.sh recreate-vks <org> [--yes] [--dry-run]   delete the org's VKS cluster(s) and create a new one (named <org>-vks-<id>)
 #   vcfa_org.sh isolate <org> [--dry-run]    only the vCenter isolation between <org> and every other org (see below)
 #   vcfa_org.sh delete <org> [--yes] [--dry-run] [--force]   (--force: also an org already handed to a student by gw-org-api)
 #   common: [--json <file>]   the deployment json the pipeline was started with (default $JSON_FILE, else
@@ -31,6 +32,12 @@
 #          tenant leftovers, Gitea user, Avi DNS domains, Vault login, rendered files, gw account (vApp: gw-org-api / gw-accounts
 #          refresh without the org). Everything it removes is only that org's; the other orgs are not touched.
 #
+# recreate-vks  the org stays (account, namespace, VCF-A, Git, Vault, Avi domains, vCenter isolation). Removed: its deployments,
+#          AKO's Avi objects (waits for the Avi tenant to be empty), the VKS cluster(s); the namespace is kept. Then
+#          vcfa_tenant_bootstrap.sh limited to the org creates the new cluster, which is named <org>-vks-<id> (generateName), so VM names
+#          start with "<org>-vks-" (what a DRS VM group can match), and redoes what depends on it: pod security, cert, ArgoCD, the
+#          kubeconfig in /home/<org>/.kube/config.
+#
 # Scope and limits:
 #   - Only orgs defined in the spec can be added. A deleted org that is still in the spec comes back at the next vcf_bootstrap.sh
 #     run: remove it from the spec as well when it must stay gone. In the vApp use case gw-org-api no longer hands it out.
@@ -48,10 +55,10 @@
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() { sed -n 2,44p "$0"; }
 action="${1:-}"; org="${2:-}"
-case "${action}" in status|add|delete|isolate) ;; -h|--help|"") usage; exit 0 ;; *) echo "unknown action: ${action}" >&2; usage >&2; exit 1 ;; esac
+case "${action}" in status|add|delete|isolate|recreate-vks) ;; -h|--help|"") usage; exit 0 ;; *) echo "unknown action: ${action}" >&2; usage >&2; exit 1 ;; esac
 case "${org}" in ""|-*) echo "an org name is needed: vcfa_org.sh ${action} <org>" >&2; exit 1 ;; esac
 shift 2
-assume_yes="false"; force="false"; dry_run="false"; isolate_others="true"; jsonFile="${JSON_FILE:-}"
+keep_namespaces="false"; assume_yes="false"; force="false"; dry_run="false"; isolate_others="true"; jsonFile="${JSON_FILE:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes) assume_yes="true"; shift ;;
@@ -463,6 +470,23 @@ del_workloads() { # deployments, AKO cleanup, VKS clusters, namespaces
     vks_gone() { get_org_token; ns_k8s_api GET "${endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns}/clusters/${vks}" "" "${org_token}"; [ "${response_code}" == "404" ]; }
     wait_until "VKS cluster ${vks} gone" 2400 vks_gone || return 1
   done
+  [ "${keep_namespaces}" == "true" ] && return 0
+  # virtual machines still in the namespaces (not created by a deployment, or left behind by one). The VKS clusters are gone by now, so
+  # their node VMs are not among them; deleting the namespace with a VM in it can leave it stuck in Terminating
+  local vms vm
+  for ns in ${ns_list}; do
+    get_org_token
+    cci_api GET "${ns_api_base}/${ns}" "" "${org_token}"; endpoint=$(echo ${response_body} | jq -r '.status.namespaceEndpointURL // empty'); [ -n "${endpoint}" ] || continue
+    ns_k8s_api GET "${endpoint}" "apis/vmoperator.vmware.com/v1alpha5/namespaces/${ns}/virtualmachines" "" "${org_token}" || { warn "cannot list the virtual machines of ${ns} (${response_code})"; continue; }
+    vms=$(echo ${response_body} | jq -r '.items[]?.metadata.name')
+    [ -n "${vms}" ] || continue
+    for vm in ${vms}; do
+      say "deleting the virtual machine ${vm} (${ns})"
+      do_it "DELETE virtual machine ${vm}" ns_k8s_api DELETE "${endpoint}" "apis/vmoperator.vmware.com/v1alpha5/namespaces/${ns}/virtualmachines/${vm}" "" "${org_token}" || warn "deleting ${vm} failed (${response_code})"
+    done
+    vms_gone() { get_org_token; ns_k8s_api GET "${endpoint}" "apis/vmoperator.vmware.com/v1alpha5/namespaces/${ns}/virtualmachines" "" "${org_token}" && [ "$(echo ${response_body} | jq -r '.items | length')" == "0" ]; }
+    wait_until "virtual machines of ${ns} gone" 900 vms_gone || return 1
+  done
   for ns in ${ns_list}; do
     say "deleting the namespace ${ns}"
     do_it "DELETE namespace ${ns}" cci_api DELETE "${ns_api_base}/${ns}" "" "${org_token}" || { warn "deleting ${ns} failed (${response_code})"; return 1; }
@@ -582,7 +606,23 @@ do_delete() {
   say "done"
 }
 
+do_recreate_vks() {
+  org_lookup
+  [ -n "${org_item}" ] || die "${org} is not in the spec (vcf_a_organizations)"
+  [ "$(echo "${org_item}" | jq -r '.vks_cluster.enabled // false')" == "true" ] || die "${org} has no VKS cluster in the spec (vks_cluster.enabled): nothing would be created again"
+  check_idle
+  say "ABOUT TO DELETE the VKS cluster(s) and the deployments of ${org} and create a new VKS cluster (json ${jsonFile}); the org, its namespace and its accounts stay"
+  if [ "${assume_yes}" != "true" ] && [ "${dry_run}" != "true" ]; then
+    read -r -p "Type yes to recreate the VKS cluster of ${org}: " answer; [ "${answer}" == "yes" ] || die "not confirmed, nothing done"
+  fi
+  keep_namespaces="true"
+  del_workloads || die "the workloads of ${org} could not be removed: stopped, nothing created"
+  run_phase vcfa_tenant_bootstrap only || die "vcfa_tenant_bootstrap.sh failed"
+  say "done"
+}
+
 case "${action}" in
+  recreate-vks) do_recreate_vks ;;
   status) do_status ;;
   add) do_add ;;
   isolate) add_isolation ;;

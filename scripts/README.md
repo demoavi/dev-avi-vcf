@@ -206,18 +206,24 @@ the namespace and VKS cluster, and releases the cleaned orgs (an org whose clean
 `/home/ubuntu/vcfa_tenant_cleaning.log`.
 
 ### Manual tool: `vcfa_org.sh` (not part of the pipeline)
-Adds, deletes or inspects ONE VCF-A org on a running deployment: `vcfa_org.sh status|add|delete|isolate <org> [--yes] [--dry-run] [--json <file>]`
+Adds, deletes or inspects ONE VCF-A org on a running deployment: `vcfa_org.sh status|add|delete|isolate|recreate-vks <org> [--yes] [--dry-run] [--json <file>]`
 (`add` also takes `--no-isolate-others`). `status` prints one line per object (spec, gw account and folders, Vault login, Avi DNS
 domains / tenant / user, Gitea user and repo, Harbor user, vCenter SSO user, permissions and isolation, VCF-A org / vDC / regional
 networking / org user, NSX project, namespaces, VKS clusters, deployments). `add` follows the bootstrap order: gw account, Vault login, Avi
 DNS domains, Gitea user and repo, then `vcfa_provider_bootstrap.sh` and `vcfa_tenant_bootstrap.sh` limited to that org (environment
 variable `VCFA_ORG_ONLY`, read by `functions.sh`; `VCFA_ORG_EXCLUDE` is the opposite), the vCenter isolation, and the blueprint watcher again.
 `delete` is the reverse: Harbor / Avi / vCenter accounts, AKO cleanup (waits for the org's Avi virtual services to go), deployments, VKS
-clusters, namespaces, watcher, then VCF-A (the Avi setting is switched off with `{"active":false}` first, then regional networking, vDC, the
+clusters, virtual machines still in the namespaces (deleted through the VM Operator API, a namespace with a VM in it can get stuck in Terminating), namespaces, watcher, then VCF-A (the Avi setting is switched off with `{"active":false}` first, then regional networking, vDC, the
 org), Gitea, Avi DNS domains, Vault login, files, gw account. The org must be in the spec to be added; one that stays in the spec is
 recreated by the next `vcf_bootstrap.sh`. Isolation: an org's vCenter user needs an explicit NoAccess entry on every other org's namespace
 (vCenter shows all namespaces to a user with any grant above them); `add` and `isolate` write them in both directions, `status` checks
 them. Refuses to run while a bootstrap phase runs; `delete` asks for `yes`. Log: `/home/ubuntu/vcfa_org.log`.
+`recreate-vks <org>` keeps the org (account, namespace, VCF-A, Git, Vault, Avi domains, isolation) and replaces its VKS cluster: deployments,
+AKO's Avi objects and the cluster(s) are deleted (namespace kept), then `vcfa_tenant_bootstrap.sh` limited to the org builds a new cluster and
+redoes pod security, cert, ArgoCD and `/home/<org>/.kube/config` (about 20 min on the sddc lab). VM names: the cluster is called
+`<org>-vks-<id>` (generateName), so its nodes are `<org>-vks-<id>-...`; blueprint VMs are `<namespace>-<deployment>-N` and the namespace is
+`<org>-ns-<id>`. Every VM of an org therefore starts with `<org>-` (the dash keeps `org-1-` from matching `org-10-`), which is what a DRS VM
+group per org can match (groups are static lists: something has to refresh them, like the cron of `dedicated-host-placement.sh`).
 
 ### Manual tool: `api-monitor.sh` (not part of the pipeline)
 Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 3] [--edge-interval 10] [--out dir]`
@@ -345,7 +351,7 @@ Scripts not listed do nothing per org.
 | `avi-bootstrap.sh` | Three DNS service domains per org: `<org>.<domain>`, `<org>-vks.<domain>`, `<org>-gitops.<domain>`. (The Avi tenant itself is created by VCF-A, see provider script.) |
 | `git-bootstrap.sh` | Gitea user `<org>` (derived password) owning one private repo `<org>/<git_repo_name>`. |
 | `vcfa_provider_bootstrap.sh` | Renders the GitOps manifests (`gitops/*/*.yaml`, hostnames `<route>.<org>-gitops.<domain>`; existing files are kept) and the demo yaml (`<org>-vks.<domain>`) into `/home/<org>/`; creates the VCF-A **organization**, its **vDC** (CPU/memory/storage limits), VM classes, **regional networking settings** (NSX project, with a delete+recreate retry if it is not really backed), the **Avi setting** (PROVIDER_MANAGED tenant + quota + SEG, when `enable_avi`), and the **org admin user** `<org>` (Organization Administrator). Skips what already exists. |
-| `vcfa_tenant_bootstrap.sh` | Per org, with a fresh org-scoped token: **supervisor namespace** (PROVIDER_MANAGED orgs; class, limits, VM Service content library binding); **Vault integration** (cert-manager token Secret + Issuer in the namespace, if `vault_integration`); **VKS cluster** (1 per org) then waits for Available, fetches its kubeconfig, sets pod security and the `cert01` TLS secret; **ArgoCD** in that VKS cluster (`argocd.<org>-vks.<domain>`, if enabled); **blueprints** created and released in the org's project; **accounts**: vCenter SSO `<org>@<sso domain>` scoped to the org's namespace (siblings NoAccess), Avi `Tenant-Admin` `<org>` in tenant `<org>`, Harbor read-only user `<org>` (no NSX user: one shared account, see `nsx-bootstrap.sh`). |
+| `vcfa_tenant_bootstrap.sh` | Per org, with a fresh org-scoped token: **supervisor namespace** (PROVIDER_MANAGED orgs; class, limits, VM Service content library binding); **Vault integration** (cert-manager token Secret + Issuer in the namespace, if `vault_integration`); **VKS cluster** (1 per org, named `<org>-vks-<id>`) then waits for Available, fetches its kubeconfig, sets pod security and the `cert01` TLS secret; **ArgoCD** in that VKS cluster (`argocd.<org>-vks.<domain>`, if enabled); **blueprints** created and released in the org's project; **accounts**: vCenter SSO `<org>@<sso domain>` scoped to the org's namespace (siblings NoAccess), Avi `Tenant-Admin` `<org>` in tenant `<org>`, Harbor read-only user `<org>` (no NSX user: one shared account, see `nsx-bootstrap.sh`). |
 | `supervisor-blueprint-watcher.sh` | Role + RoleBinding in each org namespace (auto_update orgs only) and a target entry in `blueprint-watcher-targets`. |
 
 All per-org accounts share the single derived password of `gw-accounts.sh`.

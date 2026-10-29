@@ -898,7 +898,8 @@ ARGOCD_GATEWAY_EOF
       # specific resource constraint (e.g. underlying vSAN capacity) on
       # that particular namespace/org, not a payload or script issue.
       #
-      # Idempotency is by PRESENCE, not name (the API only supports
+      # The cluster is named <org>-vks-<id> (generateName "<org>-vks-"), so its VMs start with the org's name (DRS VM groups, vCenter
+      # filters). Idempotency is by PRESENCE, not name (the API only supports
       # generateName, never a fixed name) - "one default cluster per
       # org" is the intent per vks_cluster's simple enable/disable model,
       # so if ANY cluster already exists in the namespace, none is
@@ -943,9 +944,9 @@ ARGOCD_GATEWAY_EOF
               os_configuration_json=$(jq -n --rawfile ca "${harbor_ca_cert_path}" \
                 '{name: "osConfiguration", value: {trust: {additionalTrustedCAs: [{caCert: {content: $ca}}]}}}')
             fi
-            vks_json=$(jq -n --arg ns "${ns_name}" --arg storagename "${storage_class_k8s_name}" --argjson osconfig "${os_configuration_json}" \
+            vks_json=$(jq -n --arg ns "${ns_name}" --arg prefix "${org_name}-vks-" --arg storagename "${storage_class_k8s_name}" --argjson osconfig "${os_configuration_json}" \
               '{apiVersion: "cluster.x-k8s.io/v1beta2", kind: "Cluster",
-                metadata: {generateName: "vks-cluster-", namespace: $ns},
+                metadata: {generateName: $prefix, namespace: $ns},
                 spec: {
                   clusterNetwork: {serviceDomain: "cluster.local", pods: {cidrBlocks: ["192.168.156.0/20"]}, services: {cidrBlocks: ["10.96.0.0/12"]}},
                   topology: {
