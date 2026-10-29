@@ -220,7 +220,7 @@ recreated by the next `vcf_bootstrap.sh`. Isolation: an org's vCenter user needs
 them. Refuses to run while a bootstrap phase runs; `delete` asks for `yes`. Log: `/home/ubuntu/vcfa_org.log`.
 
 ### Manual tool: `api-monitor.sh` (not part of the pipeline)
-Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 3] [--out dir]`
+Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 3] [--edge-interval 10] [--out dir]`
 calls vCenter, NSX, Avi, VCF-A (provider login + orgs list, first org's login + session, the org CCI API through the token exchange,
 the UI), the Supervisor's `:6443/readyz`, `kubectl get nodes` on the Supervisor and on the first org's VKS cluster (private kubeconfigs, the gw's own kubectl contexts are not touched; ok = every node Ready), the VCF Installer, each ESX host, Vault, Harbor, Git, the gw and Avi DNS and (vApp) VCD, with
 credentials derived from `variables.sh`. Targets run in parallel; within a target one call is made every interval (3 s) **only if the
@@ -231,6 +231,10 @@ files are also copied to nginx (`/var/www/html/api-monitor/<timestamp>/`, needs 
 (`http://<gw address>/api-monitor/<timestamp>/report.html`) is printed at the start and the end and logged in `monitor.log`. A failed
 sample's code is `000:<curl exit code>` (28 timeout, 7 refused, 6 DNS, 35/60 TLS). `--report <dir>` rebuilds and republishes a report.
 Read-only except for the sessions it logs in to.
+NSX Edge nodes: besides the targets, a collector reads every Edge transport node from NSX every `--edge-interval` seconds (default 10;
+`/api/v1/transport-nodes/<id>/status` and `/state`: node, tunnel and NIC status, datapath (DPDK) and other CPU, load, memory) into
+`edge.csv`/`edge.tsv`; the report adds an "NSX Edge nodes" section with the figures per Edge, inside against outside the outage windows
+and the Edge values around each outage. NSX refreshes these figures only about every 15-30 s, so they show sustained load, not a 5 s stall.
 
 ### Helpers
 `functions.sh` (log_notify, vcd_login, vcfa_login/vcfa_api, `vcfa_health_gate`, `chown_org_or_ubuntu`, avi/nsx/vcenter API helpers, `find_org_manifest`). Sourcing it also

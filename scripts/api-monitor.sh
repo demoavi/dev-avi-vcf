@@ -5,7 +5,7 @@
 # per-target availability, latency percentiles, every outage window (start, end, duration, HTTP codes) and the moments where
 # several targets were down together (a shared cause, e.g. the ESX host or the storage, rather than one broken service).
 #
-#   bash api-monitor.sh [json file] [--duration <seconds>] [--interval <seconds>] [--out <dir>]
+#   bash api-monitor.sh [json file] [--duration <seconds>] [--interval <seconds>] [--edge-interval <seconds>] [--out <dir>]
 #   bash api-monitor.sh --report <dir>        # rebuild the report of an earlier run
 #
 # Defaults: json /home/ubuntu/json/deployment.json, 1800 s (30 min), one call per target every 3 s, out /home/ubuntu/api-monitor/<timestamp>. Meant to be
@@ -24,12 +24,19 @@
 # Targets: vcenter, vcenter-login (only when a re-login was needed), nsx, avi, vcfa-system, vcfa-system-login, vcfa-org,
 # vcfa-org-cci, vcfa-ui, supervisor, installer, esxi-<n>, vault, harbor, git, dns-gw, dns-avi, vcd (vApp use case).
 #
+# NSX Edge nodes (not a target, no availability figure): every --edge-interval seconds (default 10; NSX only refreshes these figures about every 15-30 s) the status of each Edge transport
+# node is read from NSX (/api/v1/transport-nodes/<id>/status and /state: node and tunnel status, CPU of the datapath (DPDK) and the
+# other cores, load, memory) into edge.csv, and the report shows them for the moments the targets were down, to tell whether the
+# overlay datapath (T0/T1 on the Edge) was busy or stalled when the Supervisor/VKS/git/harbor VIPs timed out. NSX's own alarms
+# (Edge down, tunnels down, T0/T1 failover, ...) are read every 30 s into alarms.json and listed next to the outages.
+#
 # Do not edit this script while it is running (bash reads scripts incrementally).
 #
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 duration=1800
 interval=3
+edge_interval=10
 out=""
 jsonFile="/home/ubuntu/json/deployment.json"
 report_only=""
@@ -37,6 +44,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --duration) duration="${2:?}"; shift 2 ;;
     --interval) interval="${2:?}"; shift 2 ;;
+    --edge-interval) edge_interval="${2:?}"; shift 2 ;;
     --out) out="${2:?}"; shift 2 ;;
     --report) report_only="${2:?}"; shift 2 ;;
     -h|--help) sed -n 2,26p "$0"; exit 0 ;;
@@ -194,6 +202,151 @@ if wins:
 else:
     L.append("None - no two targets were down at the same time.")
 L.append("")
+# ---- NSX Edge nodes (edge.csv / edge.tsv, written by the collector): own figures, then what the Edges did while targets were down
+def fl(v):
+    try:
+        return float(v)
+    except ValueError:
+        return None
+def outage_clusters():
+    """outages of all targets (login probes excluded), less than 4 s apart merged: [start, end, {targets}]"""
+    cl = []
+    for name, s0, e0, n0, c0 in sorted((o for o in outages if not o[0].endswith("-login")), key=lambda o: o[1]):
+        if cl and s0 - cl[-1][1] <= 4:
+            cl[-1][1] = max(cl[-1][1], e0 + IV); cl[-1][2].add(name)
+        else:
+            cl.append([s0, e0 + IV, {name}])
+    return cl
+edge = collections.defaultdict(list)   # node -> [(ts, api code, api s, state, status, mgmt, ctrl, tunnel, pnic, {metric: value})]
+EM = ["load1", "dpdk avg %", "dpdk max %", "other avg %", "other max %", "system mem %", "datapath mem %", "datapath heap %", "datapath pool max %"]
+try:
+    with open(os.path.join(d, "edge.csv")) as f:
+        for line in f:
+            p = line.rstrip("\n").split("|")
+            if len(p) < 5:
+                continue
+            p += [""] * (19 - len(p))
+            t = fl(p[0])
+            if t is None:
+                continue
+            edge[p[1]].append((t, p[2], fl(p[3]) or 0.0, p[4], p[5], p[6], p[7], p[8], p[9], dict(zip(EM, [fl(v) for v in p[10:19]]))))
+except OSError:
+    pass
+einfo = {}
+try:
+    with open(os.path.join(d, "edge.tsv")) as f:
+        for line in f:
+            p = line.rstrip("\n").split("\t")
+            if p and p[0]:
+                c = (p[3].split("|") + ["", ""])[:2] if len(p) > 3 else ["", ""]
+                einfo[p[0]] = f"{p[2] or '?'}, {c[0] or '?'} cores ({c[1] or '?'} datapath)"
+except OSError:
+    pass
+try:
+    EI = float(meta.get("edge_interval") or 10)
+except ValueError:
+    EI = 10.0
+etab1 = []   # per node figures
+etab2 = []   # per cluster of outages
+etab3 = []   # inside the outage windows vs outside
+etext = []
+if edge:
+    def mx(v):
+        v = [x for x in v if x is not None]
+        return max(v) if v else None
+    def av(v):
+        v = [x for x in v if x is not None]
+        return sum(v) / len(v) if v else None
+    def f1(v):
+        return "-" if v is None else f"{v:.1f}"
+    for n in sorted(edge):
+        r = edge[n]
+        notup = sum(1 for x in r if x[1] == "200" and (x[4] != "UP" or x[3] not in ("NODE_READY", "")))
+        linkdown = sum(1 for x in r if x[1] == "200" and any(y not in ("UP", "") for y in x[5:9]))
+        apifail = sum(1 for x in r if x[1] != "200")
+        m = lambda k: [x[9][k] for x in r]
+        etab1.append((n, einfo.get(n, ""), len(r), apifail, pct([x[2] for x in r], .95), notup, linkdown,
+                      f1(av(m("load1"))) + " / " + f1(mx(m("load1"))), f1(mx(m("dpdk max %"))), f1(mx(m("other max %"))),
+                      f1(mx(m("system mem %"))), f1(mx(m("datapath pool max %")))))
+    cl = outage_clusters()
+    wlo = [(c[0] - EI, c[1] + EI) for c in cl]
+    def inside(t):
+        return any(a <= t <= b for a, b in wlo)
+    for c in cl:
+        cells = []
+        for n in sorted(edge):
+            rs = [x for x in edge[n] if c[0] - EI <= x[0] <= c[1] + EI]
+            if not rs:
+                cells.append("no sample")
+                continue
+            cells.append("load " + f1(mx([x[9]["load1"] for x in rs])) + ", dpdk " + f1(mx([x[9]["dpdk max %"] for x in rs])) +
+                         ", other " + f1(mx([x[9]["other max %"] for x in rs])) + ", mem " + f1(mx([x[9]["system mem %"] for x in rs])) +
+                         (f", api fail {sum(1 for x in rs if x[1] != '200')}" if any(x[1] != "200" for x in rs) else ""))
+        etab2.append((hms(c[0]), hms(c[1]), ", ".join(sorted(c[2])), cells))
+    for n in sorted(edge):
+        for k in ("load1", "dpdk max %", "other max %", "system mem %", "datapath pool max %"):
+            vin = [x[9][k] for x in edge[n] if inside(x[0])]
+            vout = [x[9][k] for x in edge[n] if not inside(x[0])]
+            etab3.append((n, k, f1(av(vin)), f1(av(vout)), f1(mx(vin)), f1(mx(vout)), len([v for v in vin if v is not None])))
+    etext.append(f"Edge nodes are read from NSX every {EI:g} s; the outage windows below are widened by one edge interval on both sides. CPU 'dpdk' = datapath cores, 'other' = the remaining cores. 'api fail' = NSX did not return the Edge status in 4 s.")
+    L.append("## NSX Edge nodes")
+    L.append("")
+    L.append(etext[0])
+    L.append("")
+    L.append("| edge | size | samples | api failures | api p95 s | not ready | link/tunnel not up | load1 avg / max | dpdk cpu max % | other cpu max % | system mem max % | datapath pool max % |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for r in etab1:
+        L.append("| " + " | ".join(str(v) if not isinstance(v, float) else f"{v:.2f}" for v in r) + " |")
+    L.append("")
+    L.append("Edge values inside the outage windows (any target down) against the rest of the run:")
+    L.append("")
+    L.append("| edge | metric | avg inside | avg outside | max inside | max outside | samples inside |")
+    L.append("|---|---|---|---|---|---|---|")
+    for r in etab3:
+        L.append("| " + " | ".join(str(v) for v in r) + " |")
+    L.append("")
+    L.append("Edge values around each outage (max of the samples in the window):")
+    L.append("")
+    L.append("| from | to | targets | " + " | ".join(sorted(edge)) + " |")
+    L.append("|---|---|---|" + "---|" * len(edge))
+    for r in etab2:
+        L.append(f"| {r[0]} | {r[1]} | {r[2]} | " + " | ".join(r[3]) + " |")
+    L.append("")
+# ---- NSX alarms raised during the run (alarms.json, read from NSX every 30 s) against the outages
+import json
+atab = []     # (onset, resolved, severity, type, node, reason, matching outage targets)
+atext = []
+try:
+    with open(os.path.join(d, "alarms.json")) as f:
+        al = json.load(f)
+except (OSError, ValueError):
+    al = None
+if al is not None:
+    TOL = 60.0   # NSX stamps alarms with a coarse clock (30 s granularity) and raises them a little after the event
+    cl2 = outage_clusters()
+    mine = sorted((a for a in al if a.get("t") and all_start - TOL <= a["t"] / 1000.0 <= all_end + TOL), key=lambda a: a["t"])
+    hit_cl = set()
+    for a in mine:
+        t = a["t"] / 1000.0
+        near = [i for i, c in enumerate(cl2) if c[0] - TOL <= t <= c[1] + TOL]
+        hit_cl.update(near)
+        tg = sorted(set().union(*[cl2[i][2] for i in near])) if near else []
+        atab.append((hms(t), hms(a["r"] / 1000.0) if a.get("r") else "-", a.get("severity", ""), a.get("type", ""), a.get("node", ""), a.get("reason", ""), ", ".join(tg) or "none"))
+    atext.append(f"{len(mine)} NSX alarm(s) were raised during the run. An alarm is matched to an outage when its onset is within {TOL:.0f} s of it. "
+                 f"{sum(1 for r in atab if r[6] != 'none')} of {len(mine)} alarms have an outage near them; {len(hit_cl)} of {len(cl2)} outage clusters have an alarm near them. "
+                 "Alarms are not raised for every short stall, so an outage without one is not proof of a different cause.")
+    L.append("## NSX alarms during the run")
+    L.append("")
+    L.append(atext[0])
+    L.append("")
+    if atab:
+        L.append("| onset | resolved | severity | alarm | node | reason | outages near it |")
+        L.append("|---|---|---|---|---|---|---|")
+        for r in atab:
+            L.append("| " + " | ".join(r) + " |")
+    else:
+        L.append("None.")
+    L.append("")
 L.append("Skipped ticks: the previous call of that target was still running (hung until its 5 s timeout), so no new call was made; not counted as samples or failures. A failed sample then stands for the whole 5 s it lasted.")
 L.append("")
 L.append("Raw samples: samples.csv (ts|target|http_code|seconds|ok). Code 000 = timeout or connection refused (5 s limit).")
@@ -255,8 +408,29 @@ if wins:
     h.append("</table>")
 else:
     h.append("<p>None - no two targets were down at the same time.</p>")
+if edge:
+    h.append("<h2>NSX Edge nodes</h2><p>" + H.escape(etext[0]) + "</p>")
+    h.append("<table><tr><th>edge</th><th>size</th><th>samples</th><th>api failures</th><th>api p95 s</th><th>not ready</th><th>link/tunnel not up</th><th>load1 avg / max</th><th>dpdk cpu max %</th><th>other cpu max %</th><th>system mem max %</th><th>datapath pool max %</th></tr>")
+    for r in etab1:
+        h.append("<tr>" + "".join(f"<td>{H.escape(f'{v:.2f}' if isinstance(v, float) else str(v))}</td>" for v in r) + "</tr>")
+    h.append("</table><h3>Inside the outage windows (any target down) against the rest of the run</h3><table><tr><th>edge</th><th>metric</th><th>avg inside</th><th>avg outside</th><th>max inside</th><th>max outside</th><th>samples inside</th></tr>")
+    for r in etab3:
+        h.append("<tr>" + "".join(f"<td>{H.escape(str(v))}</td>" for v in r) + "</tr>")
+    h.append("</table><h3>Around each outage (max of the Edge samples in the window)</h3><table><tr><th>from</th><th>to</th><th>targets</th>" + "".join(f"<th>{H.escape(n)}</th>" for n in sorted(edge)) + "</tr>")
+    for r in etab2:
+        h.append(f"<tr><td>{r[0]}</td><td>{r[1]}</td><td style='text-align:left'>{H.escape(r[2])}</td>" + "".join(f"<td style='text-align:left'>{H.escape(c)}</td>" for c in r[3]) + "</tr>")
+    h.append("</table>")
+if al is not None:
+    h.append("<h2>NSX alarms during the run</h2><p>" + H.escape(atext[0]) + "</p>")
+    if atab:
+        h.append("<table><tr><th>onset</th><th>resolved</th><th>severity</th><th>alarm</th><th>node</th><th>reason</th><th>outages near it</th></tr>")
+        for r in atab:
+            h.append("<tr>" + "".join(f"<td style='text-align:left'>{H.escape(str(v))}</td>" for v in r) + "</tr>")
+        h.append("</table>")
+    else:
+        h.append("<p>None.</p>")
 h.append("<p class='muted'>Code 000:N = no HTTP answer, N is curl's exit code (28 timeout, 7 refused, 6 DNS, 35/60 TLS). A skipped tick means the previous call of that target was still running, so no new call was made. "
-         "Raw data: <a href='samples.csv'>samples.csv</a>, <a href='errors.log'>errors.log</a> (kubectl error texts), <a href='skipped.csv'>skipped.csv</a>, <a href='monitor.log'>monitor.log</a>, <a href='report.md'>report.md</a>.</p></body></html>")
+         "Raw data: <a href='samples.csv'>samples.csv</a>, <a href='errors.log'>errors.log</a> (kubectl error texts), <a href='skipped.csv'>skipped.csv</a>, <a href='monitor.log'>monitor.log</a>, <a href='report.md'>report.md</a>, <a href='edge.csv'>edge.csv</a> (NSX Edge node stats), <a href='alarms.json'>alarms.json</a> (NSX alarms).</p></body></html>")
 open(os.path.join(d, "report.html"), "w").write("\n".join(h))
 print(text)
 PYEOF
@@ -269,7 +443,7 @@ publish() {
   run=$(basename "${d}"); web="/var/www/html/api-monitor/${run}"
   [ -d /var/www/html ] || return 1
   sudo mkdir -p "${web}" || return 1
-  for f in report.html report.md samples.csv skipped.csv monitor.log meta.txt targets.tsv errors.log; do
+  for f in report.html report.md samples.csv skipped.csv monitor.log meta.txt targets.tsv errors.log edge.csv edge.tsv alarms.json; do
     [ -f "${d}/${f}" ] && sudo cp "${d}/${f}" "${web}/"
   done
   sudo chmod -R a+rX /var/www/html/api-monitor
@@ -525,6 +699,69 @@ dns_probe() { # target server name
 p_dns_gw() { dns_probe dns-gw 127.0.0.1 "${vc_host}"; }
 p_dns_avi() { dns_probe dns-avi "${ip_avi_dns}" "harbor.${sub}.${domain}"; }
 
+# --- NSX Edge nodes: one extra collector (not a target) --------------------------------------------------------------
+# edge.tsv: name|id|form factor|cpu cores|dpdk cores (once); edge.csv: ts|node|api code|api s|deployment state|status|mgmt|control|
+# tunnel|pnic|load1|dpdk avg %|dpdk max %|other avg %|other max %|system mem %|datapath mem %|datapath heap %|datapath pool max %
+edge_jq='def r: if . == null then "" else ((. * 100 | round) / 100) end;
+  .node_status.system_status as $s | [(.status // ""), (.mgmt_connection_status // ""), (.control_connection_status.status // ""),
+  (.tunnel_status.status // ""), (.pnic_status.status // ""), ($s.load_average[0] | r),
+  ($s.cpu_usage.avg_cpu_core_usage_dpdk | r), ($s.cpu_usage.highest_cpu_core_usage_dpdk | r),
+  ($s.cpu_usage.avg_cpu_core_usage_non_dpdk | r), ($s.cpu_usage.highest_cpu_core_usage_non_dpdk | r),
+  ($s.edge_mem_usage.system_mem_usage | r), ($s.edge_mem_usage.datapath_total_usage | r),
+  ($s.edge_mem_usage.datapath_mem_usage_details.datapath_heap_usage | r),
+  ($s.edge_mem_usage.datapath_mem_usage_details.highest_datapath_mem_pool_usage | r)] | map(tostring) | join("|")'
+nsx_get() { curl -sk -m 4 --connect-timeout 3 -u "admin:${generic_password}" "$@"; }   # nsx_get [-o file -w fmt] <url>
+edge_one() { # node-id name
+  local id="$1" name="$2" f r code t fields st
+  f=$(mktemp "${out}/.state/edge.XXXXXX") || return
+  r=$(nsx_get -o "${f}" -w '%{http_code} %{time_total}' "https://${nsx_host}/api/v1/transport-nodes/${id}/status" 2>/dev/null)
+  [ -z "${r}" ] && r="000 4.000"
+  code="${r% *}"; t="${r#* }"; fields=""
+  [ "${code}" == "200" ] && fields=$(jq -r "${edge_jq}" "${f}" 2>/dev/null)
+  st=$(nsx_get "https://${nsx_host}/api/v1/transport-nodes/${id}/state" 2>/dev/null | jq -r '.node_deployment_state.state // ""' 2>/dev/null)
+  rm -f "${f}"
+  printf '%s|%s|%s|%s|%s|%s\n' "$(date +%s.%N | cut -c1-14)" "${name}" "${code}" "${t}" "${st}" "${fields:-|||||||||||||}" >> "${out}/edge.csv"
+}
+edge_loop() {
+  local t0 t1 rem id name
+  while [ "$(date +%s)" -lt "${end_ts}" ]; do
+    t0=$(date +%s%N)
+    while IFS=$'\t' read -r name id _; do edge_one "${id}" "${name}" & done < "${out}/edge.tsv"
+    wait   # one cycle at a time: a slow NSX answer delays the next cycle instead of piling up calls
+    t1=$(date +%s%N)
+    rem=$(( edge_interval * 1000000000 - (t1 - t0) ))
+    [ "${rem}" -gt 0 ] && sleep "$(awk -v r="${rem}" 'BEGIN{printf "%.3f", r/1e9}')"
+  done
+}
+# NSX alarms (history included): the whole list is re-read every 30 s into alarms.json (only the fields the report needs), and once more
+# at the end, so alarms raised and resolved between two reads are still there. An alarm's onset is its _create_time.
+alarm_fetch() {
+  local f
+  f=$(mktemp "${out}/.state/alarms.XXXXXX") || return
+  if [ "$(curl -sk -m 20 --connect-timeout 3 -u "admin:${generic_password}" -o "${f}" -w '%{http_code}' "https://${nsx_host}/api/v1/alarms?page_size=1000" 2>/dev/null)" == "200" ] \
+     && jq -c '[.results[]? | {t: (._create_time // .last_reported_time), r: (.resolved_time // 0), status: .status, severity: .severity, feature: .feature_name, type: .event_type, node: (.node_display_name // .entity_id // ""), reason: (.runtime_data // "")}]' "${f}" > "${f}.json" 2>/dev/null; then
+    mv -f "${f}.json" "${out}/alarms.json"
+  fi
+  rm -f "${f}" "${f}.json"
+}
+alarm_loop() {
+  while [ "$(date +%s)" -lt "${end_ts}" ]; do
+    alarm_fetch
+    sleep 30
+  done
+  alarm_fetch
+}
+edge_start() { # fills edge.tsv, returns 1 when NSX has no Edge node to read
+  local list id name ff st
+  : > "${out}/edge.tsv"; : > "${out}/edge.csv"
+  list=$(nsx_get "https://${nsx_host}/api/v1/transport-nodes?node_types=EdgeNode" 2>/dev/null | jq -r '.results[]? | [.display_name, .node_id, (.node_deployment_info.deployment_config.form_factor // "")] | @tsv' 2>/dev/null)
+  [ -z "${list}" ] && return 1
+  while IFS=$'\t' read -r name id ff; do
+    st=$(nsx_get "https://${nsx_host}/api/v1/transport-nodes/${id}/status" 2>/dev/null | jq -r '.node_status.system_status | [.cpu_cores, .dpdk_cpu_cores] | map(tostring) | join("|")' 2>/dev/null)
+    printf '%s\t%s\t%s\t%s\n' "${name}" "${id}" "${ff}" "${st}" >> "${out}/edge.tsv"
+  done <<< "${list}"
+}
+
 # --- start the loops (skip targets without an address) ---------------------------------------------------------------
 pids=()
 start() { # name function address-to-test [request] [auth] [ok meaning]   (skipped when the address is empty)
@@ -538,6 +775,7 @@ start() { # name function address-to-test [request] [auth] [ok meaning]   (skipp
   echo "started=$(date '+%Y-%m-%d %H:%M:%S')"
   echo "duration=${duration}"
   echo "interval=${interval}"
+  echo "edge_interval=${edge_interval}"
   echo "host=$(hostname -f 2>/dev/null || hostname) ($(ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1))"
   echo "deployment=${deployment_kind} ${basename_sddc}.${domain}"
 } > "${out}/meta.txt"
@@ -582,6 +820,18 @@ for ip in $(echo "${ips_esxi:-[]}" | jq -r '.[]'); do
   start "esxi-${n}" "p_esxi${n}" "${ip}" "GET https://${ip}/ (ESXi host ${n}$(echo "${names_esxi:-[]}" | jq -r ".[$((n-1))] // empty | if . != \"\" then \": \" + . else \"\" end"))" "none" "200 or 3xx"
 done
 mlog "started ${#pids[@]} probes"
+if [ -n "${nsx_host}" ] && edge_start; then
+  edge_loop &
+  pids+=($!)
+  mlog "NSX Edge stats: $(cut -f1 "${out}/edge.tsv" | paste -sd, -) every ${edge_interval} s (edge.csv)"
+else
+  mlog "skipped NSX Edge stats: no Edge transport node found"
+fi
+if [ -n "${nsx_host}" ]; then
+  alarm_loop &
+  pids+=($!)
+  mlog "NSX alarms read every 30 s (alarms.json)"
+fi
 # the report is rebuilt and published every 60 s, so it can be watched while the test runs
 live_report() {
   while [ "$(date +%s)" -lt "${end_ts}" ]; do
