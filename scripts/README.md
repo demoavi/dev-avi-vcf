@@ -248,6 +248,17 @@ NSX Edge nodes: besides the targets, a collector reads every Edge transport node
 `edge.csv`/`edge.tsv`; the report adds an "NSX Edge nodes" section with the figures per Edge, inside against outside the outage windows
 and the Edge values around each outage. NSX refreshes these figures only about every 15-30 s, so they show sustained load, not a 5 s stall.
 
+### Guardrail: `enforce-vs-placement.sh` (cron, installed by `vcfa_tenant_bootstrap.sh`, vApp only)
+Keeps every org's Avi virtual services on ONE service engine (SE): an SE has 9 data vNICs and needs one per org network it serves, so an org spread over
+several SEs takes a vNIC on each; with one SE per org, 2 SEs carry up to 18 orgs. `bash enforce-vs-placement.sh <json> [--dry-run] [--org <org>] [--no-delete-idle-se]`; vApp use case only (the sddc use case runs 2-3 orgs and does not need it, like `dedicated-host-placement.sh`);
+`--install-cron [--no-delete-idle-se]` puts it in ubuntu's crontab every 5 minutes (log `/home/ubuntu/enforce-vs-placement.log`). `vcfa_tenant_bootstrap.sh` installs it at its end in the vApp use case (a rerun or `vcfa_org.sh add` replaces the same entry).
+Per Avi tenant other than admin: the anchor is the VKS control-plane VIP VS (the only normal VS of the tenant; else the one whose cluster has AKO VSes), its SE is
+the org's SE; every other parent or normal VS on another SE is moved there with `POST api/virtualservice/<uuid>/migrate` (`to_new_se: false`), child VSes
+(HTTPRoutes) follow their parent. An ArgoCD VS that was not on the SE of the VKS VS is reported with `log_notify` (once, again after it was fixed) and moved. Only when
+nothing is left to move: an SE with no VS is removed (unless `--no-delete-idle-se`), after two idle runs and 10 minutes online, when its SE group has `buffer_se` 0
+(with `buffer_se` 1 Avi creates the SE again at once, it is the buffer: reported once, set `buffer_se: 0` on the group) and keeps more than `min_se` SEs; with
+`--no-delete-idle-se` it is only reported. A tenant without a VKS control-plane VIP VS is left alone. Skips the run while a bootstrap phase or `vcfa_org.sh` runs. A move takes the VS out for a few seconds.
+
 ### Helpers
 `functions.sh` (log_notify, vcd_login, vcfa_login/vcfa_api, `vcfa_health_gate`, `chown_org_or_ubuntu`, avi/nsx/vcenter API helpers, `find_org_manifest`). Sourcing it also
 fails the phase at once when `gw_accounts_secret` is empty or the text `null` (what `jq -r` prints for a missing key): every per-org

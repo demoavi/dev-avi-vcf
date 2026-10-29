@@ -1358,5 +1358,11 @@ else
 fi
 unset GOVC_URL GOVC_USERNAME GOVC_PASSWORD GOVC_INSECURE GOVC_PERSIST_SESSION
 
+# vApp use case (up to 18 orgs on 2 Avi SEs): a cron that keeps every org's virtual services on one SE and removes idle SEs
+# (enforce-vs-placement.sh, every 5 minutes; --install-cron replaces its own entry, so a rerun or vcfa_org.sh add is harmless). Not for sddc.
+if [ "${deployment_kind}" == "vApp" ]; then
+  bash "${script_dir}/enforce-vs-placement.sh" "${jsonFile}" --install-cron
+fi
+
 log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: End of ${0%.*}.sh" "${log_file}" "${slack_webhook}" "${google_webhook}"
 touch "${resultFile}"
