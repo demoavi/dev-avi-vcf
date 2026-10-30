@@ -82,11 +82,15 @@ av() { # endpoint [tenant] [curl args...]
 # One plan per org tenant: the anchor VS and its SE, and the VSes to move. Markers and type only exist on the VS objects, the SE of a VS
 # only in the inventory; they are joined by uuid.
 make_plan() {
-  local inv full
-  inv=$(av "virtualservice-inventory?page_size=200&include_name=true" "*")
-  full=$(av "virtualservice?page_size=200&include_name=true" "*")
-  jq -n -c --argjson inv "${inv:-null}" --argjson full "${full:-null}" --arg only "${only_org}" '
-    def mk($k): ([.markers[]? | select(.key == $k) | .values[0]] | first // "");
+  local invf fullf
+  # through files: with 12 orgs each answer is over 128 KB, the limit of one command line argument (--argjson would fail)
+  invf=$(mktemp); fullf=$(mktemp)
+  av "virtualservice-inventory?page_size=200&include_name=true" "*" > "${invf}"
+  av "virtualservice?page_size=200&include_name=true" "*" > "${fullf}"
+  [ -s "${invf}" ] && [ -s "${fullf}" ] || { rm -f "${invf}" "${fullf}"; return 0; }   # Avi did not answer: empty plan, the caller reports it
+  jq -n -c --slurpfile invs "${invf}" --slurpfile fulls "${fullf}" --arg only "${only_org}" '
+    ($invs[0] // null) as $inv | ($fulls[0] // null) as $full
+    | def mk($k): ([.markers[]? | select(.key == $k) | .values[0]] | first // "");
     ($inv.results // [] | map({key: .uuid, value: {se: (.runtime.vip_summary[0].service_engine[0].uuid // ""), sen: (.runtime.vip_summary[0].service_engine[0].url // "" | split("#")[-1]), vip: (.runtime.vip_summary[0].vip_id // "0")}}) | from_entries) as $m
     | [($full.results // [])[] | select((.tenant_ref | split("#")[-1]) as $t | $t != "admin" and ($only == "" or $t == $only))]
     | group_by(.tenant_ref | split("#")[-1])
@@ -101,6 +105,7 @@ make_plan() {
          moves: (if $se == "" then [] else [$vs[] | select(.type != "VS_TYPE_VH_CHILD" and .uuid != $a.uuid)
                  | select((($m[.uuid] // {}).se // "") != "" and (($m[.uuid] // {}).se) != $se)
                  | {uuid, name, vip: $m[.uuid].vip, from: $m[.uuid].sen, argocd: (mk("Namespace") == "argocd" and mk("GatewayName") == "gw-argocd")}] end)})' 2> /dev/null
+  rm -f "${invf}" "${fullf}"
 }
 
 vs_on_se() { # tenant vs-uuid -> its SE uuid
