@@ -638,8 +638,15 @@ ARGOCD_GATEWAY_EOF
       fi
 
       project="default-project"
-      cci_api GET "apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${project}/supervisornamespaces" "" "${org_token}"
-      ns_name=$(echo ${response_body} | jq -c -r --arg arg "${org_name}-ns-" '.items[] | select(.metadata.name | startswith($arg)) | .metadata.name' | head -1)
+      # VCF-A creates the org's default-project some seconds to minutes after the org (and its user): right after a new org the
+      # list answers 404 "projects.project.cci.vmware.com default-project not found" (seen in vcfa_org.sh add): wait for it, 30 x 10 s
+      for project_try in $(seq 1 30); do
+        cci_api GET "apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${project}/supervisornamespaces" "" "${org_token}"
+        echo "${response_body}" | jq -e '.items' > /dev/null 2>&1 && break
+        [ "${project_try}" -eq 1 ] && log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: ${project} of ${org_name} not there yet, waiting for it (up to 5 min)" "${log_file}" "" ""
+        sleep 10
+      done
+      ns_name=$(echo ${response_body} | jq -c -r --arg arg "${org_name}-ns-" '.items[]? | select(.metadata.name | startswith($arg)) | .metadata.name' | head -1)
       if [ -n "${ns_name}" ]; then
         log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: namespace for ${org_name} already exists (${ns_name}), skipping creation" "${log_file}" "" ""
       else
