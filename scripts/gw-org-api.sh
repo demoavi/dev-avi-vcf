@@ -163,6 +163,8 @@ done <<< "${bookmark_lines}"
 # rendered from the bootstrap repository's own gitops/ and yamls/ folders (vcfa_provider_bootstrap.sh) when they exist
 # there; a name without a condition here is listed as it is.
 repo_dir="$(cd "${script_dir}/.." && pwd)"
+# the vApp operator writes org_folders into variables.sh (userdata.py); the SDDC variables do not have it: same default as gw-org-api.py
+[ -n "${org_folders:-}" ] || org_folders='[".kube", "gitops", "wireguard", "yaml-files"]'
 folders_json="[]"
 while read -r folder_name; do
   [ -n "${folder_name}" ] || continue
