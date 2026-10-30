@@ -67,6 +67,7 @@ clear_once() { rm -f "${state_dir}/once_$1"; }
 busy=$(ps -eo pid=,ppid=,args= | awk -v me=$$ '$1 != me && $2 != me && $3 == "bash" && $4 ~ /(vcf_bootstrap|vcfa_provider_bootstrap|vcfa_tenant_bootstrap|vcfa_tenant_cleaning|supervisor-bootstrap|avi-bootstrap|nsx-bootstrap|k8s-bootstrap|git-bootstrap|vcfa_org)\.sh$/ {print $4}' | head -1)
 if [ -n "${busy}" ]; then log_only "${busy##*/} is running: placement not checked this time"; exit 0; fi
 
+ip_avi=$(echo "${ips_avi:-[]}" | jq -r '.[0] // empty' 2>/dev/null)   # variables.sh only has the plural ips_avi, like the other phases derive it
 [ -n "${ip_avi:-}" ] || { log_only "no Avi controller address in the variables: nothing to do"; exit 0; }
 jar=$(mktemp); trap 'rm -f "${jar}"' EXIT
 curl -sk -m 20 -c "${jar}" -o /dev/null -X POST -H 'Content-Type: application/json' -d "{\"username\": \"admin\", \"password\": \"${generic_password}\"}" "https://${ip_avi}/login"
