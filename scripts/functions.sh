@@ -644,3 +644,21 @@ elif [ -n "${VCFA_ORG_EXCLUDE:-}" ]; then
   blueprint_apps_orgs=$(echo "${blueprint_apps_orgs:-[]}" | jq -c --arg o "${VCFA_ORG_EXCLUDE}" '[.[] | select(. != $o)]')
   echo "NOTE: VCFA_ORG_EXCLUDE=${VCFA_ORG_EXCLUDE}: this phase does not see the org ${VCFA_ORG_EXCLUDE}" >&2
 fi
+
+# Deleted orgs: vcfa_org.sh delete keeps the org's gw account locked with /home/<org>/.delete in it, and every phase then ignores
+# that org (not created again by a later run while the org is still in the spec); vcfa_org.sh add removes the marker. vcfa_org.sh
+# itself sets VCFA_KEEP_DELETED (a plain variable, not exported, so the phases it starts do not inherit it) to see every org.
+# Applied after VCFA_ORG_ONLY/EXCLUDE: an ONLY run on a deleted org must not touch its account either.
+if [ -z "${VCFA_KEEP_DELETED:-}" ]; then
+  _deleted_orgs=""
+  for _org in $(echo "${vcf_a_organizations:-[]}" | jq -r '.[].name' 2>/dev/null); do
+    [ -e "/home/${_org}/.delete" ] && _deleted_orgs="${_deleted_orgs} ${_org}"
+  done
+  if [ -n "${_deleted_orgs}" ]; then
+    _deleted_json=$(printf '%s\n' ${_deleted_orgs} | jq -R . | jq -sc .)
+    vcf_a_organizations=$(echo "${vcf_a_organizations:-[]}" | jq -c --argjson d "${_deleted_json}" '[.[] | select(.name as $n | $d | index($n) | not)]')
+    blueprint_apps_orgs=$(echo "${blueprint_apps_orgs:-[]}" | jq -c --argjson d "${_deleted_json}" '[.[] | select(. as $n | $d | index($n) | not)]')
+    echo "NOTE: deleted org(s) hidden from this phase (/home/<org>/.delete, see vcfa_org.sh):${_deleted_orgs}" >&2
+  fi
+  unset _deleted_orgs _deleted_json _org
+fi

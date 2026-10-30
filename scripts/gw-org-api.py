@@ -75,11 +75,11 @@ def assigned_path(cfg, name):
 
 
 def available_orgs(cfg):
-    """Configured orgs whose account home exists and has no .assigned yet."""
+    """Configured orgs whose account home exists and has neither .assigned (held by a student) nor .delete (deleted by vcfa_org.sh)."""
     out = []
     for org in sorted(cfg["orgs"], key=lambda o: org_sort_key(o["name"])):
         home = os.path.join(cfg["home_base"], org["name"])
-        if os.path.isdir(home) and not os.path.exists(assigned_path(cfg, org["name"])):
+        if os.path.isdir(home) and not os.path.exists(assigned_path(cfg, org["name"])) and not os.path.exists(os.path.join(home, ".delete")):
             out.append(org)
     return out
 

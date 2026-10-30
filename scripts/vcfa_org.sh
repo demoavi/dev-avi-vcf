@@ -29,8 +29,10 @@
 #
 # delete   the same steps in reverse: Harbor / Avi / vCenter accounts, deployments, AKO cleanup (waits for the Avi tenant to be
 #          empty), VKS clusters, namespaces, watcher refresh, then VCF-A (regional networking, vDC, org user, the org itself), Avi
-#          tenant leftovers, Gitea user, Avi DNS domains, Vault login, rendered files, gw account (vApp: gw-org-api / gw-accounts
-#          refresh without the org). Everything it removes is only that org's; the other orgs are not touched.
+#          tenant leftovers, Gitea user, Avi DNS domains, Vault login, rendered files. The gw account is NOT removed: it is locked
+#          (nologin, expired), its home is cleaned and /home/<org>/.delete is left in it; every phase, gw-org-api and the WireGuard
+#          peers then ignore the org although it is still in the spec, until `add` removes the marker and unlocks the account.
+#          Everything it removes is only that org's; the other orgs are not touched.
 #
 # recreate-vks  the org stays (account, namespace, VCF-A, Git, Vault, Avi domains, vCenter isolation). Removed: its deployments,
 #          AKO's Avi objects (waits for the Avi tenant to be empty), the VKS cluster(s); the namespace is kept. Then
@@ -39,8 +41,9 @@
 #          kubeconfig in /home/<org>/.kube/config.
 #
 # Scope and limits:
-#   - Only orgs defined in the spec can be added. A deleted org that is still in the spec comes back at the next vcf_bootstrap.sh
-#     run: remove it from the spec as well when it must stay gone. In the vApp use case gw-org-api no longer hands it out.
+#   - Only orgs defined in the spec can be added. A deleted org that is still in the spec stays gone while its marker
+#     /home/<org>/.delete exists (gw accounts only: on a gw without accounts the next vcf_bootstrap.sh run recreates it).
+#     Running delete again on an org deleted by an older version of this script (no marker) marks it.
 #   - vCenter isolation: an org's SSO user must not see another org's namespace. vCenter shows every namespace to a user that has any
 #     grant above it, so each pair needs an explicit NoAccess entry (the bootstrap sets them for all orgs in one run). `add` therefore
 #     also writes, for the new org's namespace, a NoAccess entry for every OTHER org's SSO user (and one for the new org's user on
@@ -53,7 +56,7 @@
 # Credentials and addresses come from /home/ubuntu/bash/variables.sh like in every phase; nothing is hardcoded.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-usage() { sed -n 2,44p "$0"; }
+usage() { sed -n 2,56p "$0"; }
 action="${1:-}"; org="${2:-}"
 case "${action}" in status|add|delete|isolate|recreate-vks) ;; -h|--help|"") usage; exit 0 ;; *) echo "unknown action: ${action}" >&2; usage >&2; exit 1 ;; esac
 case "${org}" in ""|-*) echo "an org name is needed: vcfa_org.sh ${action} <org>" >&2; exit 1 ;; esac
@@ -75,6 +78,7 @@ done
 [ -f "${jsonFile}" ] || { echo "no deployment json found (use --json <file>)" >&2; exit 1; }
 
 source /home/ubuntu/bash/variables.sh < /dev/null
+VCFA_KEEP_DELETED=1   # functions.sh hides deleted orgs (/home/<org>/.delete) from the phases; this script has to see them (not exported)
 source "${script_dir}/functions.sh"
 log_file="/home/ubuntu/vcfa_org.log"; slack_webhook=""
 touch "${log_file}"
@@ -198,7 +202,8 @@ ns_api_base="apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/default-proj
 org_dirs() { echo "/home/${org} /home/ubuntu/${org}"; }
 other_orgs() { echo "${vcf_a_organizations}" | jq -r --arg o "${org}" '.[] | select(.name != $o) | .name'; }
 org_has_account() { id "${org}" > /dev/null 2>&1; }
-others_have_accounts() { local o; for o in $(other_orgs); do id "${o}" > /dev/null 2>&1 && return 0; done; return 1; }
+others_have_accounts() { local o; for o in $(other_orgs); do [ -e "/home/${o}/.delete" ] && continue; id "${o}" > /dev/null 2>&1 && return 0; done; return 1; }
+org_is_deleted() { [ -e "/home/${org}/.delete" ]; }   # marker left by delete (home is o+x, so ubuntu can test it)
 
 # names of the vCenter namespaces of an org (<org>-ns-xxxxx), from the vCenter API
 vc_org_namespaces() { # org
@@ -234,7 +239,8 @@ st() { echo "$1|$2|$3"; } # item|state|detail
 do_status() {
   local v n c
   if [ -n "${org_item}" ]; then st spec present "template entry in vcf_a_organizations ($(echo "${org_item}" | jq -c '{vks: .vks_cluster.enabled, argocd: .vks_cluster.argocd.enabled, avi: .enable_avi}'))"; else st spec absent "not in vcf_a_organizations"; fi
-  if org_has_account; then st gw-account present "uid $(id -u "${org}")"; else st gw-account absent ""; fi
+  if org_has_account; then st gw-account present "uid $(id -u "${org}")$(org_is_deleted && echo ", $(sudo passwd -S "${org}" 2> /dev/null | awk '{print "state " $2}')")"; else st gw-account absent ""; fi
+  if org_is_deleted; then st deleted-marker present "/home/${org}/.delete: $(sudo cat "/home/${org}/.delete" 2> /dev/null | head -1)"; else st deleted-marker absent ""; fi
   for v in $(org_dirs); do if sudo test -d "${v}"; then st "dir ${v}" present "$(sudo find "${v}" -type f 2>/dev/null | wc -l) file(s)"; else st "dir ${v}" absent ""; fi; done
   if vault_cmd read "auth/userpass/users/${org}" > /dev/null 2>&1; then st vault-user present ""; else st vault-user absent ""; fi
   avi_init
@@ -375,6 +381,7 @@ do_add() {
   [ -n "${org_item}" ] || die "${org} is not in the spec (vcf_a_organizations): add it to spec.sddc.vcf_a first"
   check_idle
   say "adding ${org} (json ${jsonFile})"
+  gw_unmark_deleted
   add_gw_account
   add_vault
   avi_dns_domains add
@@ -572,19 +579,38 @@ del_git() {
   c=$(gitea_api DELETE "admin/users/${org}?purge=true"); [ "${c}" == "204" ] && ok_say "Gitea user ${org} and its repo deleted" || warn "deleting the Gitea user failed (HTTP ${c})"
 }
 del_vault() { vault_cmd read "auth/userpass/users/${org}" > /dev/null 2>&1 || { say "Vault login ${org}: none"; return 0; }; do_it "delete the Vault login ${org}" vault_cmd delete "auth/userpass/users/${org}" > /dev/null && ok_say "Vault login ${org} deleted"; }
+# the org stays as a LOCKED gw account holding /home/<org>/.delete (functions.sh hides such an org from every phase, gw-org-api.py does not
+# hand it out, the gw's WireGuard peers drop it): a deleted org that is still in the spec is not created again by the next run. Order:
+# marker first (nothing hands the org out any more), then sessions killed and the account locked / expired / nologin, then the home
+# cleaned (credentials, kubeconfig, WireGuard keys) except the skeleton files and the marker. `add` reverses all of it.
+gw_mark_deleted() {
+  local home="/home/${org}"
+  if [ "${dry_run}" == "true" ]; then say "[dry-run] would: lock the gw account ${org} (nologin, expired), clean ${home} and leave ${home}/.delete"; return 0; fi
+  if ! org_has_account; then
+    sudo useradd -m -s /usr/sbin/nologin "${org}" 2> "${tmpdir}/useradd.err" || { warn "no gw account ${org} to hold the deleted marker: $(tr '\n' ' ' < "${tmpdir}/useradd.err")"; return 1; }
+  fi
+  sudo chmod o+x "${home}"
+  sudo bash -c "umask 022; echo \"deleted \$(date +%Y-%m-%dT%H:%M:%S%z) by vcfa_org delete: hidden from every phase until vcfa_org.sh add ${org}\" > '${home}/.delete'" \
+    || { warn "could not write ${home}/.delete"; return 1; }
+  sudo pkill -KILL -u "${org}" 2> /dev/null
+  sudo usermod -L -e 1 -s /usr/sbin/nologin "${org}" 2> "${tmpdir}/usermod.err" || warn "locking the gw account ${org} failed: $(tr '\n' ' ' < "${tmpdir}/usermod.err")"
+  sudo find "${home}" -mindepth 1 -maxdepth 1 ! -name .delete ! -name .bashrc ! -name .profile ! -name .bash_logout -exec rm -rf {} + 2> /dev/null
+  say "gw account ${org} locked and cleaned, marker ${home}/.delete written"
+}
+gw_unmark_deleted() { # add: undo gw_mark_deleted (before any phase runs: the phases hide an org that still has the marker)
+  org_is_deleted || return 0
+  if [ "${dry_run}" == "true" ]; then say "[dry-run] would: remove /home/${org}/.delete and unlock the gw account ${org}"; return 0; fi
+  sudo rm -f "/home/${org}/.delete" "/home/${org}/.assigned"
+  sudo usermod -U -e '' -s /bin/bash "${org}" 2> /dev/null || warn "unlocking the gw account ${org} failed"
+  say "${org} was marked deleted: marker removed, gw account unlocked"
+}
 del_files_and_account() {
   local d
   for d in $(org_dirs); do sudo test -d "${d}" && [ "${d}" != "/home/${org}" ] && do_it "remove ${d}" sudo rm -rf "${d}"; done
-  if org_has_account; then
-    if [ "${dry_run}" == "true" ]; then say "[dry-run] would: delete the gw account ${org} and /home/${org}"
-    elif sudo userdel -r "${org}" 2> "${tmpdir}/userdel.err" || { sudo pkill -KILL -u "${org}" 2> /dev/null; sleep 2; sudo userdel -r "${org}" 2>> "${tmpdir}/userdel.err"; }; then
-      say "gw account ${org} removed"
-    else
-      warn "deleting the gw account ${org} failed: $(tr '\n' ' ' < "${tmpdir}/userdel.err")"
-    fi
+  if org_has_account || [ "${deployment_kind}" == "vApp" ] || others_have_accounts; then
+    gw_mark_deleted || warn "${org} is not marked deleted: the next run that sees it in the spec may create it again"
+    run_phase gw-org-api exclude; run_phase gw-accounts exclude   # the org leaves the list handed out and the gw's WireGuard peers
   fi
-  if [ "${deployment_kind}" == "vApp" ]; then run_phase gw-org-api exclude; run_phase gw-accounts exclude
-  elif others_have_accounts; then run_phase gw-org-api exclude; run_phase gw-accounts exclude; fi   # the org leaves the list handed out and the gw's WireGuard peers
 }
 do_delete() {
   check_idle
@@ -592,7 +618,9 @@ do_delete() {
   # student already holds is refused without --force; a free one is claimed FIRST (same marker the API writes, created atomically), so no
   # student can be given it while it is being deleted. A marker left by an earlier, failed vcfa_org.sh / cleaning run is our own and
   # is reused. The marker goes with the account at the end; when the delete fails halfway the org stays claimed.
-  if org_has_account; then
+  if org_is_deleted; then
+    say "${org} is already marked deleted (/home/${org}/.delete): continuing, what is left gets removed"
+  elif org_has_account; then
     local marker="/home/${org}/.assigned"
     if sudo test -e "${marker}"; then
       if sudo grep -qE "to (vcfa_org delete|vcfa_tenant_cleaning)" "${marker}" 2> /dev/null; then say "${org} is already claimed by an earlier delete/cleaning run"
@@ -607,7 +635,10 @@ do_delete() {
   fi
   org_lookup
   say "ABOUT TO DELETE the org ${org} and everything of it: VKS clusters, namespaces, deployments, accounts, Git repo, Vault and Avi/DNS entries (json ${jsonFile})"
-  [ -n "${org_item}" ] && ok_say "NOTE: ${org} is still in the spec: the next vcf_bootstrap.sh run recreates it"
+  if [ -n "${org_item}" ]; then
+    if org_has_account || [ "${deployment_kind}" == "vApp" ] || others_have_accounts; then ok_say "NOTE: ${org} is still in the spec: it stays hidden from every phase by /home/${org}/.delete until vcfa_org.sh add ${org}"
+    else ok_say "NOTE: ${org} is still in the spec and this gw has no accounts: the next vcf_bootstrap.sh run recreates it"; fi
+  fi
   if [ "${assume_yes}" != "true" ] && [ "${dry_run}" != "true" ]; then
     read -r -p "Type yes to delete ${org}: " answer; [ "${answer}" == "yes" ] || die "not confirmed, nothing done"
   fi

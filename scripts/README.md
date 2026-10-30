@@ -214,8 +214,14 @@ DNS domains, Gitea user and repo, then `vcfa_provider_bootstrap.sh` and `vcfa_te
 variable `VCFA_ORG_ONLY`, read by `functions.sh`; `VCFA_ORG_EXCLUDE` is the opposite), the vCenter isolation, and the blueprint watcher again.
 `delete` is the reverse: Harbor / Avi / vCenter accounts, AKO cleanup (waits for the org's Avi virtual services to go), deployments, VKS
 clusters, virtual machines still in the namespaces (deleted through the VM Operator API, a namespace with a VM in it can get stuck in Terminating), namespaces, watcher, then VCF-A (the certificates left in the org's Avi tenant, AKO's Gateway CA and the Vault intermediate, are deleted first, otherwise Avi refuses to delete the tenant and the Avi setting stays active; then the setting is switched off with `{"active":false}`, then regional networking, vDC, the
-org), Gitea, Avi DNS domains, Vault login, files, gw account. The org must be in the spec to be added; one that stays in the spec is
-recreated by the next `vcf_bootstrap.sh`. Isolation: an org's vCenter user needs an explicit NoAccess entry on every other org's namespace
+org), Gitea, Avi DNS domains, Vault login, files. The gw account is kept, locked (`nologin`, expired, sessions killed), its home is cleaned
+(kubeconfig, WireGuard keys, files) and `/home/<org>/.delete` is left in it (an org that never had an account gets one just to hold the marker).
+`functions.sh` then hides every org with that marker from `vcf_a_organizations` / `blueprint_apps_orgs` in every phase, so an org that stays in
+the spec is not created again by a later phase run (not by `gw-accounts` either: its WireGuard peer drops), and `gw-org-api.py` does not hand
+it out (no `.assigned` and no `.delete`). `add` removes the marker, unlocks the account, then runs the phases. `vcfa_org.sh` itself sets the
+plain variable `VCFA_KEEP_DELETED` (not exported) to see every org; `status` shows `deleted-marker`. A second `delete` of the same org just
+cleans what is left; running `delete` on an org deleted by an older version of the script (no marker) marks it. On a gw without accounts nothing
+is marked, and an org that stays in the spec is recreated by the next `vcf_bootstrap.sh`. The org must be in the spec to be added. Isolation: an org's vCenter user needs an explicit NoAccess entry on every other org's namespace
 (vCenter shows all namespaces to a user with any grant above them); `add` and `isolate` write them in both directions, `status` checks
 them. Refuses to run while a bootstrap phase runs; `delete` asks for `yes`. Log: `/home/ubuntu/vcfa_org.log`.
 `recreate-vks <org>` keeps the org (account, namespace, VCF-A, Git, Vault, Avi domains, isolation) and replaces its VKS cluster: deployments,
