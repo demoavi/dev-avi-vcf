@@ -35,7 +35,7 @@ resources:
         apiVersion: vmoperator.vmware.com/v1alpha5
         kind: VirtualMachine
         metadata:
-          name: ${resource.Namespace.id}-${env.deploymentName}-1
+          name: ${env.deploymentName}-1
           labels:
             app: ${input.app}
         spec:
@@ -57,7 +57,7 @@ resources:
         apiVersion: vmoperator.vmware.com/v1alpha5
         kind: VirtualMachine
         metadata:
-          name: ${resource.Namespace.id}-${env.deploymentName}-2
+          name: ${env.deploymentName}-2
           labels:
             app: ${input.app}
         spec:
