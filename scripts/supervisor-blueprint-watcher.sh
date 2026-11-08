@@ -93,7 +93,15 @@ if [ "$(vc -o /dev/null -w '%{http_code}' "${vc_host}/api/vcenter/namespaces/ins
   ns_json=$(jq -n --arg ns "${ns}" --arg sup "${supervisor_id}" --arg pol "${policy_id}" \
     '{namespace: $ns, supervisor: $sup, description: "provider-only: watches the VM labels for the blueprint dropdown (not an org namespace)",
       storage_specs: [{policy: $pol, limit: 10240}], resource_spec: {cpu_limit: 4000, memory_limit: 4096}}')
-  create_code=$(vc -o "${work}/ns.out" -w '%{http_code}' -X POST -d "${ns_json}" "${vc_host}/api/vcenter/namespaces/instances/v2")
+  # vCenter can take longer than 30 s to answer the create (seen on a fresh Supervisor: curl gave HTTP 000 and the namespace appeared
+  # afterwards): long limit, and after a failed answer look again whether it exists before trying once more.
+  create_code=""
+  for create_try in 1 2 3; do
+    create_code=$(vc -m 180 -o "${work}/ns.out" -w '%{http_code}' -X POST -d "${ns_json}" "${vc_host}/api/vcenter/namespaces/instances/v2")
+    [[ "${create_code}" == 2* ]] && break
+    sleep 20
+    [ "$(vc -o /dev/null -w '%{http_code}' "${vc_host}/api/vcenter/namespaces/instances/v2/${ns}")" == "200" ] && { create_code=200; break; }
+  done
   [[ "${create_code}" == 2* ]] || bw_fail "creating the vSphere namespace ${ns} failed (HTTP ${create_code}: $(head -c 300 "${work}/ns.out"))"
   log_notify "supervisor-blueprint-watcher: vSphere namespace ${ns} created (provider-only)"
 fi
