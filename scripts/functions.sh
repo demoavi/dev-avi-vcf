@@ -30,12 +30,18 @@
 # single unpaginated page silently drops results past its page size and
 # would make an existing VM look "not found" (the exact class of bug
 # vcd_client.py's own query_records() was already hardened against).
+# Query filter for a VM by name. With vcd_vapp set (deployment.json .vcd.vapp) it is by vApp AND name: the org holds several shared
+# vApps whose VMs have the same names (gw, sddc01-mgmt-esx01, ...), and the first match by name alone can be a VM of ANOTHER vApp
+# (power-cycled, polled or given metadata by mistake). Without vcd_vapp (deployment.json of an older gw) it is by name only.
+vcd_vm_filter() { # vm name
+  if [ -n "${vcd_vapp:-}" ]; then echo "&filter=(containerName==${vcd_vapp};name==$1)"; else echo ""; fi
+}
 vcd_find_vm_href() {
   local target_name="$1"
   local page=1
   local page_size=128
   while true; do
-    local resp=$(curl -sk "https://${vcd_host}/api/query?type=vm&format=records&page=${page}&pageSize=${page_size}" \
+    local resp=$(curl -sk "https://${vcd_host}/api/query?type=vm&format=records&page=${page}&pageSize=${page_size}$(vcd_vm_filter "${target_name}")" \
       -H "Authorization: Bearer ${vcd_auth_token}" \
       -H "Accept: application/*+json;version=${vcd_api_version}")
     local href=$(echo "${resp}" | jq -r --arg name "${target_name}" '[.record[] | select(.name == $name) | .href][0] // empty')
@@ -74,7 +80,7 @@ vcd_wait_vm_powered_on() {
     local page_size=128
     local status=""
     while true; do
-      local resp=$(curl -sk "https://${vcd_host}/api/query?type=vm&format=records&page=${page}&pageSize=${page_size}" \
+      local resp=$(curl -sk "https://${vcd_host}/api/query?type=vm&format=records&page=${page}&pageSize=${page_size}$(vcd_vm_filter "${target_name}")" \
         -H "Authorization: Bearer ${vcd_auth_token}" \
         -H "Accept: application/*+json;version=${vcd_api_version}")
       status=$(echo "${resp}" | jq -r --arg name "${target_name}" '[.record[] | select(.name == $name) | .status][0] // empty')
@@ -148,6 +154,8 @@ vcd_login() {
   vcd_password=$(jq -r .vcd.password $jsonFile)
   vcd_org=$(jq -r .vcd.org $jsonFile)
   vcd_api_version=$(jq -r .vcd.apiVersion $jsonFile)
+  # this vApp's own name (written by the operator): VM names exist in every shared vApp of the org, see vcd_vm_filter
+  vcd_vapp=$(jq -r '.vcd.vapp // empty' $jsonFile)
   vcd_auth_token=$(curl -sk -X POST "https://${vcd_host}/cloudapi/1.0.0/sessions" \
     -H "Authorization: Basic $(printf '%s' "${vcd_user}@${vcd_org}:${vcd_password}" | base64 -w0)" \
     -H "Accept: application/json;version=${vcd_api_version}" \
