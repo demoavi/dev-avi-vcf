@@ -514,20 +514,41 @@ fi
 avi_api 2 2 GET "" api/systemconfiguration
 avi_api 2 2 PUT "$(echo ${response_body} | jq -c '. + {dns_virtualservice_refs: ["/api/virtualservice/?name=dns-vs"]}')" api/systemconfiguration
 
-count_dns=1 ; pause_dns=10 ; dns_vs_status=""
+count_dns=1 ; pause_dns=10 ; max_dns=150 ; dns_vs_status="" ; dns_vs_toggles=0 ; dns_vs_max_toggles=3 ; dns_vs_since=0
 until [[ ${dns_vs_status} == "OPER_UP" ]]
 do
   avi_api 2 2 GET "" api/virtualservice-inventory
   dns_vs_status=$(echo ${response_body} | jq -c -r '.results[0].runtime.oper_status.state')
+  dns_vs_reason=$(echo ${response_body} | jq -c -r '(.results[0].runtime.oper_status.reason // []) | join(" ")')
   if [[ ${dns_vs_status} == "OPER_UP" ]]; then
     break
   fi
+  # Seen on a nested lab: the controller gave up creating the first Service Engine (no SE VM at all, the VS stuck in
+  # OPER_RESOURCES with "Maximum failed attempts to create Service Engine reached"). Disabling then enabling the VS makes it
+  # start a new SE deployment, which then worked. Done when the controller says it failed (after 1 minute, so a stale reason
+  # right after a toggle does not trigger another one) or when the VS is still not up 5 minutes after the start or the last
+  # toggle (a normal SE deployment takes a few minutes and is left alone until then). At most dns_vs_max_toggles times.
+  ((dns_vs_since++))
+  dns_vs_toggle=false
+  [[ "${dns_vs_reason}" == *[Ff]ailed* && ${dns_vs_since} -ge 6 ]] && dns_vs_toggle=true
+  [[ ${dns_vs_since} -ge 30 ]] && dns_vs_toggle=true
+  if [[ ${dns_vs_toggle} == "true" && ${dns_vs_toggles} -lt ${dns_vs_max_toggles} ]]; then
+    ((dns_vs_toggles++))
+    dns_vs_since=0
+    log_notify "DNS VS not up (state ${dns_vs_status:-unknown}${dns_vs_reason:+, ${dns_vs_reason}}): disabling then enabling dns-vs to start a new Service Engine deployment (${dns_vs_toggles} of ${dns_vs_max_toggles})"
+    avi_lookup api/virtualservice "dns-vs"
+    avi_api 2 2 GET "" api/virtualservice/${found_uuid}
+    avi_api 2 2 PUT "$(echo ${response_body} | jq -c '.enabled = false')" api/virtualservice/${found_uuid}
+    sleep 5
+    avi_api 2 2 GET "" api/virtualservice/${found_uuid}
+    avi_api 2 2 PUT "$(echo ${response_body} | jq -c '.enabled = true')" api/virtualservice/${found_uuid}
+  fi
   if (( count_dns % 6 == 0 )); then
-    log_only "DNS VS state: ${dns_vs_status:-unknown} (attempt ${count_dns} of 120)"
+    log_only "DNS VS state: ${dns_vs_status:-unknown} (attempt ${count_dns} of ${max_dns})"
   fi
   sleep ${pause_dns}
   ((count_dns++))
-  if [[ "${count_dns}" -eq 120 ]]; then
+  if [[ "${count_dns}" -eq ${max_dns} ]]; then
     log_notify "ERROR: Unable to get the DNS VS UP after ${count_dns} attempts of ${pause_dns} seconds"
     exit 100
   fi
