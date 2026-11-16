@@ -8,7 +8,7 @@
 #   vapp-diagnostics-ctl.sh [options] status <uuid>
 #   vapp-diagnostics-ctl.sh [options] log    <uuid> [<command id>]    the bootstrap log, or the output of that command (decrypted)
 #   vapp-diagnostics-ctl.sh [options] send   <uuid> <action> [--args '<json>'] [--ttl <seconds, default 3600, max 604800>] [--id <id>]
-#     actions: status, upload-now, org-delete-all, org-add-all, org-delete, org-add, bootstrap-from (see vapp-diagnostics-command.sh)
+#     actions: status, upload-now, org-delete-all, org-add-all, org-delete, org-add, bootstrap-from, platform-shutdown (see vapp-diagnostics-command.sh)
 #     e.g.  send <uuid> org-delete-all --args '{"dry_run": true}'      send <uuid> bootstrap-from --args '{"phase": "avi-bootstrap"}'
 # options: --repo <git url, default git@github.com:demoavi/vapp-diagnostics.git>  --ssh-key <default ~/.ssh/id_vapp_diagnostics>
 #          --log-key <the CR's log_encryption_key as a file, default ~/creds/vapp-diagnostics-log.key>

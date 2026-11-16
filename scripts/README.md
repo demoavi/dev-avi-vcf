@@ -256,6 +256,16 @@ Avi placement: an Avi service engine (SE) has 9 data vNICs and needs one per org
 `POST api/virtualservice/<uuid>/migrate` (`serviceengine_ref`, `to_new_se: false`). Never fatal; `avi_colocate_vs=false` turns it off. Only acts
 when the tenant phase runs for the org (new orgs, `recreate-vks`, a rerun); existing orgs are not moved on their own.
 
+### Manual tool: `vcf_shutdown.sh` (not part of the pipeline; also the lifecycle action `platform-shutdown`)
+`bash vcf_shutdown.sh <json> [--dry-run] [--from|--only <phase>] [--skip-flush] [--flush-minutes N] [--poweroff-gw]`: the ordered shutdown of the nested platform, written from
+`SHUTDOWN-STARTUP-RECIPE.md`. Phases: `precheck` (refuses, exit 2, unless every org has `/home/<org>/.delete`: run `vcfa_org.sh delete --all` first; `--dry-run` only warns), `inventory`
+(`/home/ubuntu/platform-state/`: VMs, hosts, what was powered on), `vcfa`, `vsp` (Broadcom's `vcf_services_runtime_shutdown.sh`, path in `VSP_SHUTDOWN_SCRIPT`, default `/home/ubuntu/`; NOT in
+this repo, the phase fails when it is missing), `wcp`, `supervisor`, `k8s-shared`, `vsp-vms`, `avi`, `nsx`, `operations`, `sddc-manager`, `vcenter`, `audit`, `stragglers` (guest shutdown, pod VMs
+powered off with the Harbor database last), `flush` (vSAN OSA elevator, ceiling `--flush-minutes`, default 45; not finishing is logged, not fatal), `hosts` (hard guard: exit 3 while any VM is
+on), `installer`, `ready`. sddc: VMs through the underlay govc; vApp: through VCD (`vcd_vm_filter`, power/action/shutdown). Status: `/home/ubuntu/json/vcf_shutdown_status.json` (same shape as
+`vcf_status.json` plus `ready_for_poweroff`; the uploader sends it as `shutdown` in `status.json`), log `/home/ubuntu/vcf_shutdown.log`. The gw stays up (`--poweroff-gw` schedules `shutdown -h +2`
+on the sddc use case); the vApp is powered off afterwards by the operator through VCD. Dry-run tested against the live SDDC lab on 2026-11-16 (discovery and the `hosts` guard); a real run is not tested.
+
 ### Manual tool: `api-monitor.sh` (not part of the pipeline)
 Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 3] [--edge-interval 10] [--out dir]`
 calls vCenter, NSX, Avi, VCF-A (provider login + orgs list, first org's login + session, the org CCI API through the token exchange,
@@ -295,12 +305,12 @@ For a vApp gw nobody can ssh to. `spec.diagnostics` (CR: `repo`, `ssh_private_ke
   A command is `{id, action, args, issued_at, expires_at, uuid, sig}`; `sig` is an HMAC-SHA256 with `log_encryption_key` (no key on the gw = no command ever runs). Refused:
   bad signature, another vApp's uuid, an id seen before, an unknown action or arguments; expired: `expires_at` (at most 7 days) passed before it could start. Actions are a fixed
   table, never a shell: `status`, `upload-now` (read-only, run even when busy), `org-delete-all`, `org-add-all` (`vcfa_org.sh delete|add --all`; args `dry_run`, `force`), `org-delete`/`org-add` (args `org`),
-  `bootstrap-from` (arg `phase`, checked against `vcf_bootstrap.sh`'s list). The others wait ("waiting" in `status.json`) while a bootstrap phase, `vcfa_org.sh` or a cleaning is
+  `bootstrap-from` (arg `phase`, checked against `vcf_bootstrap.sh`'s list), `platform-shutdown` (`vcf_shutdown.sh <json>`; args `dry_run`, `skip_flush`, `flush_minutes` 0-240; see "Manual tool: `vcf_shutdown.sh`"). The others wait ("waiting" in `status.json`) while a bootstrap phase, `vcfa_org.sh` or a cleaning is
   running or an earlier command still runs; one command at a time.
 - The vApp uuid is read from VCD (the gw VM's container), cached in `/run` only: a vApp made from a captured template has its own uuid. Reset `vcf_status.json`, `.vapp-diagnostics/`
   (command state, ids seen) and the work trees before capturing a template.
 - The operator side (`diagnostics_client.py`, the timer `vapp_lifecycle` in `vapp_operator.py`, every 30 s, only when `spec.diagnostics` is set): `spec.lifecycle`
-  (`action`: `delete-vcfa-orgs` = `org-delete-all`, `add-vcfa-orgs` = `org-add-all`; `requestId`: any text, an action is sent once per requestId; `force`, `dryRun`, `ttlSeconds`)
+  (`action`: `delete-vcfa-orgs` = `org-delete-all`, `add-vcfa-orgs` = `org-add-all`, `shutdown-platform` = `platform-shutdown`; `requestId`: any text, an action is sent once per requestId; `force`, `dryRun`, `skipFlush` and `flushMinutes` (shutdown only), `ttlSeconds`)
   becomes a signed command pushed to `main:instances/<status.vappId>/command.json` through git with the deploy key (the operator pod installs `git` and `openssh-client` at start).
   `status.lifecycle` follows it (`blocked` = could not be sent yet and is retried every tick, `sent`, then the gw's `waiting`/`running`/`done`/`failed`/`refused`, or `expired`) with
   `rc` and the last lines of the decrypted output; `status.gw` is what the gw last reported (read every 5 minutes, every 30 s while a request is pending). Without `spec.lifecycle`

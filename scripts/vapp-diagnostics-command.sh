@@ -20,6 +20,10 @@
 #   org-add-all                  vcfa_org.sh add --all --yes      (the orgs that were deleted: see --all in vcfa_org.sh)
 #   org-delete / org-add         vcfa_org.sh delete|add <args.org> --yes
 #   bootstrap-from               vcf_bootstrap.sh <json> --from <args.phase>  (the phase must be in vcf_bootstrap.sh's list)
+#   platform-shutdown            vcf_shutdown.sh <json>: shuts the nested platform down in order (VCF Automation, VSP, Supervisor, Avi, NSX, SDDC Manager,
+#                                vCenter, vSAN flush, ESX hosts) and leaves the gw running; refuses (exit 2) while an org is not deleted (vcfa_org.sh delete --all
+#                                first). args: dry_run (--dry-run), skip_flush (--skip-flush), flush_minutes (0-240, --flush-minutes). The vApp itself is
+#                                powered off afterwards by the operator through VCD, not by the gw.
 # No conflict: the others start only when no bootstrap phase, vcfa_org.sh or cleaning run is on the gw and no earlier command is still
 # running; until then the command is "waiting" and is looked at again every minute until it expires. One command at a time.
 #
@@ -122,6 +126,12 @@ case "${action}" in
     phases_list=$(sed -n 's/^phases="\(.*\)"$/\1/p' "${script_dir}/vcf_bootstrap.sh" | head -1)
     case " ${phases_list} " in *" ${p} "*) [ -n "${p}" ] || finish_without_running refused "args.phase is missing" ;; *) finish_without_running refused "args.phase is not a phase of vcf_bootstrap.sh" ;; esac
     cmd=(bash -c 'bash "$1" "$2" --from "$3" >> /home/ubuntu/vcf_bootstrap.log 2>&1' _ "${script_dir}/vcf_bootstrap.sh" "${jsonFile}" "${p}") ;;
+  platform-shutdown)
+    fm=$(echo "${args}" | jq -r '.flush_minutes // empty')
+    case "${fm}" in ''|*[!0-9]*) [ -z "${fm}" ] || finish_without_running refused "args.flush_minutes is not a whole number" ;; *) [ "${fm}" -le 240 ] || finish_without_running refused "args.flush_minutes is more than 240" ;; esac
+    skf=(); [ "$(echo "${args}" | jq -r '.skip_flush // false')" == "true" ] && skf=(--skip-flush)
+    fmo=(); [ -n "${fm}" ] && fmo=(--flush-minutes "${fm}")
+    cmd=(bash "${script_dir}/vcf_shutdown.sh" "${jsonFile}" "${dry[@]}" "${skf[@]}" "${fmo[@]}") ;;
   *) finish_without_running refused "unknown action '${action}'" ;;
 esac
 
