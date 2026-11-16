@@ -219,7 +219,7 @@ domains / tenant / user, Gitea user and repo, Harbor user, vCenter SSO user, per
 networking / org user, NSX project, namespaces, VKS clusters, deployments). `add` follows the bootstrap order: gw account, Vault login, Avi
 DNS domains, Gitea user and repo, then `vcfa_provider_bootstrap.sh` and `vcfa_tenant_bootstrap.sh` limited to that org (environment
 variable `VCFA_ORG_ONLY`, read by `functions.sh`; `VCFA_ORG_EXCLUDE` is the opposite), the vCenter isolation, and the blueprint watcher again.
-`delete` is the reverse: Harbor / Avi / vCenter accounts, AKO cleanup (waits for the org's Avi virtual services to go), deployments, VKS
+`delete` is the reverse: Harbor / Avi / vCenter accounts, the blueprint deployments (first: a deployment can own virtual services in the org's Avi tenant, which only go with it), AKO cleanup (`deleteConfig=true`, re-applied every minute while it waits up to 15 minutes for the org's Avi virtual services to go; on a timeout the ones left are listed in the log and the VKS cluster is NOT deleted), VKS
 clusters, virtual machines still in the namespaces (deleted through the VM Operator API, a namespace with a VM in it can get stuck in Terminating), namespaces, watcher, then VCF-A (the certificates left in the org's Avi tenant, AKO's Gateway CA and the Vault intermediate, are deleted first, otherwise Avi refuses to delete the tenant and the Avi setting stays active; then the setting is switched off with `{"active":false}`, then regional networking, vDC, the
 org), Gitea, Avi DNS domains, Vault login, files. The gw account is kept, locked (`nologin`, expired, sessions killed), its home is cleaned
 (kubeconfig, WireGuard keys, files) and `/home/<org>/.delete` is left in it (an org that never had an account gets one just to hold the marker).
@@ -299,6 +299,12 @@ For a vApp gw nobody can ssh to. `spec.diagnostics` (CR: `repo`, `ssh_private_ke
   running or an earlier command still runs; one command at a time.
 - The vApp uuid is read from VCD (the gw VM's container), cached in `/run` only: a vApp made from a captured template has its own uuid. Reset `vcf_status.json`, `.vapp-diagnostics/`
   (command state, ids seen) and the work trees before capturing a template.
+- The operator side (`diagnostics_client.py`, the timer `vapp_lifecycle` in `vapp_operator.py`, every 30 s, only when `spec.diagnostics` is set): `spec.lifecycle`
+  (`action`: `delete-vcfa-orgs` = `org-delete-all`, `add-vcfa-orgs` = `org-add-all`; `requestId`: any text, an action is sent once per requestId; `force`, `dryRun`, `ttlSeconds`)
+  becomes a signed command pushed to `main:instances/<status.vappId>/command.json` through git with the deploy key (the operator pod installs `git` and `openssh-client` at start).
+  `status.lifecycle` follows it (`blocked` = could not be sent yet and is retried every tick, `sent`, then the gw's `waiting`/`running`/`done`/`failed`/`refused`, or `expired`) with
+  `rc` and the last lines of the decrypted output; `status.gw` is what the gw last reported (read every 5 minutes, every 30 s while a request is pending). Without `spec.lifecycle`
+  nothing is ever sent; without `spec.diagnostics` the timer does nothing. `kubectl get vapp` has `LIFECYCLE` and `BUILD` columns.
 - Other end: `vapp-diagnostics-ctl.sh list|status <uuid>|log <uuid> [<command id>]|send <uuid> <action> [--args '<json>'] [--ttl s]` on any host with the deploy key
   and the key file. State of a command: `status.json` -> `command` (`waiting|running|done|failed|refused|expired`, `rc`, `reason`); its output: `command-<id>.log.gz.enc`.
 

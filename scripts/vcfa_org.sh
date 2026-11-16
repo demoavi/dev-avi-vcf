@@ -580,6 +580,13 @@ avi_vs_count() {
     | jq -r --argjson vks "${vks_names_json}" '[(.results // [])[] | select(any(.markers[]?; .key == "GatewayName" and ((.values[0] // "") | IN($vks[]))) | not)] | length' 2> /dev/null || echo 0
 }
 avi_empty() { [ "$(avi_vs_count)" == "0" ]; }
+# what is left in the org's tenant (same filter as avi_vs_count), into the log: the cause of a timeout has to be readable without a look at Avi
+avi_vs_list() {
+  avi_init
+  curl -sk -m 30 -b /tmp/avi_cookies.txt -H "X-CSRFToken: ${avi_csrftoken}" -H "X-Avi-Tenant: ${org}" -H "X-Avi-Version: ${avi_version}" -H "Referer: https://${ip_avi}" "https://${ip_avi}/api/virtualservice?page_size=200" \
+    | jq -r --argjson vks "${vks_names_json}" '(.results // [])[] | select(any(.markers[]?; .key == "GatewayName" and ((.values[0] // "") | IN($vks[]))) | not) | "\(.name) [\([.markers[]? | select(.key == "clustername" or .key == "GatewayName" or .key == "Host") | "\(.key)=\(.values[0])"] | join(" "))]"' 2> /dev/null | head -8 \
+    | while read -r l; do say "  still in Avi: ${l}"; done
+}
 avi_vs_total() { avi_init; curl -sk -m 30 -b /tmp/avi_cookies.txt -H "X-CSRFToken: ${avi_csrftoken}" -H "X-Avi-Tenant: ${org}" -H "X-Avi-Version: ${avi_version}" -H "Referer: https://${ip_avi}" "https://${ip_avi}/api/virtualservice?page_size=1" | jq -r '.count // 0' 2> /dev/null || echo 0; }
 del_workloads() { # deployments, AKO cleanup, VKS clusters, namespaces
   get_org_token || { say "no org token: the org has no workloads left to delete"; return 0; }
@@ -591,23 +598,9 @@ del_workloads() { # deployments, AKO cleanup, VKS clusters, namespaces
     ns_k8s_api GET "${endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns}/clusters" "" "${org_token}" || continue
     for vks in $(echo ${response_body} | jq -r '.items[]?.metadata.name'); do vks_pairs="${vks_pairs} ${ns}|${vks}|${endpoint}"; done
   done
-  # AKO: deleteConfig=true so AKO removes what it created in Avi, then wait until the org's Avi tenant has no virtual service
-  if [ -n "${vks_pairs}" ]; then
-    vks_names_json=$(for pair in ${vks_pairs}; do IFS='|' read -r ns vks endpoint <<< "${pair}"; echo "${vks}"; done | jq -R . | jq -sc .)
-    for pair in ${vks_pairs}; do
-      IFS='|' read -r ns vks endpoint <<< "${pair}"
-      kc="${tmpdir}/${org}-${vks}.kubeconfig"
-      ( umask 077; supkc get secret "${vks}-kubeconfig" -n "${ns}" -o jsonpath='{.data.value}' 2> /dev/null | base64 -d > "${kc}" )
-      if [ -s "${kc}" ]; then
-        kubectl --kubeconfig "${kc}" --request-timeout=30s get configmap -A -o json 2> /dev/null | jq -r '.items[] | select(.data.deleteConfig != null) | "\(.metadata.namespace) \(.metadata.name)"' | while read -r cm_ns cm_name; do
-          do_it "AKO ${cm_ns}/${cm_name}: deleteConfig=true" kubectl --kubeconfig "${kc}" -n "${cm_ns}" patch configmap "${cm_name}" --type merge -p '{"data":{"deleteConfig":"true"}}' > /dev/null
-        done
-      else warn "no admin kubeconfig for ${vks}: AKO cannot be cleaned there"; fi
-    done
-    say "waiting (15 min at most) for the Avi tenant ${org} to have no virtual service left"
-    wait_until "Avi tenant ${org} empty" 900 avi_empty || { warn "Avi still has $(avi_vs_count) virtual service(s) of workloads for ${org}: not deleting the VKS cluster"; return 1; }
-  fi
-  # instances (deployments) of the org's blueprints
+  # The org's blueprint deployments FIRST. A deployment can own virtual services in the org's Avi tenant (its Gateway in the Supervisor namespace, made by
+  # the Supervisor's AKO: marker clustername = the Supervisor), and they only go when the deployment goes. Waiting for the tenant to be empty before this
+  # deadlocked for 15 minutes on an org with deployments (org-1 of the sddc lab, 2026-11-16: vs-app-1-gateway); an org without any (org-2) never showed it.
   blueprint_api GET "project-service/api/projects" "" "${org_token}"
   project_id=$(echo ${response_body} | jq -r '.content[0].id // empty')
   if [ -n "${project_id}" ]; then
@@ -619,6 +612,31 @@ del_workloads() { # deployments, AKO cleanup, VKS clusters, namespaces
       wait_until "deployments of ${org} gone" 1800 deployments_gone || return 1
     fi
   fi
+  # AKO: deleteConfig=true so AKO removes what it created in Avi, then wait until the org's Avi tenant has no virtual service
+  if [ -n "${vks_pairs}" ]; then
+    vks_names_json=$(for pair in ${vks_pairs}; do IFS='|' read -r ns vks endpoint <<< "${pair}"; echo "${vks}"; done | jq -R . | jq -sc .)
+    # Sets deleteConfig=true in every AKO ConfigMap of the org's clusters that does not have it. Called again while waiting: the config is written
+    # back (org-1: the main avi-k8s-config was false again and a newer avi-k8s-config-ver-2 had appeared after the first patch), and AKO then
+    # recreates what it had removed.
+    ako_delete_config() {
+      local pair ns vks endpoint kc cm_ns cm_name
+      for pair in ${vks_pairs}; do
+        IFS='|' read -r ns vks endpoint <<< "${pair}"
+        kc="${tmpdir}/${org}-${vks}.kubeconfig"
+        [ -s "${kc}" ] || ( umask 077; supkc get secret "${vks}-kubeconfig" -n "${ns}" -o jsonpath='{.data.value}' 2> /dev/null | base64 -d > "${kc}" )
+        if [ -s "${kc}" ]; then
+          kubectl --kubeconfig "${kc}" --request-timeout=30s get configmap -A -o json 2> /dev/null | jq -r '.items[] | select(.data.deleteConfig != null and .data.deleteConfig != "true") | "\(.metadata.namespace) \(.metadata.name)"' | while read -r cm_ns cm_name; do
+            do_it "AKO ${cm_ns}/${cm_name}: deleteConfig=true" kubectl --kubeconfig "${kc}" -n "${cm_ns}" patch configmap "${cm_name}" --type merge -p '{"data":{"deleteConfig":"true"}}' > /dev/null
+          done
+        else [ "${ako_warned:-}" == "${vks}" ] || { warn "no admin kubeconfig for ${vks}: AKO cannot be cleaned there"; ako_warned="${vks}"; }; fi
+      done
+    }
+    ako_delete_config
+    ako_polls=0
+    avi_empty_ako() { ako_polls=$((ako_polls + 1)); [ $((ako_polls % 6)) -eq 0 ] && ako_delete_config; avi_empty; }   # a poll every 10 s, the patch re-checked every minute
+    say "waiting (15 min at most) for the Avi tenant ${org} to have no virtual service left"
+    wait_until "Avi tenant ${org} empty" 900 avi_empty_ako || { warn "Avi still has $(avi_vs_count) virtual service(s) of workloads for ${org}: not deleting the VKS cluster"; avi_vs_list; return 1; }
+  fi
   # VKS clusters, then the namespaces
   get_org_token
   for pair in ${vks_pairs}; do
@@ -627,6 +645,19 @@ del_workloads() { # deployments, AKO cleanup, VKS clusters, namespaces
     do_it "DELETE VKS cluster ${vks}" ns_k8s_api DELETE "${endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns}/clusters/${vks}" "" "${org_token}" || { warn "deleting ${vks} failed (${response_code})"; return 1; }
     vks_gone() { get_org_token; ns_k8s_api GET "${endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns}/clusters/${vks}" "" "${org_token}"; [ "${response_code}" == "404" ]; }
     wait_until "VKS cluster ${vks} gone" 2400 vks_gone || return 1
+  done
+  # Persistent volume claims left in the namespaces. A guest cluster's CSI driver mirrors its volumes as PVCs in the Supervisor namespace; the cluster is
+  # deleted as a whole, so it never removes them, and nothing owns them or uses them any more (the deployments and the cluster VMs are gone). vCenter
+  # refuses to delete a namespace that still holds bound volumes (VCF Automation: phase Error, FailedToDeleteNamespace; org-1 of the sddc lab, 2026-11-16,
+  # two PVCs of 1 and 2 Gi), and a new cluster of recreate-vks would leave the old cluster's volumes behind for good. The data of those volumes goes with them.
+  local pvc_left
+  for ns in ${ns_list}; do
+    pvc_left=$(supkc -n "${ns}" get pvc --no-headers 2> /dev/null | wc -l)
+    [ "${pvc_left}" -gt 0 ] || continue
+    say "deleting ${pvc_left} persistent volume claim(s) left in ${ns}: $(supkc -n "${ns}" get pvc -o jsonpath='{range .items[*]}{.metadata.name}={.spec.resources.requests.storage} {end}' 2> /dev/null | cut -c1-200)"
+    do_it "delete the persistent volume claims of ${ns}" supkc -n "${ns}" delete pvc --all --wait=false > /dev/null || warn "deleting the persistent volume claims of ${ns} failed"
+    pvcs_gone() { [ "$(supkc -n "${ns}" get pvc --no-headers 2> /dev/null | wc -l)" == "0" ]; }
+    wait_until "persistent volume claims of ${ns} gone" 300 pvcs_gone || return 1
   done
   [ "${keep_namespaces}" == "true" ] && return 0
   # virtual machines still in the namespaces (not created by a deployment, or left behind by one). The VKS clusters are gone by now, so
@@ -648,28 +679,60 @@ del_workloads() { # deployments, AKO cleanup, VKS clusters, namespaces
   for ns in ${ns_list}; do
     say "deleting the namespace ${ns}"
     do_it "DELETE namespace ${ns}" cci_api DELETE "${ns_api_base}/${ns}" "" "${org_token}" || { warn "deleting ${ns} failed (${response_code})"; return 1; }
-    ns_gone() { get_org_token; cci_api GET "${ns_api_base}/${ns}" "" "${org_token}"; [ "${response_code}" == "404" ]; }
+    ns_error_polls=0
+    # A delete that failed leaves the namespace in phase Error (reason FailedToDeleteNamespace) and VCF Automation does not try again by itself: the cause goes
+    # into the log and the request is sent again, once a minute (the cause is usually something removed meanwhile, or still to remove: see the PVCs above)
+    ns_gone() {
+      get_org_token; cci_api GET "${ns_api_base}/${ns}" "" "${org_token}"
+      [ "${response_code}" == "404" ] && return 0
+      if [ "$(echo ${response_body} | jq -r '.status.phase // empty')" == "Error" ]; then
+        ns_error_polls=$((ns_error_polls + 1))
+        if [ $((ns_error_polls % 6)) -eq 1 ]; then
+          warn "VCF Automation reports the namespace ${ns} in Error ($(echo ${response_body} | jq -r '[.status.conditions[]? | select(.status == "False") | "\(.reason): \(.message // "")"] | unique | join("; ")' | cut -c1-200)): sending the delete request again"
+          cci_api DELETE "${ns_api_base}/${ns}" "" "${org_token}" || true
+        fi
+      fi
+      return 1
+    }
     wait_until "namespace ${ns} gone" 1200 ns_gone || return 1
   done
 }
 # certificates left in the org's Avi tenant (AKO's Gateway CA, the Vault intermediate): VCF-A deletes the tenant when the Avi setting is switched
 # off, and Avi refuses ("Cannot delete, object is referred by SSLKeyAndCertificate ...") while any is left, so the setting stays active=true
-# and the regional networking cannot be deleted. Only objects owned by the tenant itself are removed. Two passes, a cert may refer to another.
+# and the regional networking cannot be deleted ("cannot be deleted since it has active Avi Load Balancer configuration"). Only objects owned by the
+# tenant itself are removed. A certificate cannot go while another one refers to it (the AKO CA is referred to by the Vault intermediate: the child
+# first, then the parent), and what refers to it can itself still be on its way out (virtual services of the Supervisor's AKO go a little after the
+# namespace): so passes are repeated, up to 8, while something is left, pausing 10 s after a pass that deleted nothing; the last Avi answer of each
+# certificate that stays goes into the warning (it used to be thrown away).
+avi_cert_delete() { # uuid -> 0 gone, 1 refused: avi_cert_err holds Avi's reason
+  local out
+  out=$(curl -sk -m 30 -X DELETE --write-out "\n%{http_code}" -b /tmp/avi_cookies.txt -H "X-CSRFToken: ${avi_csrftoken}" -H "X-Avi-Tenant: ${org}" -H "X-Avi-Version: ${avi_version}" -H "Referer: https://${ip_avi}" "https://${ip_avi}/api/sslkeyandcertificate/${1}")
+  avi_cert_code=$(tail -n1 <<< "${out}")
+  avi_cert_err=$(sed '$ d' <<< "${out}" | jq -r '.error // empty' 2> /dev/null)
+  [ -n "${avi_cert_err}" ] || avi_cert_err="HTTP ${avi_cert_code}"
+  [[ "${avi_cert_code}" == 2[0-9][0-9] || "${avi_cert_code}" == "404" ]]
+}
 avi_clear_tenant_certs() {
   avi_init
-  local tuuid pass u n certs
+  local tuuid pass u n certs deleted errs
   tuuid=$(avi_get "api/tenant?name=${org}" | jq -r '.results[0].uuid // empty'); [ -n "${tuuid}" ] || return 0
-  for pass in 1 2; do
+  for pass in 1 2 3 4 5 6 7 8; do
     certs=$(curl -sk -m 30 -b /tmp/avi_cookies.txt -H "X-CSRFToken: ${avi_csrftoken}" -H "X-Avi-Tenant: ${org}" -H "X-Avi-Version: ${avi_version}" -H "Referer: https://${ip_avi}" "https://${ip_avi}/api/sslkeyandcertificate?page_size=200" \
       | jq -r --arg t "${tuuid}" '.results[]? | select((.tenant_ref // "") | endswith("/" + $t)) | "\(.uuid) \(.name)"')
     [ -n "${certs}" ] || return 0
+    if [ "${dry_run}" == "true" ]; then
+      while read -r u n; do [ -n "${u}" ] && say "[dry-run] would: delete the Avi certificate ${n} of tenant ${org}"; done <<< "${certs}"
+      return 0
+    fi
+    deleted=0; errs=""
     while read -r u n; do
       [ -n "${u}" ] || continue
-      if [ "${dry_run}" == "true" ]; then say "[dry-run] would: delete the Avi certificate ${n} of tenant ${org}"
-      else ( avi_api 2 3 DELETE "" "api/sslkeyandcertificate/${u}" "${org}" ) > /dev/null 2>&1 && ok_say "Avi certificate ${n} of tenant ${org} deleted" || [ "${pass}" == "1" ] || warn "deleting the Avi certificate ${n} failed"; fi
+      if avi_cert_delete "${u}"; then ok_say "Avi certificate ${n} of tenant ${org} deleted"; deleted=$((deleted + 1)); else errs="${errs} ${n}: ${avi_cert_err} |"; fi
     done <<< "${certs}"
-    [ "${dry_run}" == "true" ] && return 0
+    [ -n "${errs}" ] || continue                       # everything of this pass went: look once more for what is left (usually nothing)
+    [ "${deleted}" -gt 0 ] || { [ "${pass}" == "8" ] && { warn "Avi certificate(s) of tenant ${org} stay: ${errs}"; return 0; }; sleep 10; }
   done
+  warn "Avi certificate(s) of tenant ${org} are still there after 8 passes: ${errs}"
 }
 del_vcfa_org() { # regional networking (Avi setting, NSX project), vDC, org user, the org
   org_lookup
