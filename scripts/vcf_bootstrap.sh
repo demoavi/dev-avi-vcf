@@ -36,6 +36,15 @@ mkdir -p /home/ubuntu/html /home/ubuntu/json
 source /home/ubuntu/bash/variables.sh
 source "${script_dir}/functions.sh"
 
+# /home/ubuntu/json/vcf_status.json (state, phase, exit code of every phase): vApp use case only. The sddc gw is reachable by ssh and has
+# no operator reading it, so the same calls below are no-ops there.
+if [ "${deployment_kind}" == "vApp" ]; then
+  source "${script_dir}/vcf_status.sh"
+else
+  vcf_status_run_start() { :; }; vcf_status_phase_start() { :; }; vcf_status_phase_end() { :; }
+  vcf_status_paused() { :; }; vcf_status_run_end() { :; }; vcf_status_exit() { :; }; vcf_status_install_uploader() { :; }
+fi
+
 # VCD session, established up front - see vcd_login() in functions.sh.
 # Every phase script below also calls this itself (each announces its own
 # "started" via log_notify at its own top, and does its own error
@@ -122,7 +131,15 @@ done
 
 started="false"
 [ -z "${start_from}" ] && started="true"
+run_mode="full"
+[ -n "${start_from}" ] && run_mode="from:${start_from}"
+[ -n "${only_phase}" ] && run_mode="only:${only_phase}"
+vcf_status_install_uploader "${jsonFile}" "${script_dir}"
+vcf_status_run_start "${phases}" "${run_mode}" "${jsonFile}"
+trap vcf_status_exit EXIT
+phase_index=0
 for phase in ${phases}; do
+  phase_index=$((phase_index + 1))
   if [ -n "${only_phase}" ]; then
     [ "${phase}" == "${only_phase}" ] || continue
   else
@@ -130,14 +147,19 @@ for phase in ${phases}; do
       [ "${phase}" == "${start_from}" ] && started="true" || continue
     fi
     if [ -z "${start_from}" ] && [ "${phase}" == "${stop_before_phase:-}" ]; then
+      vcf_status_paused "${phase}" "bash ${script_dir}/vcf_bootstrap.sh ${jsonFile} --from ${phase}"
       log_notify "vcf_bootstrap.sh paused before ${phase}.sh (stop_before_phase=${phase}). Resume: bash ${script_dir}/vcf_bootstrap.sh ${jsonFile} --from ${phase} (or --only <phase> for a single phase)"
       exit 0
     fi
   fi
+  vcf_status_phase_start "${phase}" "${phase_index}"
+  phase_t0=$(date +%s)
   bash "${script_dir}/${phase}.sh" "${jsonFile}"
   phase_exit=$?
+  vcf_status_phase_end "${phase}" "${phase_exit}" "$(( $(date +%s) - phase_t0 ))" "bash ${script_dir}/vcf_bootstrap.sh ${jsonFile} --from ${phase}"
   if [ ${phase_exit} -ne 0 ]; then
     log_notify "ERROR: ${phase}.sh failed (exit code ${phase_exit}), aborting vcf_bootstrap.sh"
     exit 1
   fi
 done
+vcf_status_run_end

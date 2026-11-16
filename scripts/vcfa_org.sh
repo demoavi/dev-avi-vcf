@@ -4,8 +4,8 @@
 # steps the bootstrap phases do for every org - forward for `add`, in reverse order for `delete`. Run it on the gw as ubuntu.
 #
 #   vcfa_org.sh status <org>
-#   vcfa_org.sh add    <org> [--yes] [--dry-run] [--no-isolate-others]
-#   vcfa_org.sh recreate-vks <org> [--yes] [--dry-run]   delete the org's VKS cluster(s) and create a new one (named <org>-vks-<id>)
+#   vcfa_org.sh add    <org> [--yes] [--dry-run] [--no-isolate-others] [--vks-retries N] [--vks-stall-min M]
+#   vcfa_org.sh recreate-vks <org> [--yes] [--dry-run] [--vks-retries N] [--vks-stall-min M]   delete the org's VKS cluster(s) and create a new one (named <org>-vks-<id>)
 #   vcfa_org.sh isolate <org> [--dry-run]    only the vCenter isolation between <org> and every other org (see below)
 #   vcfa_org.sh delete <org> [--yes] [--dry-run] [--force]   (--force: also an org already handed to a student by gw-org-api)
 #   common: [--json <file>]   the deployment json the pipeline was started with (default $JSON_FILE, else
@@ -40,6 +40,12 @@
 #          start with "<org>-vks-" (what a DRS VM group can match), and redoes what depends on it: pod security, cert, ArgoCD, the
 #          kubeconfig in /home/<org>/.kube/config.
 #
+# VKS cluster retry (add, recreate-vks): after the tenant phase the cluster is checked (Available, every machine holds a node). When it is not,
+#          the evidence goes to the log (cluster and machine conditions, VM states), the cluster is deleted and built again, up to
+#          --vks-retries times (default 1, so 2 attempts; 0 = no retry). Every attempt but the last waits only --vks-stall-min minutes
+#          (default 20; builds take about 7-11) for the cluster and skips the catch-up wait; the last one waits as long as the pipeline
+#          always did. If it still is not ready, the rest of the command runs (isolation, watcher) and the exit code is 1.
+#
 # Scope and limits:
 #   - Only orgs defined in the spec can be added. A deleted org that is still in the spec stays gone while its marker
 #     /home/<org>/.delete exists (gw accounts only: on a gw without accounts the next vcf_bootstrap.sh run recreates it).
@@ -62,12 +68,15 @@ case "${action}" in status|add|delete|isolate|recreate-vks) ;; -h|--help|"") usa
 case "${org}" in ""|-*) echo "an org name is needed: vcfa_org.sh ${action} <org>" >&2; exit 1 ;; esac
 shift 2
 keep_namespaces="false"; assume_yes="false"; force="false"; dry_run="false"; isolate_others="true"; jsonFile="${JSON_FILE:-}"
+vks_retries=1; vks_stall_min=20
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes) assume_yes="true"; shift ;;
     --force) force="true"; shift ;;
     --dry-run) dry_run="true"; shift ;;
     --no-isolate-others) isolate_others="false"; shift ;;
+    --vks-retries) vks_retries="${2:?--vks-retries needs a number}"; shift 2 ;;
+    --vks-stall-min) vks_stall_min="${2:?--vks-stall-min needs a number of minutes}"; shift 2 ;;
     --json) jsonFile="${2:?--json needs a file}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
@@ -82,7 +91,8 @@ VCFA_KEEP_DELETED=1   # functions.sh hides deleted orgs (/home/<org>/.delete) fr
 source "${script_dir}/functions.sh"
 log_file="/home/ubuntu/vcfa_org.log"; slack_webhook=""
 touch "${log_file}"
-say() { local m="$(date "+%Y-%m-%d,%H:%M:%S"), vcfa_org ${action} ${org}: $*"; echo "${m}"; echo "${m}" >> "${log_file}"; }
+# also in vcf_bootstrap.log: the phases this script runs write their progress there, so the whole story of an org operation is in one file
+say() { local m="$(date "+%Y-%m-%d,%H:%M:%S"), vcfa_org ${action} ${org}: $*"; echo "${m}"; echo "${m}" >> "${log_file}"; echo "${m}" >> /home/ubuntu/vcf_bootstrap.log 2> /dev/null; }
 die() { say "ERROR: $*"; exit 1; }
 warn() { say "WARNING: $*"; }
 # ok_say: a completion message, not printed by --dry-run (nothing was done)
@@ -377,6 +387,71 @@ add_isolation() {
       && say "vCenter: ${viewer}@${sso_domain} has NoAccess on ${ns}" || warn "NoAccess for ${viewer} on ${ns} failed"
   done
 }
+# diag_kick: push the status and the logs to the private diagnostics repo (vApp use case with spec.diagnostics) at the start and at the end of a run, detached and
+# best effort: this script's messages are in vcf_bootstrap.log, which is what gets uploaded (vapp-diagnostics-upload.sh), so whoever reads the repo sees the run
+diag_kick() {
+  [ "${dry_run}" == "true" ] && return 0
+  [ "${deployment_kind:-}" == "vApp" ] && [ -n "${diagnostics_repo:-}" ] && [ -f "${script_dir}/vapp-diagnostics-upload.sh" ] || return 0
+  ( setsid nohup bash "${script_dir}/vapp-diagnostics-upload.sh" "${jsonFile}" --force >> /home/ubuntu/vapp-diagnostics.log 2>&1 < /dev/null & ) > /dev/null 2>&1
+  return 0
+}
+
+# ---- VKS cluster check and retry (add, recreate-vks) ---------------------------------------------------------------------------
+# vks_check: 0 when the org needs no cluster, or every cluster of its namespaces is Available and every machine holds a node
+vks_check() {
+  [ "$(echo "${org_item}" | jq -r '.vks_cluster.enabled // false')" == "true" ] || return 0
+  bash /home/ubuntu/supervisor/auth_supervisor_custer.sh > /dev/null 2>&1
+  local ns found=0 cl ma
+  for ns in $(vc_org_namespaces "${org}"); do
+    cl=$(kubectl --context sup-admin-01 --request-timeout=30s -n "${ns}" get clusters.cluster.x-k8s.io -o json 2> /dev/null) || return 1
+    [ "$(echo "${cl}" | jq '.items | length')" -gt 0 ] || continue
+    found=1
+    echo "${cl}" | jq -e '[.items[] | ([.status.conditions[]? | select(.type == "Available") | .status] | first) == "True"] | all' > /dev/null || return 1
+    ma=$(kubectl --context sup-admin-01 --request-timeout=30s -n "${ns}" get machines.cluster.x-k8s.io -o json 2> /dev/null) || return 1
+    echo "${ma}" | jq -e '(.items | length) > 0 and ([.items[] | select(.status.nodeRef == null)] | length) == 0' > /dev/null || return 1
+  done
+  [ ${found} -eq 1 ]
+}
+# vks_diag: what the cluster looks like when it is not ready, into the log (the cause of a stall is not known: keep the evidence)
+vks_diag() {
+  local ns
+  for ns in $(vc_org_namespaces "${org}"); do
+    say "[diag ${ns}] cluster: $(kubectl --context sup-admin-01 --request-timeout=30s -n "${ns}" get clusters.cluster.x-k8s.io -o json 2> /dev/null | jq -r '[.items[] | .metadata.name as $n | .status.conditions[]? | select(.status != "True" and ([.type] | inside(["RollingOut","Remediating","ScalingUp","ScalingDown","Deleting","Paused"]) | not)) | "\($n) \(.type)=\(.status) \(.message // "" | gsub("\n"; " ") | .[0:200])"] | join(" | ")')"
+    say "[diag ${ns}] machines: $(kubectl --context sup-admin-01 --request-timeout=30s -n "${ns}" get machines.cluster.x-k8s.io -o json 2> /dev/null | jq -r '[.items[] | "\(.metadata.name) phase=\(.status.phase) node=\(.status.nodeRef.name // "none")"] | join(" | ")')"
+    say "[diag ${ns}] vms: $(kubectl --context sup-admin-01 --request-timeout=30s -n "${ns}" get virtualmachines.vmoperator.vmware.com -o json 2> /dev/null | jq -r '[.items[] | "\(.metadata.name) \(.status.powerState // "?") ip=\(.status.network.primaryIP4 // "none")"] | join(" | ")')"
+  done
+}
+# tenant_with_vks_retry: the tenant phase for this org, then the check; on failure the cluster is rebuilt (like recreate-vks) up to vks_retries times.
+# Returns 1 when the cluster is still not ready after the last attempt (the caller goes on and exits non-zero at the end).
+tenant_with_vks_retry() {
+  local attempt=1 max=$((vks_retries + 1))
+  case "${vks_retries}${vks_stall_min}" in *[!0-9]*|'') die "--vks-retries and --vks-stall-min are whole numbers" ;; esac
+  while true; do
+    if [ ${attempt} -lt ${max} ]; then
+      export vks_retry=$((vks_stall_min * 2)) vks_pause=30 vks_catchup=false     # a stall limit, no second wait: this attempt may be repeated
+    else
+      unset vks_retry vks_pause vks_catchup                                      # the last attempt waits as long as the pipeline always did
+    fi
+    run_phase vcfa_tenant_bootstrap only || { unset vks_retry vks_pause vks_catchup; die "vcfa_tenant_bootstrap.sh failed"; }
+    unset vks_retry vks_pause vks_catchup
+    [ "${dry_run}" == "true" ] && return 0
+    if vks_check; then say "the VKS cluster of ${org} is ready (attempt ${attempt}/${max})"; return 0; fi
+    warn "the VKS cluster of ${org} is not ready after attempt ${attempt}/${max}"
+    vks_diag
+    [ ${attempt} -ge ${max} ] && { warn "giving up on the VKS cluster of ${org} after ${max} attempt(s): rerun 'vcfa_org.sh recreate-vks ${org}' or look at the [diag] lines above"; return 1; }
+    say "deleting the VKS cluster of ${org} and creating a new one (attempt $((attempt + 1))/${max})"
+    keep_namespaces="true"
+    del_workloads || die "the workloads of ${org} could not be removed: stopped, nothing created"
+    attempt=$((attempt + 1))
+  done
+}
+# end_summary <vks result>: anything of the org that is not in place, from status (the items that are absent on purpose are left out); exit code 1 when the cluster failed
+end_summary() {
+  local rest; rest=$(do_status 2> /dev/null | grep -E '\|(absent|partial|unknown)\|' | grep -vE '^(deleted-marker|dir /home/ubuntu/)')
+  if [ -n "${rest}" ]; then warn "not in place:"; echo "${rest}" | while read -r l; do say "  ${l}"; done; else ok_say "status: every item of ${org} is in place"; fi
+  [ "${1}" == "0" ] || die "the VKS cluster of ${org} is not ready (see the [diag] lines): everything else was done"
+}
+
 do_add() {
   [ -n "${org_item}" ] || die "${org} is not in the spec (vcf_a_organizations): add it to spec.sddc.vcf_a first"
   check_idle
@@ -387,12 +462,14 @@ do_add() {
   avi_dns_domains add
   add_git
   run_phase vcfa_provider_bootstrap only || die "vcfa_provider_bootstrap.sh failed"
-  run_phase vcfa_tenant_bootstrap only || die "vcfa_tenant_bootstrap.sh failed"
+  local vks_rc=0
+  tenant_with_vks_retry || vks_rc=1
   if [ "${isolate_others}" == "true" ]; then add_isolation; else
     say "NOTE: no vCenter NoAccess entries written (--no-isolate-others): the orgs can see each other's namespaces in vCenter"
   fi
   run_phase supervisor-blueprint-watcher all
   say "done"
+  [ "${dry_run}" == "true" ] || end_summary "${vks_rc}"
 }
 
 #
@@ -668,10 +745,14 @@ do_recreate_vks() {
   fi
   keep_namespaces="true"
   del_workloads || die "the workloads of ${org} could not be removed: stopped, nothing created"
-  run_phase vcfa_tenant_bootstrap only || die "vcfa_tenant_bootstrap.sh failed"
+  local vks_rc=0
+  tenant_with_vks_retry || vks_rc=1
+  run_phase supervisor-blueprint-watcher all   # the new cluster's namespace labels / targets, like add and delete
   say "done"
+  [ "${dry_run}" == "true" ] || end_summary "${vks_rc}"
 }
 
+[ "${action}" == "status" ] || { diag_kick; trap diag_kick EXIT; }
 case "${action}" in
   recreate-vks) do_recreate_vks ;;
   status) do_status ;;

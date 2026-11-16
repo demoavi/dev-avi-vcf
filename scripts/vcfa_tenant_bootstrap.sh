@@ -188,7 +188,8 @@ else
         continue
       fi
 
-      retry_vks=60 ; pause_vks=30 ; attempt_vks=1
+      # vks_retry / vks_pause (environment, default 60 x 30 s): vcfa_org.sh shortens the wait to a stall limit and rebuilds the cluster itself
+      retry_vks=${vks_retry:-60} ; pause_vks=${vks_pause:-30} ; attempt_vks=1
       while true
       do
         ns_k8s_api GET "${ns_endpoint}" "apis/cluster.x-k8s.io/v1beta2/namespaces/${ns_name}/clusters/${vks_name}" "" "${org_token}"
@@ -1016,7 +1017,8 @@ ARGOCD_GATEWAY_EOF
   # vks_sequential=false). Orgs already finished (vks_done_orgs) are skipped.
   #
   vks_filter_org=""
-  vks_finish_pass
+  # vks_catchup=false (environment, set by vcfa_org.sh for an attempt it may repeat): no second wait for a cluster that did not come up
+  [ "${vks_catchup:-true}" == "true" ] && vks_finish_pass
 fi
 
 #

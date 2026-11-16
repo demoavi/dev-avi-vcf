@@ -14,6 +14,13 @@ runs one phase. Both ignore `stop_before_phase`. A phase name that is not in the
 the script before anything runs, with the list of valid names. Typical use: build everything up to `nsx-bootstrap` and pause before
 `avi-bootstrap` while the Avi licence pool has no free service units. The vApp CRD limits the field to the phase names (an enum).
 
+**Status file (vApp use case only).** `vcf_bootstrap.sh` keeps `/home/ubuntu/json/vcf_status.json` (written by `vcf_status.sh`, atomically) for
+whatever cannot read the log: `state` (`running`, `failed`, `paused`, `complete`, `partial` = a `--from`/`--only` run ended well but some phases are
+not `ok`, `interrupted` = the runner was killed), the current `phase` with `phase_index`/`phase_count` and `phase_exit_code`, `failed_phase` and the
+exact `resume_command` after a failure, and per phase `state`/`started`/`ended`/`seconds`/`exit_code`. A resumed run keeps what the earlier run recorded for the
+phases it does not touch. It changes at events only (phase start/end, failure, pause, end), not while a phase is silent. On the sddc use case the
+calls do nothing. A gw started from a captured template must reset it.
+
 Phases are self-contained and idempotent (re-runnable): each re-sources the variables, re-logs in, and skips what already
 exists. Phases marked **soft-fail** log an ERROR and exit 0, so an optional feature never aborts the pipeline.
 
@@ -224,6 +231,14 @@ cleans what is left; running `delete` on an org deleted by an older version of t
 is marked, and an org that stays in the spec is recreated by the next `vcf_bootstrap.sh`. The org must be in the spec to be added. Isolation: an org's vCenter user needs an explicit NoAccess entry on every other org's namespace
 (vCenter shows all namespaces to a user with any grant above them); `add` and `isolate` write them in both directions, `status` checks
 them. Refuses to run while a bootstrap phase runs; `delete` asks for `yes`. Log: `/home/ubuntu/vcfa_org.log`.
+**VKS cluster retry (`add`, `recreate-vks`).** After the tenant phase the cluster is checked (CAPI `Available`, every machine holds a node). When it is not, the
+evidence goes to the log (`[diag ...]` lines: cluster and machine conditions, VM states), the cluster is deleted and built again, up to `--vks-retries N` times (default 1;
+0 = never). An attempt that can be repeated waits `--vks-stall-min` minutes (default 20; builds take 7-11) and skips the tenant script's catch-up wait (`vks_retry`,
+`vks_pause`, `vks_catchup` are its environment overrides); the last attempt waits as long as the pipeline always did. If the cluster is still not ready the rest of the
+command (vCenter isolation, watcher) is done and the exit code is 1; `add` and `recreate-vks` end with the items of `status` that are not in place. `recreate-vks` now also
+re-runs the watcher. In the vApp use case with `spec.diagnostics`, every run that changes something (not `status`, not `--dry-run`) pushes the status and the logs to the
+diagnostics repo when it starts and when it ends (`diag_kick`), and the messages of `vcfa_org.sh` are in `vcf_bootstrap.log`, which is what gets uploaded; `status.json` -> `activity`
+lists the scripts running on the gw, also for a run started by hand.
 `recreate-vks <org>` keeps the org (account, namespace, VCF-A, Git, Vault, Avi domains, isolation) and replaces its VKS cluster: deployments,
 AKO's Avi objects and the cluster(s) are deleted (namespace kept), then `vcfa_tenant_bootstrap.sh` limited to the org builds a new cluster and
 redoes pod security, cert, ArgoCD and `/home/<org>/.kube/config` (about 20 min on the sddc lab). VM names: the cluster is called
@@ -264,6 +279,31 @@ the org's SE; every other parent or normal VS on another SE is moved there with 
 nothing is left to move: an SE with no VS is removed (unless `--no-delete-idle-se`), after two idle runs and 10 minutes online, when its SE group has `buffer_se` 0
 (with `buffer_se` 1 Avi creates the SE again at once, it is the buffer: reported once, set `buffer_se: 0` on the group) and keeps more than `min_se` SEs; with
 `--no-delete-idle-se` it is only reported. A tenant without a VKS control-plane VIP VS is left alone. Skips the run while a bootstrap phase or `vcfa_org.sh` runs. A move takes the VS out for a few seconds.
+
+### Manual tool: `vcfa_org_all.sh` (not part of the pipeline)
+`vcfa_org_all.sh delete|add|status [--yes] [--force] [--dry-run] [--json <file>]` runs `vcfa_org.sh` for every org of the spec, one after the other, and stops at the
+first failure (run it again to continue). `delete` takes the orgs without a `/home/<org>/.delete` marker, `add` the ones with it, so the marker is the only state
+and it travels with the gw's disk (a captured template keeps it). `--force` is passed to `vcfa_org.sh delete` (an org already handed to a student is refused without
+it). A preflight first lists the orgs a student holds (`/home/<org>/.assigned`): without `--force` nothing at all is deleted while there is one (exit code 2); with it they
+are deleted anyway and the list is logged as a WARNING. About 4 minutes per org for delete, 20-30 for add (the VKS cluster).
+
+### vApp only: the diagnostics channel (`spec.diagnostics`: private repo, status, encrypted logs, commands)
+For a vApp gw nobody can ssh to. `spec.diagnostics` (CR: `repo`, `ssh_private_key`, `log_encryption_key`) gives the gw a deploy key and a passphrase (written by
+`gw-setup.sh.tpl` at first boot only: an existing gw does not get them). `vcf_bootstrap.sh` then installs two crontab entries, both in the vApp use case only:
+- `vapp-diagnostics-upload.sh` (every 5 minutes, and started at each status write): pushes `status.json` (the `vcf_status.json` above plus the last command) and
+  the AES-256 encrypted, gzipped logs (`vcf_bootstrap.log`, now also holding `vcfa_org.sh`'s messages, and the output of the last commands) to the branch
+  `instance/<vApp uuid>` under `instances/<uuid>/`; one commit, amended and force-pushed. The status goes when it changed or every 5 minutes while something runs;
+  the log tail (3000 lines, the whole log after a failure) with every change and every 30 minutes while running. Without `log_encryption_key` no log is uploaded.
+- `vapp-diagnostics-command.sh` (every minute): looks at `main:instances/<uuid>/command.json` and runs it when it is valid and nothing else is going on.
+  A command is `{id, action, args, issued_at, expires_at, uuid, sig}`; `sig` is an HMAC-SHA256 with `log_encryption_key` (no key on the gw = no command ever runs). Refused:
+  bad signature, another vApp's uuid, an id seen before, an unknown action or arguments; expired: `expires_at` (at most 7 days) passed before it could start. Actions are a fixed
+  table, never a shell: `status`, `upload-now` (read-only, run even when busy), `org-delete-all`, `org-add-all` (args `dry_run`, `force`), `org-delete`/`org-add` (args `org`),
+  `bootstrap-from` (arg `phase`, checked against `vcf_bootstrap.sh`'s list). The others wait ("waiting" in `status.json`) while a bootstrap phase, `vcfa_org*.sh` or a cleaning is
+  running or an earlier command still runs; one command at a time.
+- The vApp uuid is read from VCD (the gw VM's container), cached in `/run` only: a vApp made from a captured template has its own uuid. Reset `vcf_status.json`, `.vapp-diagnostics/`
+  (command state, ids seen) and the work trees before capturing a template.
+- Other end: `vapp-diagnostics-ctl.sh list|status <uuid>|log <uuid> [<command id>]|send <uuid> <action> [--args '<json>'] [--ttl s]` on any host with the deploy key
+  and the key file. State of a command: `status.json` -> `command` (`waiting|running|done|failed|refused|expired`, `rc`, `reason`); its output: `command-<id>.log.gz.enc`.
 
 ### Helpers
 `functions.sh` (log_notify, vcd_login, vcfa_login/vcfa_api, `vcfa_health_gate`, `chown_org_or_ubuntu`, avi/nsx/vcenter API helpers, `find_org_manifest`). Sourcing it also
