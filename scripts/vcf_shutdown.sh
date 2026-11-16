@@ -79,7 +79,7 @@ host_ips="$(echo "${ips_esxi}" | jq -r '.[]')"
 : "${PAT_VCFA:=^${bn}-auto-platform}" "${PAT_VSP:=^${bn}-vsp01-}" "${PAT_SUPERVISOR:=^SupervisorControlPlaneVM}" "${PAT_K8S_SHARED:=^k8s-shared-}"
 : "${PAT_AVI_SE:=^vcf_Avi-se-}" "${PAT_AVI_CTRL:=^${bn}-avi-node}" "${PAT_NSX_EDGE:=^edge-[0-9]}" "${PAT_NSX_MGR:=^${bn}-nsx[0-9]}"
 : "${PAT_OPS:=^${bn}-(collector|ops[0-9]|license)}" "${PAT_SDDCM:=^${bn}-sddcm$}" "${PAT_VC:=^${bn}-vc01$}"
-# the Broadcom script (KB 440874) is Broadcom Confidential: it is placed on the gw by hand (or with the gw-tools ISO), never from a repo
+# the Broadcom script (KB 440874) is Broadcom Confidential: it comes with the gw-tools ISO (copied to /home/ubuntu/ as ubuntu:ubuntu, mode 600, so it is run with bash, not executed), never from a repo
 : "${VSP_SHUTDOWN_SCRIPT:=/home/ubuntu/vcf_services_runtime_shutdown.sh}"
 export SSHPASS="${pw}"
 
@@ -190,8 +190,8 @@ REMOTE_EOF
 phase_vsp() {
   local ip="" cand tok code
   [ "$(vm_paths "${PAT_VSP}" | wc -l)" -gt 0 ] || { say "no VSP VMs found: skipping"; return 0; }
-  if [ ! -x "${VSP_SHUTDOWN_SCRIPT}" ]; then
-    say "the Broadcom VSP shutdown script is missing or not executable: ${VSP_SHUTDOWN_SCRIPT} (KB 440874, Broadcom Confidential, placed by hand). Without it the VSP platform would be powered off without its graceful stop."
+  if [ ! -r "${VSP_SHUTDOWN_SCRIPT}" ]; then
+    say "the Broadcom VSP shutdown script is missing or not readable: ${VSP_SHUTDOWN_SCRIPT} (KB 440874, Broadcom Confidential, delivered with the gw ISO, which copies it to /home/ubuntu/ with mode 600). Without it the VSP platform would be powered off without its graceful stop."
     [ "${dry_run}" == "true" ] && return 0; return 1
   fi
   # the control-plane node: the one whose management API lists the components (a worker answers 404)
@@ -203,7 +203,7 @@ phase_vsp() {
   done < <(vm_paths "${PAT_VSP}")
   [ -n "${ip}" ] || { say "no VSP control-plane node answers on 5480"; return 1; }
   say "VSP control-plane node: ${ip}"
-  act "run ${VSP_SHUTDOWN_SCRIPT} --node-ip ${ip} --yes --skip-snapshot-check (about 4 minutes)" env VMSP_PASSWORD="${pw}" "${VSP_SHUTDOWN_SCRIPT}" --node-ip "${ip}" --yes --skip-snapshot-check 2>&1 | sed 's/^/    /' | tail -25
+  act "run bash ${VSP_SHUTDOWN_SCRIPT} --node-ip ${ip} --yes --skip-snapshot-check (about 4 minutes)" env VMSP_PASSWORD="${pw}" bash "${VSP_SHUTDOWN_SCRIPT}" --node-ip "${ip}" --yes --skip-snapshot-check 2>&1 | sed 's/^/    /' | tail -25
   [ "${dry_run}" == "true" ] && return 0
   [ "${PIPESTATUS[0]}" == "0" ] || return 1
 }

@@ -259,8 +259,8 @@ when the tenant phase runs for the org (new orgs, `recreate-vks`, a rerun); exis
 ### Manual tool: `vcf_shutdown.sh` (not part of the pipeline; also the lifecycle action `platform-shutdown`)
 `bash vcf_shutdown.sh <json> [--dry-run] [--from|--only <phase>] [--skip-flush] [--flush-minutes N] [--poweroff-gw]`: the ordered shutdown of the nested platform, written from
 `SHUTDOWN-STARTUP-RECIPE.md`. Phases: `precheck` (refuses, exit 2, unless every org has `/home/<org>/.delete`: run `vcfa_org.sh delete --all` first; `--dry-run` only warns), `inventory`
-(`/home/ubuntu/platform-state/`: VMs, hosts, what was powered on), `vcfa`, `vsp` (Broadcom's `vcf_services_runtime_shutdown.sh`, path in `VSP_SHUTDOWN_SCRIPT`, default `/home/ubuntu/`; NOT in
-this repo, the phase fails when it is missing), `wcp`, `supervisor`, `k8s-shared`, `vsp-vms`, `avi`, `nsx`, `operations`, `sddc-manager`, `vcenter`, `audit`, `stragglers` (guest shutdown, pod VMs
+(`/home/ubuntu/platform-state/`: VMs, hosts, what was powered on), `vcfa`, `vsp` (Broadcom's `vcf_services_runtime_shutdown.sh`, path in `VSP_SHUTDOWN_SCRIPT`, default `/home/ubuntu/vcf_services_runtime_shutdown.sh`; NOT in
+this repo: it comes with the gw ISO, which copies it to `/home/ubuntu/` with mode 600, so it is run with `bash`; the phase fails when it is missing), `wcp`, `supervisor`, `k8s-shared`, `vsp-vms`, `avi`, `nsx`, `operations`, `sddc-manager`, `vcenter`, `audit`, `stragglers` (guest shutdown, pod VMs
 powered off with the Harbor database last), `flush` (vSAN OSA elevator, ceiling `--flush-minutes`, default 45; not finishing is logged, not fatal), `hosts` (hard guard: exit 3 while any VM is
 on), `installer`, `ready`. sddc: VMs through the underlay govc; vApp: through VCD (`vcd_vm_filter`, power/action/shutdown). Status: `/home/ubuntu/json/vcf_shutdown_status.json` (same shape as
 `vcf_status.json` plus `ready_for_poweroff`; the uploader sends it as `shutdown` in `status.json`), log `/home/ubuntu/vcf_shutdown.log`. The gw stays up (`--poweroff-gw` schedules `shutdown -h +2`
