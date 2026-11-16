@@ -475,7 +475,7 @@ sddc_id=$(echo ${response_body} | jq -c -r .id)
 log_notify "VCF-I: starting building sddc id ${sddc_id}"
 # The build takes hours and the installer reports its progress as milestones (Deploy vCenter, Deploy SDDC Manager, Configure vSphere
 # cluster, Deploy and configure NSX, ...; each with a status NOT_STARTED / IN_PROGRESS / COMPLETED_WITH_SUCCESS and completed/total
-# tasks). Every poll compares them with the previous one and sends one log_notify (chat, plus the VCD metadata in the vApp use case)
+# tasks). Every poll compares them with the previous one and sends one log_notify (chat)
 # per milestone whose status changed. The first poll only seeds the state and sends one summary line, so restarting this phase does
 # not replay milestones that were already done. A response without milestones (older installer, API hiccup) is ignored.
 declare -A milestone_state

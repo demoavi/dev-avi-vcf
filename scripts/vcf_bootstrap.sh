@@ -57,7 +57,7 @@ vcd_login
 # gw's own cloud-init, well before this script is launched, so a failure
 # here means gw's own network services never came up correctly. Moved here
 # (rather than a standalone check inside cloud-init) so it can reuse
-# log_notify's existing gchat + VCD metadata reporting instead of
+# log_notify's existing gchat reporting instead of
 # duplicating that logic.
 if ! systemctl status bind9.service > /dev/null 2>&1; then
   log_notify "ERROR: DNS (bind9.service) is not running"

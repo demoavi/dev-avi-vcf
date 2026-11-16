@@ -74,7 +74,7 @@ then submits and polls the SDDC build until `COMPLETED_WITH_SUCCESS`. The build 
 **Build progress (milestones).** The installer reports the build as 8 milestones (Deploy vCenter, Deploy SDDC Manager, Configure vSphere
 cluster, Deploy and configure NSX, ...the VCF Management Platform, the operations appliance, VCF Management Services, VCF Automation), each
 `NOT_STARTED`, `IN_PROGRESS` or `COMPLETED_WITH_SUCCESS`, with completed/total tasks (`GET /v1/sddcs/<id>`). The phase polls it every minute
-and sends one `log_notify` (the chat webhook, plus the VCD metadata in the vApp use case) for each milestone that starts, completes or ends in
+and sends one `log_notify` (the chat webhook; in the vApp use case the message is also in `vcf_bootstrap.log`, which goes to the diagnostics repo) for each milestone that starts, completes or ends in
 another status, e.g. `VCF-I: build milestone completed - Deploy SDDC Manager (2/8 milestones done, 71 min into the build)`. The first poll only
 sends one summary line (`VCF-I: build milestones (N/8 done): ...`), so restarting the phase does not replay what was already done. A response
 without milestones is ignored.
@@ -322,7 +322,7 @@ Every phase not named in the second table behaves identically in both.
 
 | # | Phase | vApp | sddc |
 |---|---|---|---|
-| 0 | `vcf_bootstrap.sh` itself (`vcd_login`, DNS/NTP check) | VCD login, progress also written into the gw VM's VCD metadata | no VCD: `vcd_login` returns at once, messages only to the chat webhook and stdout |
+| 0 | `vcf_bootstrap.sh` itself (`vcd_login`, DNS/NTP check) | VCD login (used by the licence relay and the diagnostics scripts) | no VCD: `vcd_login` returns at once, messages only to the chat webhook and stdout |
 | 1 | `gw-accounts` | runs (accounts, password SSH, WireGuard) | runs, same (WireGuard needs `wireguard-tools`, installed if missing) |
 | 2 | `gw-org-api` | runs when `spec.vms.gw.org_api` is set | runs when `.gw.org_api` is set in the spec; the reference `variables.sh` must not reset `org_api_*` afterwards |
 | 3 | `gw-blueprint-api` | same | same |
@@ -353,14 +353,14 @@ Every phase not named in the second table behaves identically in both.
 | Tool files (charts, image tars, OVAs, `vcf-cli`, Avi package) | An Iso CR (`spec.vms.gw.iso`, `spec.sddc.avi.pkg_iso`) is built by `iso_operator.py` and attached as the gw's CD-ROM; cloud-init (`gw-setup.sh.tpl`) mounts it, installs `vcf-cli`, puts the Avi package in `/home/ubuntu/avi/` and copies everything else to `/home/ubuntu/` (mode 600). | `sddc.sh` builds an ISO (`xorrisofs`) from `.gw.iso` (list of URLs) and attaches it with govc; the reference cloud-init mounts it at `/mnt/gw-tools` and (since reference commit 204b3d7) copies every file to `/home/ubuntu/` with the same mode. The Avi package and OVAs are `scp`ed by `sddc.sh`. |
 | `ip_gw` | The gw's management-side address, `<MANAGEMENT three octets>.1` (`userdata.py`). | `.gw.ip` of the spec, the gw's own routable address (the one you ssh to). Used as DNS server for NSX segments and VSP, Avi backup host and Vault certificate address, so the nested networks must be able to reach it. |
 | `ip_gw_direct` | The gw's address on its direct (outside) NIC, passed by the operator. | `.gw.ip`, like `ip_gw`. It is the only DNS and NTP server written into the SDDC spec (`templates/sddc_vcf_installer_trunk_9.1.json.template`). |
-| VCD | The gw logs in to VCD (`.vcd.*` in `deployment.json`) and `log_notify` also writes progress into the gw VM's VCD metadata (`vcf_bootstrap_progress`). | There is no VCD and no `.vcd` in the spec. `vcd_login` returns at once, `gw_vm_href` stays unset, and `log_notify` only prints and posts to `google_webhook`. |
+| VCD | The gw logs in to VCD (`.vcd.*` in `deployment.json`) and uses it for the licence relay (the gw VM's VCD metadata); progress is no longer written to VCD (the old `vcf_bootstrap_progress` key was read by nobody), it goes to the diagnostics repo. | There is no VCD and no `.vcd` in the spec. `vcd_login` returns at once, `gw_vm_href` stays unset, and `log_notify` only prints and posts to `google_webhook`. |
 
 ### Inside the phases
 
 | Phase | vApp | sddc |
 |---|---|---|
 | `functions.sh` `vcd_login` | Logs in to VCD and looks up the gw VM (`vcd_find_vm_href`). | Returns immediately. Before this was added, a spec without `.vcd` made `vcd_find_vm_href` page a nonexistent VCD forever (a log of hundreds of `integer expected` lines per second): every phase that calls `vcd_login` at its top, and `vcf_bootstrap.sh` itself, hung. `vcd_find_vm_href` now also gives up when the answer is not a number. |
-| `log_notify` | Message prefix `nested-<basename> (vApp)`, plus the VCD metadata post. | Prefix `nested-<basename> (sddc)`, no metadata post. |
+| `log_notify` | Message prefix `nested-<basename> (vApp)`. | Prefix `nested-<basename> (sddc)`. |
 | `gw-accounts` | Runs: one Linux account per org, the gw's WireGuard keys and per-org `wg0.conf`. | Runs the same, WireGuard included (tested on the SDDC gw). |
 | `gw-org-api` | Runs when `spec.vms.gw.org_api` is set. | Runs when `.gw.org_api` is set in the spec (tested on the SDDC gw: service up, basic auth, `POST /org` hands out an org with the SDDC bookmarks). |
 | `gw-blueprint-api`, `supervisor-blueprint-watcher` | Run when an org has `blueprints.auto_update.enabled`. | Same, as long as the `blueprint_apps_*` variables exist in `variables.sh`. |

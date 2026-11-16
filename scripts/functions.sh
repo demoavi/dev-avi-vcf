@@ -128,21 +128,18 @@ govc_wait_vm_powered_on() {
 }
 
 # log_only just echoes (already captured by the caller's stdout redirect
-# into vcf_bootstrap.log); log_notify also posts to gchat AND writes the
-# same message into a VCD metadata key (vcf_bootstrap_progress) on gw's own
-# VM, for milestones - lets the operator/anything else with VCD API access
-# poll "what's this script currently doing" directly, without needing
-# someone to relay gchat messages. jq/sed build the JSON/XML bodies so
-# message text is never hand-quoted into a curl argument (the same class
-# of bug that broke the kickstart heredoc earlier in this project).
+# into vcf_bootstrap.log); log_notify also posts to gchat. In the vApp use
+# case vcf_bootstrap.log is what the diagnostics repo gets (see
+# vapp-diagnostics-upload.sh), so nothing is written into VCD any more for
+# progress: the VM metadata key vcf_bootstrap_progress this function used to
+# set on gw's own VM was read by nobody and only ever held the last message.
 #
 # vcd_login sets vcd_host/vcd_user/vcd_password/vcd_org/vcd_api_version/
-# vcd_auth_token/gw_vm_href as globals - log_notify's own VCD-metadata
-# posting (vcf_bootstrap_progress) depends on vcd_auth_token/
-# vcd_api_version/gw_vm_href being set, so every self-contained phase
-# script that wants that progress reporting to work (not just the
-# google_webhook + stdout echo, which work regardless) calls this once
-# near its own top, right after sourcing variables.sh/functions.sh.
+# vcd_auth_token/gw_vm_href as globals - the licence relay of
+# vcf-installer-bootstrap.sh (vcfi_machineId / vcfi_activation_code in the
+# gw VM's VCD metadata) and the diagnostics scripts need them, so every
+# phase that uses either calls this once near its own top, right after
+# sourcing variables.sh/functions.sh.
 vcd_login() {
   # The sddc use case has no VCD (no .vcd in its spec): nothing to log in to, and gw_vm_href stays unset, which log_notify
   # tolerates. Without this every phase hung here, paging a VCD that does not exist.
@@ -170,14 +167,6 @@ log_notify() {
   echo "${message}"
   if [ -n "${google_webhook}" ]; then
     curl -s -X POST -H 'Content-Type: application/json' --data "$(jq -n --arg text "${message}" '{text: $text}')" "${google_webhook}" >/dev/null 2>&1
-  fi
-  if [ -n "${gw_vm_href}" ]; then
-    local escaped=$(echo "${message}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g')
-    curl -sk -X POST "${gw_vm_href}/metadata" \
-      -H "Authorization: Bearer ${vcd_auth_token}" \
-      -H "Accept: application/*+xml;version=${vcd_api_version}" \
-      -H "Content-Type: application/vnd.vmware.vcloud.metadata+xml" \
-      --data "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Metadata xmlns=\"http://www.vmware.com/vcloud/v1.5\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><MetadataEntry><Key>vcf_bootstrap_progress</Key><TypedValue xsi:type=\"MetadataStringValue\"><Value>${escaped}</Value></TypedValue></MetadataEntry></Metadata>" >/dev/null 2>&1
   fi
 }
 create_api_session() {

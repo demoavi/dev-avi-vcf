@@ -23,8 +23,8 @@
 #   --org       only that org's Avi tenant (testing)
 # vApp use case only (the sddc use case runs 2-3 orgs and does not need it; ENFORCE_ALLOW_NON_VAPP=1 only to test against another
 # deployment). Does nothing while vcf_bootstrap.sh, one of its phases or vcfa_org.sh runs (they create VSes and SEs). Each move takes the VS out for a
-# few seconds. A problem that stays is reported once (log_notify: log, Google chat webhook; from cron there is no VCD session, so no
-# VCD metadata), and again after it was gone. Log: /home/ubuntu/enforce-vs-placement.log.
+# few seconds. A problem that stays is reported once (log_notify: log, Google chat webhook; from cron there is no VCD session),
+# and again after it was gone. Log: /home/ubuntu/enforce-vs-placement.log.
 #
 jsonFile="${1:-/home/ubuntu/json/deployment.json}"
 shift
