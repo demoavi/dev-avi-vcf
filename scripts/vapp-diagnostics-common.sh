@@ -15,6 +15,12 @@ diag_lock() {
   flock -n 9 || exit 0
 }
 
+# The vApp uuid cache: ${work_root}/uuid.cache holds "<boot id> <uuid>" and is only believed while /proc/sys/kernel/random/boot_id is the same, i.e. until the
+# next boot (the old cache in /run was root-owned: ubuntu could not write it). A vApp made from a captured template boots with another boot id, so it asks VCD again.
+diag_boot_id() { cat /proc/sys/kernel/random/boot_id 2> /dev/null; }
+diag_uuid_cache_get() { local b u; [ -r "${work_root}/uuid.cache" ] || return 0; read -r b u < "${work_root}/uuid.cache"; [ -n "${b}" ] && [ "${b}" == "$(diag_boot_id)" ] && echo "${u}"; return 0; }
+diag_uuid_cache_put() { [ -n "$(diag_boot_id)" ] && [ -d "${work_root}" ] && echo "$(diag_boot_id) ${1}" > "${work_root}/uuid.cache.tmp" 2> /dev/null && mv -f "${work_root}/uuid.cache.tmp" "${work_root}/uuid.cache" 2> /dev/null; return 0; }
+
 # diag_init <deployment json>: sets deployment_kind/diagnostics_repo (variables.sh), repo_url and uuid. Returns 1 (and says why, when it is
 # worth saying) when this gw has nothing to do: not the vApp use case, no spec.diagnostics, no vApp uuid.
 diag_init() {
@@ -24,10 +30,10 @@ diag_init() {
   [ -n "${diagnostics_repo:-}" ] || return 1
   # the ssh alias vapp-diagnostics (host github.com, only the deploy key) is written by gw-setup.sh.tpl
   repo_url="${diagnostics_repo/git@github.com:/git@vapp-diagnostics:}"
-  # The vApp uuid comes from VCD (the container of the gw VM), cached only in /run (cleared at boot), never on the disk: a vApp made from a
+  # The vApp uuid comes from VCD (the container of the gw VM), cached per boot (boot id bound, see diag_uuid_cache_get), so a copy of the disk never reports under an old uuid: a vApp made from a
   # captured template has a copy of this disk but its own uuid, so it must not report under the old one.
   uuid="${VAPP_DIAG_UUID:-}"
-  [ -z "${uuid}" ] && [ -s /run/vapp-diagnostics.uuid ] && uuid=$(cat /run/vapp-diagnostics.uuid)
+  [ -z "${uuid}" ] && uuid=$(diag_uuid_cache_get)
   if [ -z "${uuid}" ]; then
     [ -n "${json}" ] && [ -f "${json}" ] || { say "need the deployment json to ask VCD for the vApp uuid"; return 1; }
     jsonFile="${json}"
@@ -39,7 +45,7 @@ diag_init() {
       | jq -r '[.record[] | select(.name == "gw") | .container][0] // empty' 2> /dev/null)
     uuid="${container##*/vapp-}"
     case "${uuid}" in [0-9a-f]*-*-*-*-*) ;; *) say "could not get the vApp uuid from VCD (container='${container}')"; return 1 ;; esac
-    echo "${uuid}" > /run/vapp-diagnostics.uuid 2> /dev/null
+    diag_uuid_cache_put "${uuid}"
   fi
   return 0
 }
