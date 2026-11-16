@@ -3,6 +3,7 @@
 # MANUAL tool, NOT a phase of vcf_bootstrap.sh: adds, deletes or inspects ONE VCF-A org on a running deployment, with the same
 # steps the bootstrap phases do for every org - forward for `add`, in reverse order for `delete`. Run it on the gw as ubuntu.
 #
+#   vcfa_org.sh status|add|delete --all [--yes] [--force] [--dry-run] [--no-isolate-others] [--vks-retries N] [--vks-stall-min M]   every org of the spec, see "--all"
 #   vcfa_org.sh status <org>
 #   vcfa_org.sh add    <org> [--yes] [--dry-run] [--no-isolate-others] [--vks-retries N] [--vks-stall-min M]
 #   vcfa_org.sh recreate-vks <org> [--yes] [--dry-run] [--vks-retries N] [--vks-stall-min M]   delete the org's VKS cluster(s) and create a new one (named <org>-vks-<id>)
@@ -40,6 +41,14 @@
 #          start with "<org>-vks-" (what a DRS VM group can match), and redoes what depends on it: pod security, cert, ArgoCD, the
 #          kubeconfig in /home/<org>/.kube/config.
 #
+# --all    (status, add, delete) the same action for EVERY org of the spec, one after the other, stopping at the first org that fails (run it again to continue).
+#          The orgs are the ones of vcf_a_organizations (the spec, which delete never edits); the state is the /home/<org>/.delete marker:
+#          delete takes the orgs without it, add the ones with it, so after "delete --all" everything is hidden and a later "add --all" brings back exactly
+#          those - the state needs no file of its own and travels with the gw's disk. Preflight (delete): the orgs a student holds
+#          (/home/<org>/.assigned) are listed first, and without --force NOTHING is deleted while there is one (exit code 2: all or nothing, not "the
+#          orgs before the first assigned one"); --force deletes them anyway and logs the list as a WARNING. delete asks for "yes" once for the whole
+#          set. Sequential on purpose (each run re-runs the watcher and the gw account phases). About 4 minutes per org for delete, 10-30 for add.
+#
 # VKS cluster retry (add, recreate-vks): after the tenant phase the cluster is checked (Available, every machine holds a node). When it is not,
 #          the evidence goes to the log (cluster and machine conditions, VM states), the cluster is deleted and built again, up to
 #          --vks-retries times (default 1, so 2 attempts; 0 = no retry). Every attempt but the last waits only --vks-stall-min minutes
@@ -62,10 +71,14 @@
 # Credentials and addresses come from /home/ubuntu/bash/variables.sh like in every phase; nothing is hardcoded.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-usage() { sed -n 2,56p "$0"; }
-action="${1:-}"; org="${2:-}"
+usage() { awk 'NR > 1 { if ($0 ~ /^#/) print; else exit }' "$0"; }
+action="${1:-}"; org="${2:-}"; all_mode="false"
 case "${action}" in status|add|delete|isolate|recreate-vks) ;; -h|--help|"") usage; exit 0 ;; *) echo "unknown action: ${action}" >&2; usage >&2; exit 1 ;; esac
-case "${org}" in ""|-*) echo "an org name is needed: vcfa_org.sh ${action} <org>" >&2; exit 1 ;; esac
+if [ "${org}" == "--all" ]; then
+  case "${action}" in status|add|delete) all_mode="true"; org="" ;; *) echo "--all works with status, add and delete only" >&2; exit 1 ;; esac
+else
+  case "${org}" in ""|-*) echo "an org name is needed: vcfa_org.sh ${action} <org>  (or --all)" >&2; exit 1 ;; esac
+fi
 shift 2
 keep_namespaces="false"; assume_yes="false"; force="false"; dry_run="false"; isolate_others="true"; jsonFile="${JSON_FILE:-}"
 vks_retries=1; vks_stall_min=20
@@ -89,6 +102,67 @@ done
 source /home/ubuntu/bash/variables.sh < /dev/null
 VCFA_KEEP_DELETED=1   # functions.sh hides deleted orgs (/home/<org>/.delete) from the phases; this script has to see them (not exported)
 source "${script_dir}/functions.sh"
+# ---- --all: every org of the spec, one after the other (status, add, delete) ----------------------------------------------------
+if [ "${all_mode}" == "true" ]; then
+  all_say() { local m="$(date "+%Y-%m-%d,%H:%M:%S"), vcfa_org ${action} --all: $*"; echo "${m}"; echo "${m}" >> /home/ubuntu/vcfa_org.log; echo "${m}" >> /home/ubuntu/vcf_bootstrap.log 2> /dev/null; }
+  all_orgs=$(echo "${vcf_a_organizations}" | jq -r '.[].name')
+  [ -n "${all_orgs}" ] || { echo "no org in the spec (vcf_a_organizations)" >&2; exit 1; }
+  all_todo=""
+  for o in ${all_orgs}; do
+    case "${action}" in
+      delete) [ -e "/home/${o}/.delete" ] || all_todo="${all_todo} ${o}" ;;
+      add) [ -e "/home/${o}/.delete" ] && all_todo="${all_todo} ${o}" ;;
+      status) all_todo="${all_todo} ${o}" ;;
+    esac
+  done
+  all_todo="${all_todo# }"
+  if [ "${action}" == "status" ]; then
+    for o in ${all_todo}; do
+      echo "${o}: $(bash "${BASH_SOURCE[0]}" status "${o}" --json "${jsonFile}" 2> /dev/null | awk -F'|' '$1 ~ /^(deleted-marker|vcfa-org|namespaces|vks-clusters)$/ {printf "%s=%s(%s) ", $1, $2, $3}')"
+    done
+    exit 0
+  fi
+  # preflight (delete): the orgs a student holds; a marker written by an earlier delete or cleaning run is our own claim, not a student's (same test as do_delete)
+  all_assigned=""
+  if [ "${action}" == "delete" ]; then
+    for o in ${all_todo}; do
+      id "${o}" > /dev/null 2>&1 || continue
+      sudo test -e "/home/${o}/.assigned" || continue
+      sudo grep -qE "to (vcfa_org delete|vcfa_tenant_cleaning)" "/home/${o}/.assigned" 2> /dev/null && continue
+      all_assigned="${all_assigned} ${o} ($(sudo head -1 "/home/${o}/.assigned" 2> /dev/null | cut -c1-80))"
+    done
+    if [ -n "${all_assigned}" ] && [ "${force}" != "true" ]; then
+      all_say "ERROR: assigned to a student:${all_assigned}. Nothing was deleted. Run again with --force to delete them anyway."
+      exit 2
+    fi
+    [ -n "${all_assigned}" ] && all_say "WARNING: --force: deleting orgs that are assigned to a student:${all_assigned}"
+  fi
+  [ -n "${all_todo}" ] || { all_say "nothing to do: every org of the spec is already $([ "${action}" == "delete" ] && echo deleted || echo present) (orgs in the spec: $(echo ${all_orgs}))"; exit 0; }
+  if [ "${action}" == "delete" ] && [ "${assume_yes}" != "true" ] && [ "${dry_run}" != "true" ]; then
+    read -r -p "Type yes to delete ALL of: ${all_todo}: " all_answer; [ "${all_answer}" == "yes" ] || { echo "not confirmed, nothing done" >&2; exit 1; }
+  fi
+  all_opts=(--yes --json "${jsonFile}")
+  [ "${force}" == "true" ] && all_opts+=(--force)
+  [ "${dry_run}" == "true" ] && all_opts+=(--dry-run)
+  if [ "${action}" == "add" ]; then
+    [ "${isolate_others}" == "true" ] || all_opts+=(--no-isolate-others)
+    all_opts+=(--vks-retries "${vks_retries}" --vks-stall-min "${vks_stall_min}")
+  fi
+  all_say "orgs to ${action}, in this order: ${all_todo}"
+  all_done=""
+  for o in ${all_todo}; do
+    all_say "---- ${o}"
+    if bash "${BASH_SOURCE[0]}" "${action}" "${o}" "${all_opts[@]}"; then
+      all_done="${all_done} ${o}"
+    else
+      all_say "ERROR: ${action} ${o} failed: stopping here. Done: ${all_done:-none}. Not started: the orgs after ${o} in the list above. Run the same command again to continue (an org that is assigned to a student needs --force)."
+      exit 1
+    fi
+  done
+  all_say "done: ${action} ${all_done# }"
+  exit 0
+fi
+# ---- one org ---------------------------------------------------------------------------------------------------------------------
 log_file="/home/ubuntu/vcfa_org.log"; slack_webhook=""
 touch "${log_file}"
 # also in vcf_bootstrap.log: the phases this script runs write their progress there, so the whole story of an org operation is in one file

@@ -44,10 +44,10 @@ diag_init() {
   return 0
 }
 
-# diag_activity: one line per bootstrap phase / vcfa_org*.sh / cleaning run on the gw ("vcfa_org.sh add org-2"); only real script runs ("bash .../<name>.sh",
+# diag_activity: one line per bootstrap phase / vcfa_org.sh / cleaning run on the gw ("vcfa_org.sh add org-2"); only real script runs ("bash .../<name>.sh",
 # not an ssh command line that merely mentions a name). Used for the conflict check of the commands and for status.json's "activity".
 diag_activity() {
-  ps -eo pid=,args= | awk '$2 == "bash" && $3 ~ /(vcf_bootstrap|vcfa_org|vcfa_org_all|vcfa_tenant_cleaning|vcfa_provider_bootstrap|vcfa_tenant_bootstrap|supervisor-bootstrap|avi-bootstrap|k8s-bootstrap|git-bootstrap|nsx-bootstrap|nsx-project-vpc|esxi-bootstrap|vcenter-bootstrap|vcf-installer-bootstrap|vcfa-stabilize|gw-accounts|gw-org-api|vault-pki-bootstrap|supervisor-blueprint-watcher)\.sh$/ {n = split($3, a, "/"); print a[n], $4, $5}'
+  ps -eo pid=,args= | awk '$2 == "bash" && $3 ~ /(vcf_bootstrap|vcfa_org|vcfa_tenant_cleaning|vcfa_provider_bootstrap|vcfa_tenant_bootstrap|supervisor-bootstrap|avi-bootstrap|k8s-bootstrap|git-bootstrap|nsx-bootstrap|nsx-project-vpc|esxi-bootstrap|vcenter-bootstrap|vcf-installer-bootstrap|vcfa-stabilize|gw-accounts|gw-org-api|vault-pki-bootstrap|supervisor-blueprint-watcher)\.sh$/ {n = split($3, a, "/"); print a[n], $4, $5}'
 }
 
 # diag_sign <key file>: stdin = the canonical command text, prints the HMAC-SHA256 as hex (python3, so the key never shows up in a command line)

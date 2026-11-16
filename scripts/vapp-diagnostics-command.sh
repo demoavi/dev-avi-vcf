@@ -13,14 +13,14 @@
 # no log_encryption_key on the gw NO command is ever run. Nothing here is a shell: an action is a fixed entry of the table below.
 #
 # Actions (args):
-#   status                       one line per org of the spec (vcfa_org_all.sh status)                     read-only, runs even when busy
+#   status                       one line per org of the spec (vcfa_org.sh status --all)                     read-only, runs even when busy
 #   upload-now                   push status and logs right away                                           read-only, runs even when busy
-#   org-delete-all               vcfa_org_all.sh delete --yes   (dry_run: true -> --dry-run; force: true -> --force, for orgs assigned to a student:
+#   org-delete-all               vcfa_org.sh delete --all --yes   (dry_run: true -> --dry-run; force: true -> --force, for orgs assigned to a student:
 #                                without it nothing is deleted while any org is assigned, the command ends failed with exit code 2)
-#   org-add-all                  vcfa_org_all.sh add --yes      (the orgs that were deleted: see vcfa_org_all.sh)
+#   org-add-all                  vcfa_org.sh add --all --yes      (the orgs that were deleted: see --all in vcfa_org.sh)
 #   org-delete / org-add         vcfa_org.sh delete|add <args.org> --yes
 #   bootstrap-from               vcf_bootstrap.sh <json> --from <args.phase>  (the phase must be in vcf_bootstrap.sh's list)
-# No conflict: the others start only when no bootstrap phase, vcfa_org*.sh or cleaning run is on the gw and no earlier command is still
+# No conflict: the others start only when no bootstrap phase, vcfa_org.sh or cleaning run is on the gw and no earlier command is still
 # running; until then the command is "waiting" and is looked at again every minute until it expires. One command at a time.
 #
 # State, for the uploader and for whoever reads status.json ("command"): ${work_root}/command-state.json
@@ -103,15 +103,15 @@ case "${issued}${expires}" in *[!0-9]*|'') finish_without_running refused "issue
 [ "${now}" -le "${expires}" ] || finish_without_running expired "expires_at passed before the command could start"
 
 # --- 3. the action table: a fixed command line per action, arguments checked ---------------------------------------------------------------
-all="${script_dir}/vcfa_org_all.sh"; one="${script_dir}/vcfa_org.sh"
+one="${script_dir}/vcfa_org.sh"
 dry=(); [ "$(echo "${args}" | jq -r '.dry_run // false')" == "true" ] && dry=(--dry-run)
 frc=(); [ "$(echo "${args}" | jq -r '.force // false')" == "true" ] && frc=(--force)   # delete only: orgs assigned to a student
 readonly_action="false"
 case "${action}" in
-  status) cmd=(bash "${all}" status --json "${jsonFile}"); readonly_action="true" ;;
+  status) cmd=(bash "${one}" status --all --json "${jsonFile}"); readonly_action="true" ;;
   upload-now) readonly_action="true"; cmd=() ;;
-  org-delete-all) cmd=(bash "${all}" delete --yes "${frc[@]}" "${dry[@]}" --json "${jsonFile}") ;;
-  org-add-all) cmd=(bash "${all}" add --yes "${dry[@]}" --json "${jsonFile}") ;;
+  org-delete-all) cmd=(bash "${one}" delete --all --yes "${frc[@]}" "${dry[@]}" --json "${jsonFile}") ;;
+  org-add-all) cmd=(bash "${one}" add --all --yes "${dry[@]}" --json "${jsonFile}") ;;
   org-delete|org-add)
     o=$(echo "${args}" | jq -r '.org // empty')
     [[ "${o}" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || finish_without_running refused "args.org is missing or not an org name"

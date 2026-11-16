@@ -239,6 +239,10 @@ command (vCenter isolation, watcher) is done and the exit code is 1; `add` and `
 re-runs the watcher. In the vApp use case with `spec.diagnostics`, every run that changes something (not `status`, not `--dry-run`) pushes the status and the logs to the
 diagnostics repo when it starts and when it ends (`diag_kick`), and the messages of `vcfa_org.sh` are in `vcf_bootstrap.log`, which is what gets uploaded; `status.json` -> `activity`
 lists the scripts running on the gw, also for a run started by hand.
+**`--all`** (`vcfa_org.sh status|add|delete --all [--yes] [--force] [--dry-run] ...`): the same action for every org of the spec, one after the other, stopping at the first failure (run it
+again to continue). `delete` takes the orgs without a `/home/<org>/.delete` marker, `add` the ones with it, so the marker is the only state and it travels with the gw's disk (a
+captured template keeps it). A preflight first lists the orgs a student holds (`/home/<org>/.assigned`): without `--force` nothing at all is deleted while there is one (exit code 2); with
+it they are deleted anyway and the list is logged as a WARNING. `delete --all` asks for `yes` once. About 4 minutes per org for delete, 10-30 for add (the VKS cluster).
 `recreate-vks <org>` keeps the org (account, namespace, VCF-A, Git, Vault, Avi domains, isolation) and replaces its VKS cluster: deployments,
 AKO's Avi objects and the cluster(s) are deleted (namespace kept), then `vcfa_tenant_bootstrap.sh` limited to the org builds a new cluster and
 redoes pod security, cert, ArgoCD and `/home/<org>/.kube/config` (about 20 min on the sddc lab). VM names: the cluster is called
@@ -280,13 +284,6 @@ nothing is left to move: an SE with no VS is removed (unless `--no-delete-idle-s
 (with `buffer_se` 1 Avi creates the SE again at once, it is the buffer: reported once, set `buffer_se: 0` on the group) and keeps more than `min_se` SEs; with
 `--no-delete-idle-se` it is only reported. A tenant without a VKS control-plane VIP VS is left alone. Skips the run while a bootstrap phase or `vcfa_org.sh` runs. A move takes the VS out for a few seconds.
 
-### Manual tool: `vcfa_org_all.sh` (not part of the pipeline)
-`vcfa_org_all.sh delete|add|status [--yes] [--force] [--dry-run] [--json <file>]` runs `vcfa_org.sh` for every org of the spec, one after the other, and stops at the
-first failure (run it again to continue). `delete` takes the orgs without a `/home/<org>/.delete` marker, `add` the ones with it, so the marker is the only state
-and it travels with the gw's disk (a captured template keeps it). `--force` is passed to `vcfa_org.sh delete` (an org already handed to a student is refused without
-it). A preflight first lists the orgs a student holds (`/home/<org>/.assigned`): without `--force` nothing at all is deleted while there is one (exit code 2); with it they
-are deleted anyway and the list is logged as a WARNING. About 4 minutes per org for delete, 20-30 for add (the VKS cluster).
-
 ### vApp only: the diagnostics channel (`spec.diagnostics`: private repo, status, encrypted logs, commands)
 For a vApp gw nobody can ssh to. `spec.diagnostics` (CR: `repo`, `ssh_private_key`, `log_encryption_key`) gives the gw a deploy key and a passphrase (written by
 `gw-setup.sh.tpl` at first boot only: an existing gw does not get them). `vcf_bootstrap.sh` then installs two crontab entries, both in the vApp use case only:
@@ -297,8 +294,8 @@ For a vApp gw nobody can ssh to. `spec.diagnostics` (CR: `repo`, `ssh_private_ke
 - `vapp-diagnostics-command.sh` (every minute): looks at `main:instances/<uuid>/command.json` and runs it when it is valid and nothing else is going on.
   A command is `{id, action, args, issued_at, expires_at, uuid, sig}`; `sig` is an HMAC-SHA256 with `log_encryption_key` (no key on the gw = no command ever runs). Refused:
   bad signature, another vApp's uuid, an id seen before, an unknown action or arguments; expired: `expires_at` (at most 7 days) passed before it could start. Actions are a fixed
-  table, never a shell: `status`, `upload-now` (read-only, run even when busy), `org-delete-all`, `org-add-all` (args `dry_run`, `force`), `org-delete`/`org-add` (args `org`),
-  `bootstrap-from` (arg `phase`, checked against `vcf_bootstrap.sh`'s list). The others wait ("waiting" in `status.json`) while a bootstrap phase, `vcfa_org*.sh` or a cleaning is
+  table, never a shell: `status`, `upload-now` (read-only, run even when busy), `org-delete-all`, `org-add-all` (`vcfa_org.sh delete|add --all`; args `dry_run`, `force`), `org-delete`/`org-add` (args `org`),
+  `bootstrap-from` (arg `phase`, checked against `vcf_bootstrap.sh`'s list). The others wait ("waiting" in `status.json`) while a bootstrap phase, `vcfa_org.sh` or a cleaning is
   running or an earlier command still runs; one command at a time.
 - The vApp uuid is read from VCD (the gw VM's container), cached in `/run` only: a vApp made from a captured template has its own uuid. Reset `vcf_status.json`, `.vapp-diagnostics/`
   (command state, ids seen) and the work trees before capturing a template.
