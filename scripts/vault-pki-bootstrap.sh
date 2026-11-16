@@ -152,7 +152,10 @@ exit 0
 UNSEAL_EOF
   sudo chmod 700 /usr/local/bin/vault-unseal.sh
   sudo mkdir -p /etc/systemd/system/vault.service.d
-  printf '[Service]\nExecStartPost=/usr/local/bin/vault-unseal.sh\n' | sudo tee /etc/systemd/system/vault.service.d/unseal.conf > /dev/null
+  # The '+' prefix runs this one step with full privileges: the helper is root:root 700 (it reads the unseal key) and the unit runs as the vault user, so
+  # without it systemd fails with 203/EXEC "Permission denied" and, after 3 quick restarts, gives up: Vault stays down after every reboot of the gw
+  # (first seen on the SDDC gw at its first reboot, 2026-11-16: no Vault, so no per-org Vault logins and no cert-manager Issuers).
+  printf '[Service]\nExecStartPost=+/usr/local/bin/vault-unseal.sh\n' | sudo tee /etc/systemd/system/vault.service.d/unseal.conf > /dev/null
   sudo systemctl daemon-reload
   # root ca
   vault secrets enable -tls-skip-verify ${vault_pki_name}

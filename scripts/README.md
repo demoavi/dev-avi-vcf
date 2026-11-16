@@ -308,6 +308,9 @@ For a vApp gw nobody can ssh to. `spec.diagnostics` (CR: `repo`, `ssh_private_ke
 - Other end: `vapp-diagnostics-ctl.sh list|status <uuid>|log <uuid> [<command id>]|send <uuid> <action> [--args '<json>'] [--ttl s]` on any host with the deploy key
   and the key file. State of a command: `status.json` -> `command` (`waiting|running|done|failed|refused|expired`, `rc`, `reason`); its output: `command-<id>.log.gz.enc`.
 
+### Shutdown and startup of the nested lab: the recipe
+`SHUTDOWN-STARTUP-RECIPE.md` (this directory) records the first full shutdown and cold start of the SDDC lab (2026-11-16): the phases and commands, what the HOL zip got wrong for this build, the gates (start Avi only when the NSX fabric is whole), the timings, what is still open, and what changes for the vApp use case. It is the source for `vcf_shutdown.sh` / `vcf_startup.sh` and the lifecycle actions.
+
 ### Helpers
 `functions.sh` (log_notify, vcd_login, vcfa_login/vcfa_api, `vcfa_health_gate`, `chown_org_or_ubuntu`, avi/nsx/vcenter API helpers, `find_org_manifest`). Sourcing it also
 fails the phase at once when `gw_accounts_secret` is empty or the text `null` (what `jq -r` prints for a missing key): every per-org
