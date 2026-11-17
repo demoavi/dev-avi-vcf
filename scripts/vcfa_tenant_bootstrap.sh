@@ -828,7 +828,13 @@ ARGOCD_GATEWAY_EOF
         vault_secret_file="$(find_org_manifest "${org_yaml_folder}" Secret cert-manager-vault-token)"
         vault_issuer_file="$(find_org_manifest "${org_yaml_folder}" Issuer vault-issuer)"
         if [ -z "${vault_secret_file}" ] || [ -z "${vault_issuer_file}" ]; then
-          log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no manifest of Kind Secret named cert-manager-vault-token and/or Kind Issuer named vault-issuer found in ${org_yaml_folder} (secret file: '${vault_secret_file}', issuer file: '${vault_issuer_file}'), skipping vault bootstrap for ${org_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+          # The two manifests are removed from the org's folder after the first successful apply (see below), so on a rerun they
+          # are expected to be missing: if the secret and the issuer are in the namespace, there is nothing left to do.
+          if kubectl -n "${ns_name}" get secret cert-manager-vault-token > /dev/null 2>&1 && kubectl -n "${ns_name}" get issuer vault-issuer > /dev/null 2>&1; then
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: vault integration for ${org_name} is already in place in namespace ${ns_name} (its two manifests were removed from ${org_yaml_folder} after the first apply), nothing to do" "${log_file}" "" ""
+          else
+            log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: no manifest of Kind Secret named cert-manager-vault-token and/or Kind Issuer named vault-issuer found in ${org_yaml_folder} (secret file: '${vault_secret_file}', issuer file: '${vault_issuer_file}'), skipping vault bootstrap for ${org_name}" "${log_file}" "${slack_webhook}" "${google_webhook}"
+          fi
         else
           sudo cp "${vault_secret_file}" "/tmp/${org_name}-secret_vault.yaml"
           sudo chown ubuntu:ubuntu "/tmp/${org_name}-secret_vault.yaml"
@@ -1094,8 +1100,14 @@ else
         [ -e "${bp_file}" ] || continue
         bp_name=$(basename "${bp_file}" .yaml.template)
 
-        blueprint_api GET "blueprint/api/blueprints" "" "${org_token}"
-        bp_id=$(echo ${response_body} | jq -c -r --arg arg "${bp_name}" '.content[] | select(.name == $arg) | .id')
+        # The blueprint service can answer a call with HTTP 500 ("Failed to lazily resolve the supplied JwtDecoder instance", seen on 2026-11-17
+        # for org-1: its first three calls failed, the fourth worked 9 s later), so the list and the creation are retried a few times.
+        for list_attempt in 1 2 3 4 5; do
+          blueprint_api GET "blueprint/api/blueprints" "" "${org_token}"
+          echo "${response_body}" | jq -e '.content' > /dev/null 2>&1 && break
+          [ "${list_attempt}" -lt 5 ] && { echo "blueprint list for ${org_name} failed (attempt ${list_attempt}/5), retrying in 15 seconds" >> "${log_file}"; sleep 15; }
+        done
+        bp_id=$(echo ${response_body} | jq -c -r --arg arg "${bp_name}" '.content[]? | select(.name == $arg) | .id')
         if [ -n "${bp_id}" ]; then
           log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: blueprint ${bp_name} already exists for ${org_name}, skipping creation" "${log_file}" "" ""
           continue
@@ -1104,8 +1116,13 @@ else
         bp_content=$(sed -e "s@\${avi_subdomain}@${org_name}@g" -e "s/\${domain}/${domain}/g" "${bp_file}")
         bp_json=$(jq -n --arg n "${bp_name}" --arg pid "${project_id}" --arg content "${bp_content}" \
           '{name: $n, description: null, valid: true, content: $content, projectId: $pid, requestScopeOrg: true, iconId: null}')
-        blueprint_api POST "blueprint/api/blueprints?apiVersion=2020-08-25" "${bp_json}" "${org_token}"
-        bp_id=$(echo ${response_body} | jq -c -r '.id')
+        for create_attempt in 1 2 3 4 5; do
+          blueprint_api POST "blueprint/api/blueprints?apiVersion=2020-08-25" "${bp_json}" "${org_token}"
+          bp_id=$(echo ${response_body} | jq -c -r '.id' 2> /dev/null)
+          { [ -n "${bp_id}" ] && [ "${bp_id}" != "null" ]; } && break
+          echo "${response_body}" | grep -Eq '"status":5[0-9][0-9]' || break      # only a server error is worth another try (a 4xx will not change)
+          [ "${create_attempt}" -lt 5 ] && { echo "blueprint ${bp_name} for ${org_name}: server error while creating it (attempt ${create_attempt}/5), retrying in 15 seconds" >> "${log_file}"; sleep 15; }
+        done
         if [ -z "${bp_id}" ] || [ "${bp_id}" == "null" ]; then
           log_message "$(date "+%Y-%m-%d,%H:%M:%S"), nested-${basename_sddc}: failed to create blueprint ${bp_name} for ${org_name}, response was: ${response_body}" "${log_file}" "${slack_webhook}" "${google_webhook}"
           continue
