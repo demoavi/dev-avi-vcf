@@ -312,6 +312,13 @@ For a vApp gw nobody can ssh to. `spec.diagnostics` (CR: `repo`, `ssh_private_ke
 - The operator side (`diagnostics_client.py`, the timer `vapp_lifecycle` in `vapp_operator.py`, every 30 s, only when `spec.diagnostics` is set): `spec.lifecycle`
   (`action`: `delete-vcfa-orgs` = `org-delete-all`, `add-vcfa-orgs` = `org-add-all`, `shutdown-platform` = `platform-shutdown`; `requestId`: any text, an action is sent once per requestId; `force`, `dryRun`, `skipFlush` and `flushMinutes` (shutdown only), `ttlSeconds`)
   becomes a signed command pushed to `main:instances/<status.vappId>/command.json` through git with the deploy key (the operator pod installs `git` and `openssh-client` at start).
+  Two more actions are done by the operator itself, through VCD, with no gw and no `spec.diagnostics` (`vapp_power.py`): `poweron-vapp` (the gw first, wait until VMware Tools
+  reports its address and 2 more minutes for DNS and NTP, then every nested ESX VM together; the VCF Installer VM only with `withInstaller: true`; ends with "next:
+  `startup-platform`", it starts nothing inside the nested lab) and `poweroff-vapp` (refused until the gw reported `ready_for_poweroff`, the end of `shutdown-platform`, unless
+  `force: true`; then the ESX VMs off and the gw shut down last, a hard power off after 10 minutes). The vApp stays deployed (power on/off, no undeploy). `dryRun: true` lists
+  what would be done and changes nothing. They are state machines advanced every 30 s with their progress in `status.lifecycle` (`step`, `outputTail`), so they survive an
+  operator restart. `ready_for_poweroff` stays true in the gw's status file until the next `shutdown-platform` run resets it: the startup must reset it. After a boot the gw
+  pushes one status (`@reboot` entry of the crontab, installed by `vcf_status.sh`), so the operator and the diagnostics repo see that it is back.
   `status.lifecycle` follows it (`blocked` = could not be sent yet and is retried every tick, `sent`, then the gw's `waiting`/`running`/`done`/`failed`/`refused`, or `expired`) with
   `rc` and the last lines of the decrypted output; `status.gw` is what the gw last reported (read every 5 minutes, every 30 s while a request is pending). Without `spec.lifecycle`
   nothing is ever sent; without `spec.diagnostics` the timer does nothing. `kubectl get vapp` has `LIFECYCLE` and `BUILD` columns.

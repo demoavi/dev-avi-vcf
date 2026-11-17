@@ -36,7 +36,10 @@ vcf_status_install_uploader() { # <deployment json> <scripts dir>
   # the uploader every 5 minutes (heartbeat), the command runner every minute (vapp-diagnostics-command.sh: commands sent to this gw)
   local upload_line="*/5 * * * * bash ${vcf_status_uploader} ${1} >> /home/ubuntu/vapp-diagnostics.log 2>&1"
   local command_line="* * * * * bash ${2}/vapp-diagnostics-command.sh ${1} >> /home/ubuntu/vapp-diagnostics.log 2>&1"
-  ( crontab -l 2> /dev/null | grep -v "vapp-diagnostics-"; echo "${upload_line}"; [ -f "${2}/vapp-diagnostics-command.sh" ] && echo "${command_line}" ) | crontab - 2> /dev/null
+  # after a boot (poweron-vapp, a gw restart): one forced upload, so the operator and whoever reads the diagnostics repo see that the gw is back (nothing
+  # else changes on a plain reboot, and an idle gw uploads nothing); 90 s for the network and the clock
+  local reboot_line="@reboot sleep 90; bash ${vcf_status_uploader} ${1} --force >> /home/ubuntu/vapp-diagnostics.log 2>&1"
+  ( crontab -l 2> /dev/null | grep -v "vapp-diagnostics-"; echo "${upload_line}"; echo "${reboot_line}"; [ -f "${2}/vapp-diagnostics-command.sh" ] && echo "${command_line}" ) | crontab - 2> /dev/null
   return 0
 }
 vcf_status_kick() {
