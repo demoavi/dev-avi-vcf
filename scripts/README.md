@@ -264,7 +264,7 @@ this repo: it comes with the gw ISO, which copies it to `/home/ubuntu/` with mod
 powered off with the Harbor database last), `flush` (vSAN OSA elevator, ceiling `--flush-minutes`, default 45; not finishing is logged, not fatal), `hosts` (hard guard: exit 3 while any VM is
 on), `installer`, `ready`. sddc: VMs through the underlay govc; vApp: through VCD (`vcd_vm_filter`, power/action/shutdown). Status: `/home/ubuntu/json/vcf_shutdown_status.json` (same shape as
 `vcf_status.json` plus `ready_for_poweroff`; the uploader sends it as `shutdown` in `status.json`), log `/home/ubuntu/vcf_shutdown.log`. The gw stays up (`--poweroff-gw` schedules `shutdown -h +2`
-on the sddc use case); the vApp is powered off afterwards by the operator through VCD. Dry-run tested against the live SDDC lab on 2026-11-16 (discovery and the `hosts` guard); a real run is not tested.
+on the sddc use case); the vApp is powered off afterwards by the operator through VCD. Resume after a failure: `--from <phase>` on the gw, or `fromPhase` in `spec.lifecycle` / `args.from` through the channel; the inventory of the first run is kept (marker `cycle-complete` in `platform-state/`, written by the `ready` phase). The first real run on a vApp (2026-11-17, 6-02) stopped at `vsp` although the VSP script had succeeded: `PIPESTATUS` was read after another command; fixed. Dry-run tested against the live SDDC lab on 2026-11-16 (discovery and the `hosts` guard); a real run is not tested.
 
 ### Manual tool: `api-monitor.sh` (not part of the pipeline)
 Availability probe for the stability question "which API is not always on". `bash api-monitor.sh [json] [--duration 1800] [--interval 3] [--edge-interval 10] [--out dir]`

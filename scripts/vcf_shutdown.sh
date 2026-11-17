@@ -156,6 +156,12 @@ phase_inventory() {
   local out="${state_dir}/inventory-before.json" tsv="${state_dir}/inventory-before.tsv"
   say "saving the inventory (name, power, host, guest IP) to ${out}"
   [ "${dry_run}" == "true" ] && { say "[dry-run] would write ${out}"; vc govc find / -type m 2> /dev/null | wc -l | sed 's/^/  VMs in the nested vCenter: /'; return 0; }
+  # a run that stopped half way (or a repeated one) must not replace the inventory taken while the platform was fully on: the startup restores from it.
+  # The marker cycle-complete is written by the ready phase and removed again by the next inventory that is taken.
+  if [ -s "${out}" ] && [ ! -e "${state_dir}/cycle-complete" ]; then
+    say "an earlier shutdown run did not reach the end: keeping its inventory (taken while the platform was up): $(jq 'length' "${out}") VMs"; return 0
+  fi
+  rm -f "${state_dir}/cycle-complete"
   vc govc find / -type m 2> /dev/null | while IFS= read -r p; do vc govc vm.info -json "${p}" 2> /dev/null | jq -c '.virtualMachines[] | {name, power: .runtime.powerState, host: .runtime.host.value, ip: (.guest.ipAddress // null), guestId: .config.guestId, template: .config.template}'; done | jq -s . > "${out}"
   # host morefs -> names, so the startup can put the edges back where they were
   vc govc host.info -json 2> /dev/null | jq '[.hostSystems[] | {moref: .self.value, name: .name}]' > "${state_dir}/host-morefs.json"
@@ -189,7 +195,7 @@ REMOTE_EOF
 }
 
 phase_vsp() {
-  local ip="" cand tok code
+  local ip="" cand tok code vsp_rc
   [ "$(vm_paths "${PAT_VSP}" | wc -l)" -gt 0 ] || { say "no VSP VMs found: skipping"; return 0; }
   if [ ! -r "${VSP_SHUTDOWN_SCRIPT}" ]; then
     say "the Broadcom VSP shutdown script is missing or not readable: ${VSP_SHUTDOWN_SCRIPT} (KB 440874, Broadcom Confidential, delivered with the gw ISO, which copies it to /home/ubuntu/ with mode 600). Without it the VSP platform would be powered off without its graceful stop."
@@ -205,8 +211,9 @@ phase_vsp() {
   [ -n "${ip}" ] || { say "no VSP control-plane node answers on 5480"; return 1; }
   say "VSP control-plane node: ${ip}"
   act "run bash ${VSP_SHUTDOWN_SCRIPT} --node-ip ${ip} --yes --skip-snapshot-check (about 4 minutes)" env VMSP_PASSWORD="${pw}" bash "${VSP_SHUTDOWN_SCRIPT}" --node-ip "${ip}" --yes --skip-snapshot-check 2>&1 | sed 's/^/    /' | tail -25
+  vsp_rc=${PIPESTATUS[0]}   # right after the pipeline: any command in between (even the [ below) overwrites PIPESTATUS (this made a successful VSP script read as failed on 2026-11-17)
   [ "${dry_run}" == "true" ] && return 0
-  [ "${PIPESTATUS[0]}" == "0" ] || return 1
+  [ "${vsp_rc}" == "0" ] || return 1
 }
 
 phase_wcp() {
@@ -342,6 +349,7 @@ phase_installer() {
 phase_ready() {
   say "READY FOR POWER-OFF of the gw$([ "${deployment_kind}" == "vApp" ] && echo " (the operator undeploys the vApp through VCD)")"
   [ "${dry_run}" == "true" ] && return 0
+  touch "${state_dir}/cycle-complete"
   vcf_status_update '.ready_for_poweroff = true | .ready_at = $now'
   if [ "${poweroff_gw}" == "true" ]; then say "--poweroff-gw: shutdown -h in 2 minutes"; sudo shutdown -h +2 "vcf_shutdown.sh: platform is down, gw power-off" > /dev/null 2>&1; fi
 }

@@ -22,7 +22,8 @@
 #   bootstrap-from               vcf_bootstrap.sh <json> --from <args.phase>  (the phase must be in vcf_bootstrap.sh's list)
 #   platform-shutdown            vcf_shutdown.sh <json>: shuts the nested platform down in order (VCF Automation, VSP, Supervisor, Avi, NSX, SDDC Manager,
 #                                vCenter, vSAN flush, ESX hosts) and leaves the gw running; refuses (exit 2) while an org is not deleted (vcfa_org.sh delete --all
-#                                first). args: dry_run (--dry-run), skip_flush (--skip-flush), flush_minutes (0-240, --flush-minutes). The vApp itself is
+#                                first). args: dry_run (--dry-run), skip_flush (--skip-flush), flush_minutes (0-240, --flush-minutes),
+#                                from (a phase of vcf_shutdown.sh: --from, resumes a run that stopped). The vApp itself is
 #                                powered off afterwards by the operator through VCD, not by the gw.
 # No conflict: the others start only when no bootstrap phase, vcfa_org.sh or cleaning run is on the gw and no earlier command is still
 # running; until then the command is "waiting" and is looked at again every minute until it expires. One command at a time.
@@ -131,7 +132,12 @@ case "${action}" in
     case "${fm}" in ''|*[!0-9]*) [ -z "${fm}" ] || finish_without_running refused "args.flush_minutes is not a whole number" ;; *) [ "${fm}" -le 240 ] || finish_without_running refused "args.flush_minutes is more than 240" ;; esac
     skf=(); [ "$(echo "${args}" | jq -r '.skip_flush // false')" == "true" ] && skf=(--skip-flush)
     fmo=(); [ -n "${fm}" ] && fmo=(--flush-minutes "${fm}")
-    cmd=(bash "${script_dir}/vcf_shutdown.sh" "${jsonFile}" "${dry[@]}" "${skf[@]}" "${fmo[@]}") ;;
+    frm=(); fp=$(echo "${args}" | jq -r '.from // empty')   # resume a run that stopped: the phases before it are not done again
+    if [ -n "${fp}" ]; then
+      sd_phases=$(sed -n 's/^phases="\(.*\)"$/\1/p' "${script_dir}/vcf_shutdown.sh" | head -1)
+      case " ${sd_phases} " in *" ${fp} "*) frm=(--from "${fp}") ;; *) finish_without_running refused "args.from is not a phase of vcf_shutdown.sh" ;; esac
+    fi
+    cmd=(bash "${script_dir}/vcf_shutdown.sh" "${jsonFile}" "${dry[@]}" "${skf[@]}" "${fmo[@]}" "${frm[@]}") ;;
   *) finish_without_running refused "unknown action '${action}'" ;;
 esac
 
