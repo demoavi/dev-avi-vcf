@@ -67,6 +67,7 @@ say() { local m; m="$(date +%H:%M:%S) vcf_shutdown: $*"; echo "${m}"; echo "${m}
 warn() { say "WARNING: $*"; }
 die() { say "ERROR: $*"; exit "${2:-1}"; }
 # act <description> <command...>: runs the command, or only says so with --dry-run
+quiet() { "$@" > /dev/null 2>&1; }   # act "<what>" quiet <command>: the command is silent, the message of act is not
 act() { local d="$1"; shift; if [ "${dry_run}" == "true" ]; then say "[dry-run] would: ${d}"; return 0; fi; say "${d}"; "$@"; }
 
 bn="${basename_sddc}"
@@ -210,7 +211,7 @@ phase_vsp() {
 
 phase_wcp() {
   local out
-  act "stop WCP on ${vc_fqdn}: shell vmon-cli -k wcp" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o ConnectTimeout=15 "root@${vc_fqdn}" "shell vmon-cli -k wcp" > /dev/null 2>&1
+  act "stop WCP on ${vc_fqdn}: shell vmon-cli -k wcp" quiet sshpass -e ssh -o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o ConnectTimeout=15 "root@${vc_fqdn}" "shell vmon-cli -k wcp"
   [ "${dry_run}" == "true" ] && return 0
   sleep 10
   out=$(sshpass -e ssh -o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password -o ConnectTimeout=15 "root@${vc_fqdn}" "shell vmon-cli -s wcp" 2> /dev/null | grep -E "RunState" | head -1)
@@ -317,10 +318,13 @@ phase_hosts() {
   local ip i=0
   # HARD GUARD: nothing may be powered on in any host; checked again here, whatever the earlier phases said
   audit_hosts
-  if [ "${audit_left}" != "0" ]; then say "REFUSING to power off the hosts: ${audit_left} VM(s) are still powered on:"; awk -F'\t' '{print "  " $1 "  " $2}' "${state_dir}/audit-hosts.tsv" | head -10; return 3; fi
-  say "guard passed: no VM is powered on on any host"
+  if [ "${audit_left}" != "0" ] && [ "${dry_run}" == "true" ] && [ "${only_phase}" != "hosts" ]; then
+    # a full dry-run shut nothing down, so VMs are on by construction: say so, and go on to show the rest of the plan (the guard itself is tested by a real run or by --only hosts --dry-run)
+    say "[dry-run] ${audit_left} VM(s) are powered on now because nothing was shut down; in a real run the earlier phases stop them and this guard refuses (exit 3) if any is left"
+  elif [ "${audit_left}" != "0" ]; then say "REFUSING to power off the hosts: ${audit_left} VM(s) are still powered on:"; awk -F'\t' '{print "  " $1 "  " $2}' "${state_dir}/audit-hosts.tsv" | head -10; return 3; fi
+  [ "${audit_left}" == "0" ] && say "guard passed: no VM is powered on on any host"
   for ip in ${host_ips}; do i=$((i + 1))
-    act "ShutdownHost (force) ${ip}" onhost "${ip}" govc host.shutdown -f "*" > /dev/null 2>&1
+    act "ShutdownHost (force) ${ip}" quiet onhost "${ip}" govc host.shutdown -f "*"
     [ "${dry_run}" == "true" ] || sleep 5
   done
   [ "${dry_run}" == "true" ] && { say "[dry-run] would: wait for the host VMs to be powered off ($(plat_name_host 1) ...)"; return 0; }
