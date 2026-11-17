@@ -152,7 +152,7 @@ if [ "${all_mode}" == "true" ]; then
   all_done=""
   for o in ${all_todo}; do
     all_say "---- ${o}"
-    if bash "${BASH_SOURCE[0]}" "${action}" "${o}" "${all_opts[@]}"; then
+    if VCFA_ORG_PARENT=$$ bash "${BASH_SOURCE[0]}" "${action}" "${o}" "${all_opts[@]}"; then
       all_done="${all_done} ${o}"
     else
       all_say "ERROR: ${action} ${o} failed: stopping here. Done: ${all_done:-none}. Not started: the orgs after ${o} in the list above. Run the same command again to continue (an org that is assigned to a student needs --force)."
@@ -372,8 +372,10 @@ do_status() {
 check_idle() {
   local busy
   # only real script runs: "bash .../<phase>.sh" (not an ssh command line that merely mentions a name)
-  # (this script's own pid and its subshells, which carry the same command line, are left out)
-  busy=$(ps -eo pid=,ppid=,args= | awk -v me=$$ '$1 != me && $2 != me && $3 == "bash" && $4 ~ /(vcf_bootstrap|vcfa_provider_bootstrap|vcfa_tenant_bootstrap|vcfa_tenant_cleaning|supervisor-bootstrap|avi-bootstrap|k8s-bootstrap|git-bootstrap|vcfa_org)\.sh$/' | head -3)
+  # (this script's own pid and its subshells, which carry the same command line, are left out, and so is the --all run that started this one:
+  # it hands over its pid in VCFA_ORG_PARENT. Without that, 'bash .../vcfa_org.sh delete --all' - how the diagnostics command runner starts it - refused
+  # every org because of its own parent; run as ./vcfa_org.sh it only worked because ps then shows /bin/bash)
+  busy=$(ps -eo pid=,ppid=,args= | awk -v me=$$ -v parent="${VCFA_ORG_PARENT:-0}" '$1 != me && $2 != me && $1 != parent && $3 == "bash" && $4 ~ /(vcf_bootstrap|vcfa_provider_bootstrap|vcfa_tenant_bootstrap|vcfa_tenant_cleaning|supervisor-bootstrap|avi-bootstrap|k8s-bootstrap|git-bootstrap|vcfa_org)\.sh$/' | head -3)
   [ -z "${busy}" ] || { echo "${busy}"; die "a bootstrap phase or another vcfa_org.sh is running (above): not changing anything"; }
 }
 
