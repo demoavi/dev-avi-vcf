@@ -117,7 +117,7 @@ Not done here: any VM CPU/memory resize (the results below were measured at 32 v
 Against the newly built nested vCenter (govc): creates the extra port groups and silences the vSAN health alarms a
 nested vSAN can never pass (they block Supervisor enablement).
 
-vApp use case with `vms.esx.dedicated_host` (a fifth management host, `<basename>-mgmt-esx05`, 48 vCPU / 224 GiB by default):
+vApp use case with `vms.esx.dedicated_host` (one more management host after the numbered ones: `<basename>-mgmt-esx05` with 4 entries in `vms.esx.ips`, `-esx09` with 8; name in the variable `dedicated_host_name`; 48 vCPU / 224 GiB by default):
 calls `dedicated-host-placement.sh`. It creates the host group `dedicated-host` and the VM groups `specific-VMs` (vCenter and
 the VCF Automation VM, matched by name) and `other-VMs` (every other VM except templates, vCLS and ESX agent VMs), vMotions
 each VM where it belongs and waits until they are there (30 minutes at most, then an ERROR and the pipeline goes on), then

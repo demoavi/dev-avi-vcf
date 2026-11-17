@@ -38,7 +38,7 @@ rule_specific="dedicated-host-specific-vms"
 rule_other="dedicated-host-other-vms"
 state_dir="/home/ubuntu/.dedicated-host-placement"
 place_timeout_sec="${PLACEMENT_TIMEOUT_SEC:-1800}"
-dedicated_fqdn="${DEDICATED_HOST_FQDN:-${basename_sddc}-mgmt-esx05.${domain}}"
+dedicated_fqdn="${DEDICATED_HOST_FQDN:-${dedicated_host_name:-${basename_sddc}-mgmt-esx05}.${domain}}"   # dedicated_host_name comes from variables.sh; mgmt-esx05 on gws that predate it
 
 # --place talks to the team (log_notify needs the VCD session); the cron only writes its own log file
 say() {
