@@ -27,6 +27,7 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/vapp-diagnostics-common.
 jsonFile="${1:-}"; force="false"; [ "${2:-}" == "--force" ] && force="true"
 status_src="${diag_home}/json/vcf_status.json"
 shutdown_src="${diag_home}/json/vcf_shutdown_status.json"     # vcf_shutdown.sh's own status (same shape), sent as "shutdown"
+startup_src="${diag_home}/json/vcf_startup_status.json"       # vcf_startup.sh's own status (same shape), sent as "startup"
 log_src="${diag_home}/vcf_bootstrap.log"
 cmd_state_file="${work_root}/command-state.json"
 heartbeat_sec=270      # the cron runs every 300: slightly below, so a run is never skipped by a second of jitter
@@ -47,7 +48,8 @@ cmd_json=$(jq -c . "${cmd_state_file}" 2> /dev/null); [ -n "${cmd_json}" ] || cm
 activity=$(diag_activity | head -5 | jq -R . | jq -s -c .)       # e.g. ["vcfa_org.sh add org-2"]: scripts running on the gw right now, whoever started them
 [ -n "${activity}" ] || activity='[]'
 shutdown_json=$(jq -c . "${shutdown_src}" 2> /dev/null); [ -n "${shutdown_json}" ] || shutdown_json='null'
-hash=$( { jq -S 'del(.last_updated)' "${status_src}" 2> /dev/null; echo "${shutdown_json}" | jq -S 'del(.last_updated)' 2> /dev/null; echo "${cmd_json}" | jq -S . 2> /dev/null; echo "${activity}"; } | sha256sum | cut -d' ' -f1)
+startup_json=$(jq -c . "${startup_src}" 2> /dev/null); [ -n "${startup_json}" ] || startup_json='null'
+hash=$( { jq -S 'del(.last_updated)' "${status_src}" 2> /dev/null; echo "${shutdown_json}" | jq -S 'del(.last_updated)' 2> /dev/null; echo "${startup_json}" | jq -S 'del(.last_updated)' 2> /dev/null; echo "${cmd_json}" | jq -S . 2> /dev/null; echo "${activity}"; } | sha256sum | cut -d' ' -f1)
 last_hash=$(jq -r '.hash // ""' "${state_file}" 2> /dev/null)
 last_push=$(jq -r '.last_push // 0' "${state_file}" 2> /dev/null)
 last_log_push=$(jq -r '.last_log_push // 0' "${state_file}" 2> /dev/null)
@@ -56,7 +58,7 @@ state=$(jq -r '.state // ""' "${status_src}" 2> /dev/null)
 cmd_state=$(echo "${cmd_json}" | jq -r '.state // ""')
 push_status="false"; push_log="false"
 [ "${hash}" != "${last_hash}" ] && { push_status="true"; push_log="true"; }
-if [ "${state}" == "running" ] || [ "${cmd_state}" == "running" ] || [ "$(echo "${shutdown_json}" | jq -r '.state // ""')" == "running" ] || [ "${activity}" != "[]" ]; then
+if [ "${state}" == "running" ] || [ "${cmd_state}" == "running" ] || [ "$(echo "${shutdown_json}" | jq -r '.state // ""')" == "running" ] || [ "$(echo "${startup_json}" | jq -r '.state // ""')" == "running" ] || [ "${activity}" != "[]" ]; then
   [ $((now - last_push)) -ge ${heartbeat_sec} ] && push_status="true"
   [ $((now - last_log_push)) -ge ${log_every_sec} ] && push_log="true"
 fi
@@ -101,13 +103,14 @@ prev_log=$(jq -c '.log // {}' "${folder}/status.json" 2> /dev/null)
 [ -n "${prev_log}" ] || prev_log='{}'
 log_age=$(( now - $(stat -c %Y "${log_src}" 2> /dev/null || echo "${now}") ))
 jq --arg uuid "${uuid}" --arg vapp "${vcd_vapp:-}" --arg host "$(hostname)" --arg up "$(date +%Y-%m-%dT%H:%M:%S%z)" \
-   --argjson prev "${prev_log}" --argjson cmd "${cmd_json}" --argjson shut "${shutdown_json}" --argjson activity "${activity}" --arg kind "${log_kind}" --arg lines "${log_lines}" --arg age "${log_age}" \
+   --argjson prev "${prev_log}" --argjson cmd "${cmd_json}" --argjson shut "${shutdown_json}" --argjson start "${startup_json}" --argjson activity "${activity}" --arg kind "${log_kind}" --arg lines "${log_lines}" --arg age "${log_age}" \
    --arg size "$(stat -c %s "${log_src}" 2> /dev/null || echo 0)" --arg haskey "$([ -s "${key_file}" ] && echo true || echo false)" \
    '. + {uploaded_at: $up, vapp_uuid: $uuid, vapp_name: $vapp, gw_host: $host, activity: $activity,
          log: ((if $kind != "" then {kind: $kind, uploaded_at: $up, lines: ($lines | tonumber)} else $prev end)
                + {source_bytes: ($size | tonumber), seconds_since_last_line: ($age | tonumber), encryption_key_set: ($haskey == "true")})}
       + (if $cmd != null then {command: ($cmd | del(.dir, .pid))} else {} end)
-      + (if $shut != null then {shutdown: $shut} else {} end)' \
+      + (if $shut != null then {shutdown: $shut} else {} end)
+      + (if $start != null then {startup: $start} else {} end)' \
    "${status_src}" > "${folder}/status.json.tmp" && mv -f "${folder}/status.json.tmp" "${folder}/status.json" \
    || { say "could not write status.json"; exit 0; }
 

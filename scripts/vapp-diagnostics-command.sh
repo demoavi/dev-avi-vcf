@@ -25,6 +25,9 @@
 #                                first). args: dry_run (--dry-run), skip_flush (--skip-flush), flush_minutes (0-240, --flush-minutes),
 #                                from (a phase of vcf_shutdown.sh: --from, resumes a run that stopped). The vApp itself is
 #                                powered off afterwards by the operator through VCD, not by the gw.
+#   platform-startup             vcf_startup.sh <json>: starts the nested platform in order, gated (see the script). args: dry_run (--dry-run),
+#                                no_orgs (--no-orgs), from (a phase of vcf_startup.sh: --from, resumes a run that stopped), force (--force: without the
+#                                cycle-complete marker of a finished shutdown). Normally it runs by itself after a boot (the @reboot entry, --auto).
 # No conflict: the others start only when no bootstrap phase, vcfa_org.sh or cleaning run is on the gw and no earlier command is still
 # running; until then the command is "waiting" and is looked at again every minute until it expires. One command at a time.
 #
@@ -138,6 +141,14 @@ case "${action}" in
       case " ${sd_phases} " in *" ${fp} "*) frm=(--from "${fp}") ;; *) finish_without_running refused "args.from is not a phase of vcf_shutdown.sh" ;; esac
     fi
     cmd=(bash "${script_dir}/vcf_shutdown.sh" "${jsonFile}" "${dry[@]}" "${skf[@]}" "${fmo[@]}" "${frm[@]}") ;;
+  platform-startup)
+    sdr=(); [ "$(echo "${args}" | jq -r '.no_orgs // false')" == "true" ] && sdr+=(--no-orgs); [ "$(echo "${args}" | jq -r '.force // false')" == "true" ] && sdr+=(--force)
+    fp=$(echo "${args}" | jq -r '.from // empty')
+    if [ -n "${fp}" ]; then
+      su_phases=$(sed -n 's/^phases="\(.*\)"$/\1/p' "${script_dir}/vcf_startup.sh" | head -1)
+      case " ${su_phases} " in *" ${fp} "*) sdr+=(--from "${fp}") ;; *) finish_without_running refused "args.from is not a phase of vcf_startup.sh" ;; esac
+    fi
+    cmd=(bash "${script_dir}/vcf_startup.sh" "${jsonFile}" "${dry[@]}" "${sdr[@]}") ;;
   *) finish_without_running refused "unknown action '${action}'" ;;
 esac
 

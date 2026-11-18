@@ -164,7 +164,8 @@ phase_inventory() {
   rm -f "${state_dir}/cycle-complete"
   vc govc find / -type m 2> /dev/null | while IFS= read -r p; do vc govc vm.info -json "${p}" 2> /dev/null | jq -c '.virtualMachines[] | {name, power: .runtime.powerState, host: .runtime.host.value, ip: (.guest.ipAddress // null), guestId: .config.guestId, template: .config.template}'; done | jq -s . > "${out}"
   # host morefs -> names, so the startup can put the edges back where they were
-  vc govc host.info -json 2> /dev/null | jq '[.hostSystems[] | {moref: .self.value, name: .name}]' > "${state_dir}/host-morefs.json"
+  # govc host.info without a path fails with several hosts ("default host resolves to multiple instances"): one call per host
+  for hp in $(vc govc find / -type h 2> /dev/null); do vc govc host.info -json "${hp}" 2> /dev/null | jq -c '.hostSystems[]? | {moref: .self.value, name: .name}'; done | jq -s . > "${state_dir}/host-morefs.json"
   jq -r '.[] | select(.power == "poweredOn") | .name' "${out}" | sort > "${state_dir}/powered-on-before.txt"
   say "  $(jq 'length' "${out}") VMs, $(wc -l < "${state_dir}/powered-on-before.txt") powered on; placement of the edges: $(jq -r '[.[] | select(.name | test("^edge-")) | "\(.name)=\(.host)"] | join(" ")' "${out}")"
 }
