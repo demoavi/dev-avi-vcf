@@ -20,6 +20,9 @@
 #                 (inventory-before.json), then the fabric: every edge and host transport node UP with 0 tunnels down
 #   avi           THE GATE: nothing of Avi starts before the fabric is whole (an edge with its tunnels down made the controller create an extra SE on 2026-11-16).
 #                 Then controller and service engines TOGETHER, controller API, service engines OPER_UP
+#   avi-trust     NSX's Avi endpoint holds the certificate the controller serves (SDDC Manager registered the default portal certificate, replaced it 45 s later and never
+#                 updated NSX; after a reboot the controller serves the new one and AKO crash-loops on x509). When they differ, the endpoint is saved and patched, then the
+#                 supervisor phase waits for WCP to rewrite AKO's secret and restarts the AKO pods once
 #   services      SDDC Manager and the VSP VMs together (VSP recovers by itself, 5480 answers), then VCF Operations and VCF Automation together (node Ready,
 #                 vmsp-operator back to 1 if it is 0)
 #   supervisor    WCP started, the Supervisor VM on (WCP does it; through its host when it did not), then WCP RESTARTED once Avi is up (WCP configured its load
@@ -224,10 +227,40 @@ sup_ready() {   # the Supervisor as WCP sees it (config RUNNING, kubernetes READ
 }
 vault_ok() { [ "$(curl -sk -m 8 -o /dev/null -w '%{http_code}' https://127.0.0.1:8200/v1/sys/health)" == "200" ]; }
 sup_vm_on() { local p; p=$(vm_paths "${PAT_SUPERVISOR}" | head -1); [ -n "${p}" ] && [ "$(vm_power "${p}")" == "poweredOn" ]; }
+# ---- Avi trust: NSX's Avi endpoint (alb-endpoint) must hold the certificate the controller serves; AKO's avi-secret is written from it ----------
+# Found on 2026-11-18: SDDC Manager registered Avi in NSX with the default portal certificate, replaced the portal certificate 45 s later and never updated the
+# endpoint; the controller only started to serve the new one after a reboot, and AKO (pinned to the old one) crash-looped with "x509: certificate signed by unknown authority".
+nsx_alb_url() { echo "https://${ip_nsx_node}/policy/api/v1/infra/sites/default/enforcement-points/alb-endpoint"; }
+served_cert_pem() { echo | openssl s_client -connect "${1}:${2:-443}" -servername "${1}" 2> /dev/null | openssl x509 2> /dev/null; }   # the leaf the controller presents now
+cert_fp() { openssl x509 -noout -fingerprint -sha256 2> /dev/null | sed 's/.*=//'; }   # PEM on stdin
+cert_line() { openssl x509 -noout -subject -dates 2> /dev/null | paste -sd ' ' -; }   # PEM on stdin
+sup_get_creds() {   # SUPIP / SUPPW: the Supervisor control plane and its root password, from the vCenter; the password is never printed
+  local out; out=$(wcp_ssh_raw 'shell /usr/lib/vmware-wcp/decryptK8Pwd.py' | awk '/^IP:/ {ip=$2} /^PWD:/ {p=$2} END {print ip, p}')
+  read -r SUPIP SUPPW <<< "${out}"; [ -n "${SUPIP}" ] && [ -n "${SUPPW}" ]
+}
+sup_creds_wait() { local t0; t0=$(date +%s); while ! sup_get_creds; do [ $(( $(date +%s) - t0 )) -ge 900 ] && return 1; sleep 30; done; }   # in this shell: wait_until runs its check in a subshell and would lose SUPIP/SUPPW
+wcp_ssh_raw() { sshpass -e ssh ${ssh_pw} "root@${vc_fqdn}" "$1" 2> /dev/null; }
+sup_run() { SSHPASS="${SUPPW}" sshpass -e ssh ${ssh_pw} "root@${SUPIP}" "export KUBECONFIG=/etc/kubernetes/admin.conf; $1" 2>&1 | grep -vE "pq.html|post-quantum|^\*\*|banner"; }
+avi_secret_trusts() {   # the CA in AKO's avi-secret verifies the certificate the controller serves (a pinned leaf or its CA both count)
+  local addr="${1}" served ca rc
+  served=$(mktemp); ca=$(mktemp)
+  served_cert_pem "${addr}" > "${served}"
+  sup_run 'kubectl -n vmware-system-ako get secret avi-secret -o jsonpath="{.data.certificateAuthorityData}" | base64 -d' > "${ca}"
+  if [ -s "${served}" ] && openssl verify -partial_chain -CAfile "${ca}" "${served}" > /dev/null 2>&1; then rc=0; echo "avi-secret trusts the served certificate"
+  else rc=1; echo "avi-secret CA: $(cert_line < "${ca}" | cut -c1-110)"; fi
+  rm -f "${served}" "${ca}"; return "${rc}"
+}
+ako_diagnose() {   # why the AKO pods do not come up, from their own logs: one line per cause found
+  local out; out=$(sup_run 'N=vmware-system-ako; for p in $(kubectl -n $N get pods --no-headers | awk "{print \$1}"); do kubectl -n $N logs $p --all-containers --tail=60 2>&1; done' | sed 's/\x1b\[[0-9;]*m//g')
+  echo "${out}" | grep -q "x509: certificate signed by unknown authority" && say "AKO diagnosis: TLS trust: the controller's certificate is not the one AKO holds (phase avi-trust repairs NSX's copy; the Supervisor side needs its secret refreshed)"
+  echo "${out}" | grep -q "HTTP code: 423" && say "AKO diagnosis: the Avi account is locked after failed logins (Avi unlocks it by itself after about 5 minutes; do not restart the AKO pods meanwhile, every restart is another login attempt)"
+  echo "${out}" | grep -qE "HTTP code: 401|authentication failed|invalid token" && say "AKO diagnosis: the Avi login is refused (expired token or password of ${AVI_SA:-nsxt-alb}): re-onboard Avi in NSX or reset that user in Avi"
+  return 0
+}
 gitea_up() { [ "$(curl -sk -m 8 -o /dev/null -w '%{http_code}' "https://${git_fqdn}/")" == "200" ]; }
 
 # ---- the phases ------------------------------------------------------------------------------------------------------------------------------
-phases="identify gw hosts vcenter nsx avi services supervisor k8s-shared vcfa-wait orgs finish"
+phases="identify gw hosts vcenter nsx avi avi-trust services supervisor k8s-shared vcfa-wait orgs finish"
 
 phase_identify() {
   local running resp rec name uuid old_uuid cur
@@ -333,6 +366,37 @@ phase_avi() {
   return 0
 }
 
+phase_avi_trust() {
+  # NSX's alb-endpoint must carry the certificate the controller serves now. Same call that repaired 6-02 by hand on 2026-11-18 (PATCH with the new certificate and
+  # the Avi admin credentials: NSX refuses a PATCH without connection_info.password). Nothing happens when they already match.
+  local url ep addr served stored fp_s fp_n bak body http reply
+  url="$(nsx_alb_url)"
+  ep=$(curl -sk -m 30 -u "admin:${pw}" "${url}")
+  if ! echo "${ep}" | jq -e '.connection_info' > /dev/null 2>&1; then
+    [ "${dry_run}" == "true" ] && { say "[dry-run] NSX does not answer with an Avi endpoint now (the NSX manager is not up): would compare the stored and the served certificate"; return 0; }
+    say "NSX has no Avi endpoint (alb-endpoint) or does not answer: nothing to check"; return 0
+  fi
+  addr=$(echo "${ep}" | jq -r '.connection_info.enforcement_point_address'); stored=$(echo "${ep}" | jq -r '.connection_info.certificate // empty')
+  served=$(served_cert_pem "${addr}")
+  [ -n "${served}" ] || { say "the Avi controller at ${addr} does not present a certificate"; return 1; }
+  fp_s=$(echo "${served}" | cert_fp); fp_n=$(echo "${stored}" | cert_fp)
+  if [ "${fp_s}" == "${fp_n}" ]; then say "NSX's Avi endpoint holds the certificate the controller serves at ${addr}: nothing to do ($(echo "${served}" | cert_line | cut -c1-90))"; return 0; fi
+  say "MISMATCH at ${addr}: the controller serves   $(echo "${served}" | cert_line)"
+  say "                       NSX's Avi endpoint holds $(echo "${stored}" | cert_line)"
+  # what is patched in must be what the controller really serves, for this address, and valid
+  echo "${served}" | openssl x509 -noout -ext subjectAltName 2> /dev/null | grep -q "${addr}" || { say "the served certificate does not list ${addr} in its subject alternative names: not touching NSX"; return 1; }
+  echo "${served}" | openssl x509 -noout -checkend 0 > /dev/null 2>&1 || { say "the served certificate is expired: not touching NSX"; return 1; }
+  if [ "${dry_run}" == "true" ]; then say "[dry-run] would: save the endpoint, PATCH its certificate (and username admin + the Avi admin password), read it back"; return 0; fi
+  bak="${state_dir}/alb-endpoint.before-$(date +%Y%m%d%H%M%S).json"; echo "${ep}" > "${bak}"; say "saved the endpoint object to ${bak} (restore: PATCH its connection_info back, with the Avi admin password)"
+  body=$(echo "${ep}" | AVIPW="${pw}" jq --arg p "${served}" '{resource_type, id, display_name, connection_info: (.connection_info | .certificate = $p | .username = "admin" | .password = env.AVIPW), _revision}')
+  reply=$(echo "${body}" | curl -sk -m 90 -u "admin:${pw}" -X PATCH -H 'Content-Type: application/json' -d @- "${url}" -w '\n%{http_code}')
+  http=$(echo "${reply}" | tail -1)
+  [ "${http}" == "200" ] || { say "NSX refused the update (HTTP ${http}): $(echo "${reply}" | head -n -1 | jq -r '.error_message // empty' 2> /dev/null | cut -c1-200)"; return 1; }
+  stored=$(curl -sk -m 30 -u "admin:${pw}" "${url}" | jq -r '.connection_info.certificate // empty')
+  [ "$(echo "${stored}" | cert_fp)" == "${fp_s}" ] || { say "NSX answered 200 but the endpoint still holds another certificate"; return 1; }
+  say "NSX's Avi endpoint now holds the served certificate ($(echo "${stored}" | cert_line | cut -c1-90)); WCP rewrites AKO's secret from it within about 10 minutes (the supervisor phase waits for that)"
+}
+
 phase_services() {
   start_group "sddc manager" "${PAT_SDDCM}"
   start_group "vsp" "${PAT_VSP}"
@@ -358,7 +422,17 @@ phase_supervisor() {
     || { for ip in ${host_ips}; do p=$(vm_paths "${PAT_SUPERVISOR}" "${ip}" | head -1); [ -n "${p}" ] && { act "power on the Supervisor VM through its host ${ip}" quiet onhost "${ip}" govc vm.power -on "${p}"; break; }; done; }
   # WCP configured its load balancer while Avi did not answer and does not retry: restart it now that Avi is up
   act "restart WCP once Avi is up (shell vmon-cli -r wcp)" quiet wcp_ssh "shell vmon-cli -r wcp"
-  wait_until "Supervisor kubernetes=READY and the AKO pods Running (about 11 minutes after the restart)" 2400 60 sup_ready || return 1
+  # AKO's avi-secret is rewritten by WCP from NSX's Avi endpoint (phase avi-trust): when its CA does not verify the controller's certificate yet, wait for the rewrite
+  # and restart the AKO pods ONCE (each restart is another login attempt: after failed logins Avi locks the account for about 5 minutes)
+  local avi_addr; avi_addr=$(curl -sk -m 30 -u "admin:${pw}" "$(nsx_alb_url)" | jq -r '.connection_info.enforcement_point_address // empty' 2> /dev/null)
+  if [ "${dry_run}" == "true" ]; then say "[dry-run] would: read the Supervisor root access, wait until avi-secret's CA verifies the certificate served at ${avi_addr:-the Avi endpoint}, restart the AKO pods once"
+  elif [ -n "${avi_addr}" ] && sup_creds_wait; then
+    if avi_secret_trusts "${avi_addr}" > /dev/null; then say "  avi-secret already trusts the controller's certificate"
+    elif wait_until "avi-secret holds a CA that verifies the controller's certificate (WCP rewrites it from NSX, about 10 minutes)" 1500 30 avi_secret_trusts "${avi_addr}"; then
+      act "restart the AKO pods once, now that their secret is right" quiet sup_run 'kubectl -n vmware-system-ako delete pod --all'
+    else warn "avi-secret still does not verify the controller's certificate"; fi
+  else warn "cannot reach the Supervisor as root: AKO's secret is not checked"; fi
+  wait_until "Supervisor kubernetes=READY and the AKO pods Running (about 11 minutes after the restart)" 2400 60 sup_ready || { [ "${dry_run}" == "true" ] || { sup_get_creds && ako_diagnose; }; return 1; }
 }
 
 phase_k8s_shared() {
@@ -392,7 +466,7 @@ phase_orgs() {
   local d=(); [ "${no_orgs}" == "true" ] && { say "--no-orgs: not adding the orgs"; return 0; }
   [ "${dry_run}" == "true" ] && d=(--dry-run)
   say "vcfa_org.sh add --all (the orgs that vcfa_org.sh delete --all removed; about 10 to 30 minutes each)"
-  bash "${script_dir}/vcfa_org.sh" add --all --yes "${d[@]}" --json "${jsonFile}" 2>&1 | sed 's/^/    /' | tee -a "${log_file}" | tail -40
+  bash "${script_dir}/vcfa_org.sh" add --all --yes "${d[@]}" --json "${jsonFile}" 2>&1 | sed -u 's/^/    /' | tee -a "${log_file}"   # sed -u: a buffered sed held the lines back for hours
   return "${PIPESTATUS[0]}"
 }
 
