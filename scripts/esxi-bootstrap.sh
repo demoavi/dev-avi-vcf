@@ -167,13 +167,15 @@ do
   done
   sleep 60
   # an empty thumbprint ends as "NO_SSL_THUMB" in the installer's validation 40 minutes later: ask again a few times (the TLS service of a fresh host can need a moment)
+  # (the sddc use case keeps its single, ungated attempt: an empty thumbprint is written to hostSpecs as before)
   esxi_sslThumbprint=""
-  for try in 1 2 3 4 5 6; do
+  thumb_tries=1 ; [ "${deployment_kind}" == "vApp" ] && thumb_tries=6
+  for try in $(seq 1 ${thumb_tries}); do
     esxi_sslThumbprint=$(echo | openssl s_client -servername ${ip_esxi} -connect ${ip_esxi}:443 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | awk -F'Fingerprint=' '{print $2}')
     [ -n "${esxi_sslThumbprint}" ] && break
-    echo "Attempt ${try}: no TLS thumbprint from ${ip_esxi} yet"; sleep 10
+    [ "${try}" -lt "${thumb_tries}" ] && { echo "Attempt ${try}: no TLS thumbprint from ${ip_esxi} yet"; sleep 10; }
   done
-  if [ -z "${esxi_sslThumbprint}" ]; then
+  if [ -z "${esxi_sslThumbprint}" ] && [ "${deployment_kind}" == "vApp" ]; then
     echo "ERROR: no TLS thumbprint from ESXi host ${name_esxi} (${ip_esxi}) after 6 attempts"
     failed_hosts="${failed_hosts} ${name_esxi}"
     continue
