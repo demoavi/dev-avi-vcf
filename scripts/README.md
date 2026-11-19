@@ -62,7 +62,13 @@ Vault's root token and TLS cert) and `k8s-bootstrap` (ClusterIssuer).
 
 ### 5. `esxi-bootstrap.sh`
 Powers on and waits for the nested ESXi VMs (sized by `esx.dynamic_sizing_mgmt`, which scales with org count), marks
-their disks as SSD, and builds the `hostSpecs` JSON handed to the next phase through a temp file. (sddc use case: ejects
+their disks as SSD, and builds the `hostSpecs` JSON handed to the next phase through a temp file.
+**vApp: who powers the hosts on, and what the phase checks.** With `vms.esx.powerOn: false` (CR) the operator builds each host (boot ISO uploaded and inserted) and leaves it **off**; the phase powers every host on itself, in the
+background so the installs run in parallel, once its boot ISO is inserted **and** its kickstart answers `200` on `http://<ip_gw>/kickstart/KS_<host>.CFG` (the URL of the ISO's boot line). Without the setting the operator powers the hosts on at creation (the old behaviour:
+the first hosts could boot before gw-setup had written the kickstarts, and got 404s, edu 12-org 2026-11-19) and the phase only waits for them. **Rollout order: push this script first, set `powerOn: false` only afterwards**: an old script with `powerOn: false` waits 100 minutes for a host that never starts.
+Per host: https answers (25 minutes, then ONE reset of the VM, then 25 more, then the host is recorded as failed), the TLS thumbprint (6 attempts), then a **clean reboot** (guest shutdown, hard power off only as a fallback; a hard power off right after the first boot lost the
+`%firstboot` network settings of two hosts on 2026-11-18), https again (15 minutes), SSD marking. The phase **ends with exit code 1 and the list of hosts** when a host never started, never answered or gave no thumbprint (before, the installer's validation failed 40
+minutes later with `NO_SSL_THUMB` or `ESXI_PING`); every step can be run again with `vcf_bootstrap.sh <json> --from esxi-bootstrap`. Tested with mocked VCD and web calls and the real XML of VCD VMs, not on a live build yet. (sddc use case: ejects
 the kickstart ISOs; it talks to the external vCenter through govc.)
 
 ### 6. `vcf-installer-bootstrap.sh`

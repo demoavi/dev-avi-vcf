@@ -62,14 +62,12 @@ vcd_find_vm_href() {
   done
 }
 
-# Gates on the operator having actually finished this host's boot-ISO
-# upload+insert before we ever hit its HTTPS reachability loop below -
-# vapp_operator.py only powers an ESXi VM on AFTER its media upload/insert
-# completes, and that pipeline is serialized per host (host 1 alone pays
-# the one-time base-ISO download+extract cost), so it can legitimately take
-# far longer than a fixed HTTPS-reachability timeout budget. Polling this
-# real signal instead avoids racing a guessed duration against however long
-# that upload happens to take. Confirmed live against this VCD's own
+# Gates on the ESXi VM being powered on before we ever hit its HTTPS reachability loop below -
+# vapp_operator.py inserts the boot ISO as its last step per host (that pipeline is serialized per host: host 1 alone pays
+# the one-time base-ISO download+extract cost, so it can take far longer than a fixed HTTPS-reachability timeout budget).
+# Either the operator powers the VM on right after that (vms.esx.powerOn true, the default), or - with vms.esx.powerOn: false - the gw
+# does it itself from esxi-bootstrap.sh (esx_power_on_when_ready) once the ISO is inserted AND the kickstart is served. Polling the VM's
+# POWERED_ON status is the real signal in both cases, instead of racing a guessed duration against however long the upload takes. Confirmed live against this VCD's own
 # api/query?type=vm records: the field is a plain string, "status" ==
 # "POWERED_ON"/"POWERED_OFF" (not a numeric/XML status code).
 vcd_wait_vm_powered_on() {
